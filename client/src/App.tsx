@@ -712,35 +712,69 @@ function MachineConnectionStatus({
 
 function UsageLimitSidebarPanel({ requests, now }: { requests: CodexRequest[], now: number }) {
   const active = requests.length > 0
+  const buckets = usageLimitBuckets(requests, now)
 
   return (
     <div className={`usage-sidebar ${active ? 'usage-sidebar--limited' : ''}`}>
       <div className="usage-sidebar-head">
-        <span>GPT usage</span>
-        <span className="usage-sidebar-pill">{active ? `${requests.length} paused` : 'OK'}</span>
+        <span>GPT usage level</span>
+        <span className="usage-sidebar-pill">{active ? `${requests.length} paused` : 'No pauses'}</span>
       </div>
-      {active ? (
-        <div className="usage-sidebar-list">
-          {requests.slice(0, 3).map((request) => {
-            const limitedRun = request.runs.find((run) => run.status === 'UsageLimited')
-            const model = limitedRun?.model || request.model
-            const retryAfter = limitedRun?.retryAfter ?? request.retryAfter
-            const remaining = retryAfter ? formatRemainingTime(retryAfter, now) : null
-            return (
-              <div key={request.id} className="usage-sidebar-item">
-                <div className="truncate">{model}</div>
-                <div className="meta truncate">{request.projectName || shortId(request.id)}</div>
-                <div className="meta truncate">{remaining ? `Resume in ${remaining}` : retryAfter ? `Ready ${formatDate(retryAfter)}` : 'Retry window unknown'}</div>
-              </div>
-            )
-          })}
-          {requests.length > 3 && <div className="meta">+{requests.length - 3} more paused</div>}
-        </div>
-      ) : (
-        <div className="meta">No model is paused by usage limits.</div>
-      )}
+      <div className="usage-sidebar-list">
+        {buckets.map((bucket) => (
+          <div key={bucket.label} className={`usage-sidebar-item ${bucket.limited ? 'limited' : ''}`}>
+            <div className="usage-row-head">
+              <span className="truncate">{bucket.label}</span>
+              <span>{bucket.limited ? 'paused' : 'unknown'}</span>
+            </div>
+            <div className="meta truncate">{bucket.message}</div>
+            {bucket.detail && <div className="meta truncate">{bucket.detail}</div>}
+          </div>
+        ))}
+      </div>
     </div>
   )
+}
+
+function usageLimitBuckets(requests: CodexRequest[], now: number) {
+  const limits = requests.map((request) => {
+    const limitedRun = request.runs.find((run) => run.status === 'UsageLimited')
+    const model = limitedRun?.model || request.model
+    const retryAfter = limitedRun?.retryAfter ?? request.retryAfter
+    return {
+      request,
+      model,
+      retryAfter,
+      remaining: retryAfter ? formatRemainingTime(retryAfter, now) : null,
+      reason: limitedRun?.retryReason ?? request.retryReason,
+    }
+  })
+  const spark = limits.find((limit) => /5\.3|spark/i.test(limit.model))
+  const anyLimit = limits[0]
+
+  return [
+    usageLimitBucket('5h limit', anyLimit),
+    usageLimitBucket('Weekly limit', limits.find((limit) => /week|weekly/i.test(limit.reason ?? ''))),
+    usageLimitBucket('GPT-5.3 Codex Spark', spark),
+  ]
+}
+
+function usageLimitBucket(label: string, limit?: { request: CodexRequest; model: string; retryAfter?: string | null; remaining: string | null }) {
+  if (!limit) {
+    return {
+      label,
+      limited: false,
+      message: 'Remaining quota is not exposed by Codex CLI.',
+      detail: 'Will update after a usage-limit response.',
+    }
+  }
+
+  return {
+    label,
+    limited: true,
+    message: limit.remaining ? `Resume in ${limit.remaining}` : limit.retryAfter ? `Ready ${formatDate(limit.retryAfter)}` : 'Retry window unknown',
+    detail: `${limit.model} · ${limit.request.projectName || shortId(limit.request.id)}`,
+  }
 }
 
 function MachineModal({
@@ -2447,7 +2481,6 @@ function lastUsefulText(output: string) {
 
 function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: number }) {
   const commitRun = request?.runs.find((run) => run.kind === 'Commit')
-  const requestRun = request?.runs.find((run) => run.kind === 'Request')
 
   if (!request) {
     return (
@@ -2510,13 +2543,13 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
           <StructuredBodyView content={run.output} emptyText="No output yet." />
         </div>
       ))}
-      {request.generateCommit && request.separateCommitSession && !commitRun && (
+      {request.generateCommit && !commitRun && (
         <div className="pending-run-row">
           <div className="run-title-stack">
             <strong>Commit</strong>
             <ModelChips model={request.commitModel || request.model} effort={request.commitModelEffort || request.modelEffort} speed={request.commitModelSpeed || request.modelSpeed} />
           </div>
-          <StatusBadge status="Queued" busy={requestRun?.status === 'Succeeded'} />
+          <StatusBadge status="Queued" />
         </div>
       )}
     </aside>
@@ -2547,6 +2580,8 @@ function ProjectTerminal({
   const limitedRequest = requests.find((request) => request.status === 'UsageLimited')
   const limitedRemaining = limitedRequest?.retryAfter ? formatRemainingTime(limitedRequest.retryAfter, now) : null
   const promptPath = terminalPathLabel(project.path)
+  const secretPrompt = isTerminalSecretPrompt(terminalOutput)
+  const replyPrompt = secretPrompt || isTerminalReplyPrompt(terminalOutput)
 
   useEffect(() => {
     screenRef.current?.scrollTo({ top: screenRef.current.scrollHeight })
@@ -2593,7 +2628,11 @@ function ProjectTerminal({
       return
     }
 
-    setTerminalOutput((current) => current + `${project.machineName}:${promptPath}$ ${trimmed}\n`)
+    setTerminalOutput((current) => {
+      if (secretPrompt) return current + '\n'
+      if (replyPrompt) return current + `${trimmed}\n`
+      return current + `${project.machineName}:${promptPath}$ ${trimmed}\n`
+    })
     socketRef.current.send(`${trimmed}\n`)
   }
 
@@ -2667,6 +2706,7 @@ function ProjectTerminal({
               }}
               onKeyDown={handleTerminalKeyDown}
               readOnly={socketStatus !== 'connected'}
+              type={secretPrompt ? 'password' : 'text'}
               spellCheck={false}
               autoCapitalize="off"
               autoComplete="off"
@@ -2706,6 +2746,19 @@ function terminalPathLabel(path: string) {
   const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '')
   const name = normalized.split('/').filter(Boolean).at(-1)
   return name ? `~/${name}` : '~'
+}
+
+function terminalLastLine(output: string) {
+  return output.replace(/\r/g, '').split('\n').at(-1)?.trim() ?? ''
+}
+
+function isTerminalSecretPrompt(output: string) {
+  return /password(?: for [^:]+)?\s*:?\s*$/i.test(terminalLastLine(output))
+}
+
+function isTerminalReplyPrompt(output: string) {
+  const line = terminalLastLine(output)
+  return /(\[[yYnN]\/[yYnN]\]|\(yes\/no\)|yes\/no|\?|:)\s*$/.test(line)
 }
 
 function parseAnsiOutput(value: string) {
@@ -2772,7 +2825,7 @@ function progressFor(request: CodexRequest) {
   const requestRun = request.runs.find((run) => run.kind === 'Request')
   const commitRun = request.runs.find((run) => run.kind === 'Commit')
   if (commitRun?.status === 'Running') return 82
-  if (requestRun?.status === 'Succeeded' && request.generateCommit && request.separateCommitSession) return 68
+  if (requestRun?.status === 'Succeeded' && request.generateCommit) return 68
   return 42
 }
 

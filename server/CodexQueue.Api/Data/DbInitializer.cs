@@ -238,7 +238,7 @@ public static class DbInitializer
         }
 
         var commitRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Commit);
-        if (!UsesSeparateCommitSession(request))
+        if (!request.GenerateCommit)
         {
             CancelUnusedCommitRun(commitRun);
             MarkRequestSucceeded(request, requestRun);
@@ -289,9 +289,6 @@ public static class DbInitializer
         run.ModelSpeed = useRequestModel ? request.ModelSpeed : request.CommitModelSpeed;
         return run;
     }
-
-    private static bool UsesSeparateCommitSession(CodexRequest request) =>
-        request.GenerateCommit && request.SeparateCommitSession;
 
     private static void CancelUnusedCommitRun(CodexRun? commitRun)
     {

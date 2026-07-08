@@ -184,6 +184,7 @@ public sealed class QueueWorker(
     {
         _lastHeartbeat = DateTimeOffset.UtcNow;
         CodexRequest? request;
+        RunKind? nextRunKind = null;
         await using (var scope = scopeFactory.CreateAsyncScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -211,6 +212,7 @@ public sealed class QueueWorker(
                 {
                     nextRequestId = candidate.Id;
                     nextRunId = candidateRun.Id;
+                    nextRunKind = candidateRun.Kind;
                     break;
                 }
             }
@@ -247,7 +249,15 @@ public sealed class QueueWorker(
             }
         }
 
-        await RunRequestAsync(request.Id, stoppingToken);
+        if (nextRunKind == RunKind.Commit)
+        {
+            await RunCommitAsync(request.Id, stoppingToken);
+        }
+        else
+        {
+            await RunRequestAsync(request.Id, stoppingToken);
+        }
+
         return true;
     }
 
@@ -268,7 +278,7 @@ public sealed class QueueWorker(
             await using var scope = scopeFactory.CreateAsyncScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             var request = await db.Requests.Include(x => x.Runs).FirstAsync(x => x.Id == requestId, stoppingToken);
-            if (!UsesSeparateCommitSession(request))
+            if (!request.GenerateCommit)
             {
                 request.Status = QueueStatus.Succeeded;
                 request.FinishedAt = DateTimeOffset.UtcNow;
@@ -306,19 +316,27 @@ public sealed class QueueWorker(
                 ResetRunForResume(commitRun);
             }
 
-            request.Status = QueueStatus.Running;
+            request.Status = request.SeparateCommitSession ? QueueStatus.Queued : QueueStatus.Running;
             request.Error = null;
             request.FinishedAt = null;
             if (!await TrySaveChangesAsync(db, "prepare commit run", stoppingToken))
             {
                 return;
             }
+
+            if (!request.SeparateCommitSession)
+            {
+                await RunCommitAsync(requestId, stoppingToken);
+            }
         }
         finally
         {
             _activeRequests.TryRemove(requestId, out _);
         }
+    }
 
+    private async Task RunCommitAsync(Guid requestId, CancellationToken stoppingToken)
+    {
         using var commitCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         var commitTimedOut = false;
         using var commitTimeout = new Timer(_ =>
@@ -375,18 +393,24 @@ public sealed class QueueWorker(
         {
             if (kind == RunKind.Commit)
             {
-                var commitPrompt = BuildProjectScopedPrompt(projectPath, BuildCommitPrompt());
-                var commitResult = await runner.RunCodexAsync(
-                    machine,
-                    projectPath,
-                    run.Model,
-                    run.ModelEffort,
-                    run.ModelSpeed,
-                    project.CodexSessionId,
-                    null,
-                    commitPrompt,
-                    chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
-                    cancellationToken);
+                var commitResult = request.SeparateCommitSession
+                    ? await runner.RunCodexAsync(
+                        machine,
+                        projectPath,
+                        run.Model,
+                        run.ModelEffort,
+                        run.ModelSpeed,
+                        project.CodexSessionId,
+                        null,
+                        BuildProjectScopedPrompt(projectPath, BuildCommitPrompt()),
+                        chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
+                        cancellationToken)
+                    : await runner.RunShellAsync(
+                        machine,
+                        projectPath,
+                        BuildCommitShellCommand(machine, BuildCommitMessage(request.Prompt)),
+                        chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
+                        cancellationToken);
 
                 await CompleteRunAsync(requestId, run.Id, kind, commitResult, cancellationToken);
                 return commitResult.Success;
@@ -486,14 +510,14 @@ public sealed class QueueWorker(
             changed = true;
         }
 
-        if (requestRun.Status == QueueStatus.Succeeded && !UsesSeparateCommitSession(request) && request.Status != QueueStatus.Succeeded)
+        if (requestRun.Status == QueueStatus.Succeeded && !request.GenerateCommit && request.Status != QueueStatus.Succeeded)
         {
             CancelUnusedCommitRun(commitRun);
             MarkRequestSucceeded(request, requestRun);
             return true;
         }
 
-        if (requestRun.Status == QueueStatus.Succeeded && UsesSeparateCommitSession(request))
+        if (requestRun.Status == QueueStatus.Succeeded && request.GenerateCommit)
         {
             if (commitRun?.Status == QueueStatus.Succeeded && request.Status != QueueStatus.Succeeded)
             {
@@ -542,9 +566,6 @@ public sealed class QueueWorker(
         return true;
     }
 
-    private static bool UsesSeparateCommitSession(CodexRequest request) =>
-        request.GenerateCommit && request.SeparateCommitSession;
-
     private static void CancelUnusedCommitRun(CodexRun? commitRun)
     {
         if (commitRun is null || commitRun.Status is QueueStatus.Succeeded or QueueStatus.Failed or QueueStatus.Cancelled)
@@ -570,7 +591,7 @@ public sealed class QueueWorker(
             return requestRun.Status == QueueStatus.Queued ? requestRun : null;
         }
 
-        if (!UsesSeparateCommitSession(request))
+        if (!request.GenerateCommit)
         {
             return null;
         }
@@ -618,7 +639,7 @@ public sealed class QueueWorker(
             return;
         }
 
-        if (!UsesSeparateCommitSession(request))
+        if (!request.GenerateCommit)
         {
             MarkRequestSucceeded(request, requestRun);
             return;
@@ -729,7 +750,7 @@ public sealed class QueueWorker(
                 await PopulateCommitMetadataAsync(db, request, run, cancellationToken);
             }
         }
-        else if (!UsesSeparateCommitSession(request))
+        else if (!request.GenerateCommit)
         {
             request.FinishedAt = run.FinishedAt;
             request.Status = result.Success ? QueueStatus.Succeeded : QueueStatus.Failed;
@@ -1321,9 +1342,8 @@ public sealed class QueueWorker(
         return request.Prompt.TrimEnd()
             + """
 
-
-            After completing the requested changes, create a git commit for this project if there are actual changes.
-            Use one concise commit message. Do not create an empty commit.
+            Do not run git commit in this run.
+            Leave file changes for the queue-managed commit step.
             """;
     }
 

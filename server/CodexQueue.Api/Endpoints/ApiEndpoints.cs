@@ -793,6 +793,15 @@ public static class ApiEndpoints
                     null);
             }
 
+            var scriptBinary = ResolveScriptBinary();
+            if (scriptBinary is not null)
+            {
+                return TerminalStartInfo(
+                    scriptBinary,
+                    new[] { "-q", "-f", "-e", "-c", BuildInteractiveUnixShellCommand(project.Path), "/dev/null" },
+                    null);
+            }
+
             return TerminalStartInfo("/bin/bash", new[] { "-li" }, project.Path);
         }
 
@@ -828,7 +837,7 @@ public static class ApiEndpoints
         arguments.Add(destination);
         arguments.Add(machine.TargetsWindows()
             ? "powershell -NoLogo"
-            : "cd " + QuoteShell(project.Path) + " && exec ${SHELL:-/bin/bash} -li");
+            : BuildInteractiveUnixShellCommand(project.Path));
         return TerminalStartInfo("ssh", arguments, null);
     }
 
@@ -855,6 +864,22 @@ public static class ApiEndpoints
         }
 
         return startInfo;
+    }
+
+    private static string BuildInteractiveUnixShellCommand(string projectPath) =>
+        "cd " + QuoteShell(projectPath) + " && exec ${SHELL:-/bin/bash} -li";
+
+    private static string? ResolveScriptBinary()
+    {
+        foreach (var path in new[] { "/usr/bin/script", "/bin/script" })
+        {
+            if (File.Exists(path))
+            {
+                return path;
+            }
+        }
+
+        return null;
     }
 
     private static async Task PumpTerminalReaderAsync(StreamReader reader, WebSocket socket, CancellationToken cancellationToken)
