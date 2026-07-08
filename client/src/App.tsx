@@ -1248,7 +1248,7 @@ function QueueWorkspace({
               onKickQueue={onKickQueue}
             />
           ) : activeTab === 'history' ? (
-            <RequestHistory requests={historyRequests} deletedRequests={deletedRequests} onDelete={onDeleteRequest} />
+            <RequestHistory requests={historyRequests} deletedRequests={deletedRequests} now={now} onDelete={onDeleteRequest} />
           ) : (
             <ProjectTerminal project={selectedProject} requests={queueRequests} now={now} onError={onError} />
           )}
@@ -2442,14 +2442,29 @@ function formatRemainingTime(retryAfter: string, now: number) {
 function RequestHistory({
   requests,
   deletedRequests,
+  now,
   onDelete,
 }: {
   requests: CodexRequest[]
   deletedRequests: CodexRequest[]
+  now: number
   onDelete: (id: string) => Promise<void>
 }) {
   const [showTrash, setShowTrash] = useState(false)
+  const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null)
   const visibleRequests = showTrash ? deletedRequests : requests
+  const selectedRequest = visibleRequests.find((request) => request.id === selectedRequestId) ?? visibleRequests[0]
+
+  useEffect(() => {
+    if (visibleRequests.length === 0) {
+      setSelectedRequestId(null)
+      return
+    }
+
+    if (!selectedRequestId || !visibleRequests.some((request) => request.id === selectedRequestId)) {
+      setSelectedRequestId(visibleRequests[0].id)
+    }
+  }, [selectedRequestId, visibleRequests])
 
   return (
     <GlassPanel className="history-panel">
@@ -2468,32 +2483,61 @@ function RequestHistory({
           </GlassButton>
         </div>
       </div>
-      <div className="history-list">
-        {visibleRequests.slice(0, 50).map((request) => {
-          const commitRun = request.runs.find((run) => run.kind === 'Commit' && run.commitSha)
-          return (
-            <div key={request.id} className="history-row">
-              <div className="truncate">
-                <div className="project-name truncate">{request.prompt}</div>
-                <div className="meta truncate">
-                  {formatModel(request.model, request.modelEffort, request.modelSpeed)} · {request.deletedAt ? 'trashed' : 'finished'} {formatDate(request.deletedAt ?? request.finishedAt ?? request.createdAt)}
+      <div className="history-workbench">
+        <div className="history-list" aria-label="History requests">
+          {visibleRequests.slice(0, 50).map((request) => {
+            const commitRun = request.runs.find((run) => run.kind === 'Commit' && run.commitSha)
+            const completedAt = request.deletedAt ?? request.finishedAt ?? request.createdAt
+            const duration = formatDurationBetween(request.startedAt ?? request.createdAt, request.finishedAt ?? request.deletedAt ?? request.createdAt)
+            return (
+              <article
+                key={request.id}
+                className={`history-row ${request.id === selectedRequest?.id ? 'active' : ''}`}
+                role="button"
+                tabIndex={0}
+                onClick={() => setSelectedRequestId(request.id)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    setSelectedRequestId(request.id)
+                  }
+                }}
+              >
+                <div className="truncate">
+                  <div className="project-name truncate" title={request.prompt}>{requestDisplayName(request)}</div>
+                  <div className="history-metadata">
+                    <ModelChips model={request.model} effort={request.modelEffort} speed={request.modelSpeed} />
+                    <span className="model-chip model-chip--time">{request.deletedAt ? 'trashed' : 'finished'} {formatDate(completedAt)}</span>
+                    {duration && <span className="model-chip model-chip--time">{duration}</span>}
+                    {request.attachments.length > 0 && <span className="model-chip">{request.attachments.length} files</span>}
+                    {commitRun?.commitSha && <span className="model-chip model-chip--commit">commit {commitRun.commitSha.slice(0, 12)}</span>}
+                  </div>
                 </div>
-                {commitRun?.commitSha && <div className="meta">commit {commitRun.commitSha.slice(0, 12)}</div>}
-              </div>
-              <div className="history-row-actions">
-                <StatusBadge status={request.status} />
-                {!request.deletedAt && (
-                  <GlassButton variant="ghost" size="icon" type="button" title="Move to trash" onClick={() => onDelete(request.id)}>
-                    <Trash2 size={14} />
-                  </GlassButton>
-                )}
-              </div>
-            </div>
-          )
-        })}
-        {visibleRequests.length === 0 && (
-          <span className="muted">{showTrash ? 'Deleted requests will appear here.' : 'Succeeded requests will appear here, newest first.'}</span>
-        )}
+                <div className="history-row-actions">
+                  <StatusBadge status={request.status} />
+                  {!request.deletedAt && (
+                    <GlassButton
+                      variant="ghost"
+                      size="icon"
+                      type="button"
+                      title="Move to trash"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        onDelete(request.id)
+                      }}
+                    >
+                      <Trash2 size={14} />
+                    </GlassButton>
+                  )}
+                </div>
+              </article>
+            )
+          })}
+          {visibleRequests.length === 0 && (
+            <span className="muted">{showTrash ? 'Deleted requests will appear here.' : 'Succeeded requests will appear here, newest first.'}</span>
+          )}
+        </div>
+        <QueueRequestDetails request={selectedRequest} now={now} />
       </div>
     </GlassPanel>
   )
@@ -2781,6 +2825,22 @@ function formatModel(model: string, effort?: string | null, speed?: string | nul
   return parts.join(' ')
 }
 
+function formatDurationBetween(start?: string | null, end?: string | null) {
+  if (!start || !end) return null
+  const startTime = Date.parse(start)
+  const endTime = Date.parse(end)
+  if (Number.isNaN(startTime) || Number.isNaN(endTime) || endTime < startTime) return null
+
+  const totalSeconds = Math.max(1, Math.round((endTime - startTime) / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+
+  if (hours > 0) return `${hours}h ${minutes}m`
+  if (minutes > 0) return `${minutes}m ${seconds}s`
+  return `${seconds}s`
+}
+
 function requestDisplayName(request: CodexRequest) {
   const normalized = request.prompt.replace(/\s+/g, ' ').trim()
   if (!normalized) {
@@ -2803,7 +2863,7 @@ function ModelChips({ model, effort, speed }: { model: string, effort?: string |
     <div className="model-chip-row" aria-label="Selected model settings">
       <span className="model-chip model-chip--model">{model}</span>
       {effort && <span className="model-chip">{effortLabels[effort] ?? effort}</span>}
-      <span className="model-chip">{normalizedSpeed}</span>
+      <span className={`model-chip model-chip--speed ${speed === 'priority' ? 'model-chip--speed-priority' : ''}`}>{normalizedSpeed}</span>
     </div>
   )
 }

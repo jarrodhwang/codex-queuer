@@ -823,10 +823,27 @@
   flex-direction: column;
 }
 
+.history-workbench {
+  min-height: 0;
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: minmax(340px, 1fr) minmax(320px, 42%);
+  gap: 12px;
+  align-items: stretch;
+  overflow: hidden;
+}
+
 .history-panel .history-list {
   min-height: 0;
   overflow: auto;
   padding-right: 4px;
+}
+
+.history-workbench .queue-detail-panel {
+  position: static;
+  height: 100%;
+  max-height: none;
+  box-sizing: border-box;
 }
 
 .queue-worker-status {
@@ -985,6 +1002,22 @@
   max-width: min(240px, 100%);
   background: rgba(219, 234, 254, 0.72);
   color: #1d4ed8;
+}
+
+.model-chip--speed-priority {
+  border-color: rgba(234, 179, 8, 0.3);
+  background: rgba(254, 249, 195, 0.86);
+  color: #a16207;
+}
+
+.model-chip--time {
+  background: rgba(240, 253, 250, 0.78);
+  color: #0f766e;
+}
+
+.model-chip--commit {
+  background: rgba(224, 242, 254, 0.78);
+  color: #0369a1;
 }
 
 .status-badge {
@@ -1520,8 +1553,33 @@
 .history-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
   gap: 10px;
   padding: 10px;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease;
+}
+
+.history-row.active {
+  border-color: rgba(37, 99, 235, 0.42);
+  background: rgba(219, 234, 254, 0.42);
+}
+
+.history-row:focus-visible {
+  outline: 2px solid rgba(37, 99, 235, 0.24);
+  outline-offset: 2px;
+}
+
+.history-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+  min-width: 0;
 }
 
 .history-actions,
@@ -1934,14 +1992,21 @@
     overflow: auto;
   }
 
+  .history-workbench {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
   .queue-panel .request-list,
   .history-panel .history-list,
   .queue-panel .queue-detail-panel,
+  .history-workbench .queue-detail-panel,
   .terminal-screen {
     max-height: 38vh;
   }
 
-  .queue-panel .queue-detail-panel {
+  .queue-panel .queue-detail-panel,
+  .history-workbench .queue-detail-panel {
     height: auto;
   }
 
