@@ -175,6 +175,10 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
+function isOptimisticRequest(id: string) {
+  return id.startsWith('optimistic:')
+}
+
 function App() {
   const [config, setConfig] = useState<ApiConfig>({ requiresToken: false, models: defaultModels })
   const [machines, setMachines] = useState<Machine[]>([])
@@ -188,6 +192,7 @@ function App() {
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([])
   const [activeFileKey, setActiveFileKey] = useState<string | null>(null)
   const [liveNow, setLiveNow] = useState(() => Date.now())
+  const pendingRequestOverridesRef = useRef(new Map<string, Partial<CodexRequest>>())
 
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0]
   const activeFile = openFiles.find((file) => file.key === activeFileKey)
@@ -219,7 +224,17 @@ function App() {
       api.requests(undefined, true),
       api.queueDiagnostics().catch(() => null),
     ])
-    setRequests(nextRequests)
+    setRequests((current) => {
+      const requestsWithOverrides = nextRequests.map((request) => ({
+        ...request,
+        ...pendingRequestOverridesRef.current.get(request.id),
+      }))
+      const optimisticPreviews = current.filter((request) => isOptimisticRequest(request.id))
+      return [
+        ...requestsWithOverrides,
+        ...optimisticPreviews.filter((preview) => !requestsWithOverrides.some((request) => request.id === preview.id)),
+      ]
+    })
     setQueueDiagnostics(nextDiagnostics)
   }, [])
 
@@ -231,13 +246,23 @@ function App() {
     setError(cause instanceof Error ? cause.message : 'Request failed.')
   }, [])
 
-  const addCreatedRequest = useCallback((request: CodexRequest) => {
-    setRequests((current) => {
-      const withoutCreated = current.filter((item) => item.id !== request.id)
-      return [...withoutCreated, request]
-    })
+  const refreshLiveInBackground = useCallback(() => {
     void loadLive().catch(handleApiError)
   }, [handleApiError, loadLive])
+
+  const addCreatedRequest = useCallback((request: CodexRequest, replaceId?: string) => {
+    setRequests((current) => {
+      const withoutCreated = current.filter((item) => item.id !== request.id && item.id !== replaceId)
+      return [...withoutCreated, request]
+    })
+    if (!isOptimisticRequest(request.id)) {
+      refreshLiveInBackground()
+    }
+  }, [refreshLiveInBackground])
+
+  const discardRequestPreview = useCallback((id: string) => {
+    setRequests((current) => current.filter((request) => request.id !== id))
+  }, [])
 
   useEffect(() => {
     loadStatic().then(() => loadLive()).catch(handleApiError)
@@ -349,7 +374,7 @@ function App() {
     setError('')
     try {
       await api.kickQueue()
-      await loadLive()
+      refreshLiveInBackground()
     } catch (cause) {
       handleApiError(cause)
     }
@@ -357,11 +382,18 @@ function App() {
 
   const archiveRequest = async (id: string) => {
     setError('')
+    const archivedAt = new Date().toISOString()
+    pendingRequestOverridesRef.current.set(id, { archivedAt })
+    setRequests((current) => current.map((request) => (request.id === id ? { ...request, archivedAt } : request)))
     try {
-      await api.archiveRequest(id)
-      await loadLive()
+      const updated = await api.archiveRequest(id)
+      pendingRequestOverridesRef.current.delete(id)
+      setRequests((current) => current.map((request) => (request.id === id ? updated : request)))
+      refreshLiveInBackground()
     } catch (cause) {
+      pendingRequestOverridesRef.current.delete(id)
       handleApiError(cause)
+      refreshLiveInBackground()
     }
   }
 
@@ -369,32 +401,67 @@ function App() {
     if (ids.length === 0) return
 
     setError('')
+    const archivedAt = new Date().toISOString()
+    const idSet = new Set(ids)
+    ids.forEach((id) => pendingRequestOverridesRef.current.set(id, { archivedAt }))
+    setRequests((current) => current.map((request) => (idSet.has(request.id) ? { ...request, archivedAt } : request)))
     try {
-      await Promise.all(ids.map((id) => api.archiveRequest(id)))
-      await loadLive()
+      const updatedRequests = await Promise.all(ids.map((id) => api.archiveRequest(id)))
+      ids.forEach((id) => pendingRequestOverridesRef.current.delete(id))
+      const updatedById = new Map(updatedRequests.map((request) => [request.id, request]))
+      setRequests((current) => current.map((request) => updatedById.get(request.id) ?? request))
+      refreshLiveInBackground()
     } catch (cause) {
+      ids.forEach((id) => pendingRequestOverridesRef.current.delete(id))
       handleApiError(cause)
+      refreshLiveInBackground()
     }
   }
 
   const updateRequest = async (id: string, request: UpdateQueueRequest) => {
     setError('')
+    const optimisticUpdate: Partial<CodexRequest> = {
+      ...request,
+      attachments: request.attachments?.map(({ name, contentType, size }) => ({ name, contentType, size })),
+    }
+    pendingRequestOverridesRef.current.set(id, optimisticUpdate)
+    setRequests((current) => current.map((item) => (item.id === id
+      ? {
+          ...item,
+          ...optimisticUpdate,
+          attachments: optimisticUpdate.attachments ?? item.attachments,
+        }
+      : item)))
     try {
-      await api.updateRequest(id, request)
-      await loadLive()
+      const updated = await api.updateRequest(id, request)
+      pendingRequestOverridesRef.current.delete(id)
+      setRequests((current) => current.map((item) => (item.id === id ? updated : item)))
+      refreshLiveInBackground()
     } catch (cause) {
+      pendingRequestOverridesRef.current.delete(id)
       handleApiError(cause)
+      refreshLiveInBackground()
       throw cause
     }
   }
 
   const reorderRequests = async (projectId: string, requestIds: string[]) => {
     setError('')
+    const orderById = new Map(requestIds.map((id, index) => [id, index + 1]))
+    requestIds.forEach((id) => pendingRequestOverridesRef.current.set(id, { queueOrder: orderById.get(id) }))
+    setRequests((current) => current.map((request) => (
+      request.projectId === projectId && orderById.has(request.id)
+        ? { ...request, queueOrder: orderById.get(request.id) ?? request.queueOrder }
+        : request
+    )))
     try {
       await api.reorderRequests(projectId, requestIds)
-      await loadLive()
+      requestIds.forEach((id) => pendingRequestOverridesRef.current.delete(id))
+      refreshLiveInBackground()
     } catch (cause) {
+      requestIds.forEach((id) => pendingRequestOverridesRef.current.delete(id))
       handleApiError(cause)
+      refreshLiveInBackground()
       throw cause
     }
   }
@@ -406,11 +473,70 @@ function App() {
     if (!confirmed) return
 
     setError('')
+    const deletedAt = new Date().toISOString()
+    pendingRequestOverridesRef.current.set(id, { deletedAt })
+    setRequests((current) => current.map((item) => (item.id === id ? { ...item, deletedAt } : item)))
     try {
       await api.deleteRequest(id)
-      await loadLive()
+      pendingRequestOverridesRef.current.delete(id)
+      refreshLiveInBackground()
     } catch (cause) {
+      pendingRequestOverridesRef.current.delete(id)
       handleApiError(cause)
+      refreshLiveInBackground()
+    }
+  }
+
+  const cancelRequest = async (id: string) => {
+    setError('')
+    const optimisticUpdate: Partial<CodexRequest> = {
+      status: 'CancelRequested',
+      retryAfter: null,
+      retryReason: null,
+    }
+    pendingRequestOverridesRef.current.set(id, optimisticUpdate)
+    setRequests((current) => current.map((request) => (request.id === id
+      ? {
+          ...request,
+          ...optimisticUpdate,
+        }
+      : request)))
+    try {
+      await api.cancelRequest(id)
+      pendingRequestOverridesRef.current.delete(id)
+      refreshLiveInBackground()
+    } catch (cause) {
+      pendingRequestOverridesRef.current.delete(id)
+      handleApiError(cause)
+      refreshLiveInBackground()
+    }
+  }
+
+  const resumeRequest = async (id: string) => {
+    setError('')
+    const optimisticUpdate: Partial<CodexRequest> = {
+      status: 'Queued',
+      retryAfter: null,
+      retryReason: null,
+      error: null,
+      startedAt: null,
+      finishedAt: null,
+    }
+    pendingRequestOverridesRef.current.set(id, optimisticUpdate)
+    setRequests((current) => current.map((request) => (request.id === id
+      ? {
+          ...request,
+          ...optimisticUpdate,
+        }
+      : request)))
+    try {
+      await api.resumeRequest(id)
+      pendingRequestOverridesRef.current.delete(id)
+      refreshLiveInBackground()
+    } catch (cause) {
+      pendingRequestOverridesRef.current.delete(id)
+      handleApiError(cause)
+      refreshLiveInBackground()
     }
   }
 
@@ -458,21 +584,16 @@ function App() {
         {activeFile ? (
           <CodeViewer file={activeFile} />
         ) : (
-            <QueueWorkspace
-              config={config}
-              selectedProject={selectedProject}
-              requests={requests}
-              diagnostics={queueDiagnostics}
-              now={liveNow}
-              onCreated={addCreatedRequest}
-            onCancel={async (id) => {
-              await api.cancelRequest(id)
-              await loadLive()
-            }}
-            onResume={async (id) => {
-              await api.resumeRequest(id)
-              await loadLive()
-            }}
+          <QueueWorkspace
+            config={config}
+            selectedProject={selectedProject}
+            requests={requests}
+            diagnostics={queueDiagnostics}
+            now={liveNow}
+            onCreated={addCreatedRequest}
+            onDiscardRequestPreview={discardRequestPreview}
+            onCancel={cancelRequest}
+            onResume={resumeRequest}
             onArchiveRequest={archiveRequest}
             onArchiveRequests={archiveRequests}
             onUpdateRequest={updateRequest}
@@ -1380,6 +1501,7 @@ function QueueWorkspace({
   diagnostics,
   now,
   onCreated,
+  onDiscardRequestPreview,
   onCancel,
   onResume,
   onArchiveRequest,
@@ -1399,7 +1521,8 @@ function QueueWorkspace({
   requests: CodexRequest[]
   diagnostics: QueueDiagnostics | null
   now: number
-  onCreated: (request: CodexRequest) => void
+  onCreated: (request: CodexRequest, replaceId?: string) => void
+  onDiscardRequestPreview: (id: string) => void
   onCancel: (id: string) => Promise<void>
   onResume: (id: string) => Promise<void>
   onArchiveRequest: (id: string) => Promise<void>
@@ -1459,6 +1582,7 @@ function QueueWorkspace({
             onRefresh={onRefresh}
             onToggleFiles={onToggleFiles}
             onCreated={onCreated}
+            onDiscardRequestPreview={onDiscardRequestPreview}
             onUpdateRequest={onUpdateRequest}
             onCancelEdit={() => setEditingRequest(null)}
             onUpdateProjectDefaults={onUpdateProjectDefaults}
@@ -1592,6 +1716,7 @@ function QueueComposer({
   onRefresh,
   onToggleFiles,
   onCreated,
+  onDiscardRequestPreview,
   onUpdateRequest,
   onCancelEdit,
   onUpdateProjectDefaults,
@@ -1605,7 +1730,8 @@ function QueueComposer({
   onTabChange: (tab: 'queue' | 'history' | 'terminal') => void
   onRefresh: () => Promise<void>
   onToggleFiles: () => void
-  onCreated: (request: CodexRequest) => void
+  onCreated: (request: CodexRequest, replaceId?: string) => void
+  onDiscardRequestPreview: (id: string) => void
   onUpdateRequest: (id: string, request: UpdateQueueRequest) => Promise<void>
   onCancelEdit: () => void
   onUpdateProjectDefaults: (project: Project, defaults: ProjectModelDefaults) => Promise<void>
@@ -1664,6 +1790,7 @@ function QueueComposer({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
+    let previewId: string | null = null
     try {
       const payload: UpdateQueueRequest = {
         prompt,
@@ -1682,13 +1809,45 @@ function QueueComposer({
         await onUpdateRequest(editingRequest.id, payload)
         onCancelEdit()
       } else {
+        previewId = `optimistic:${selectedProject.id}:${Date.now()}`
+        const createdAt = new Date().toISOString()
+        const previewRequest: CodexRequest = {
+          id: previewId,
+          projectId: selectedProject.id,
+          projectName: selectedProject.name,
+          projectPath: selectedProject.path,
+          machineId: selectedProject.machineId,
+          machineName: selectedProject.machineName,
+          machineKind: selectedProject.machineKind,
+          prompt,
+          attachments: attachments.map(({ name, contentType, size }) => ({ name, contentType, size })),
+          model: requestModel.model,
+          modelEffort: requestModel.effort,
+          modelSpeed: requestModel.speed,
+          queueOrder: Number.MAX_SAFE_INTEGER,
+          status: 'Queued',
+          generateCommit,
+          separateCommitSession: generateCommit && separateCommitSession,
+          commitModel: commitModel.model,
+          commitModelEffort: commitModel.effort,
+          commitModelSpeed: commitModel.speed,
+          createdAt,
+          runs: [],
+        }
+        onTabChange('queue')
+        onCreated(previewRequest)
+        setPrompt('')
+        setAttachments([])
+        setAttachmentError('')
+        resetModelSelections()
+
         const createdRequest = await api.createRequest({
           projectId: selectedProject.id,
           ...payload,
           attachments,
         })
-        onTabChange('queue')
-        onCreated(createdRequest)
+        onCreated(createdRequest, previewId)
+        return
       }
 
       setPrompt('')
@@ -1696,6 +1855,9 @@ function QueueComposer({
       setAttachmentError('')
       resetModelSelections()
     } catch (cause) {
+      if (previewId) {
+        onDiscardRequestPreview(previewId)
+      }
       onError(cause)
     }
   }
@@ -2156,11 +2318,12 @@ function RequestCard({
   onDrop: () => void
   onDragEnd: () => void
 }) {
-  const cancellable = request.status === 'Queued' || request.status === 'Running' || request.status === 'CancelRequested' || request.status === 'UsageLimited'
-  const resumable = request.status === 'Failed' || request.status === 'Cancelled' || request.status === 'UsageLimited'
-  const archivable = request.status === 'Succeeded' && !request.archivedAt && !request.deletedAt
-  const editable = request.status === 'Queued'
-  const deletable = request.status !== 'Running' && request.status !== 'CancelRequested'
+  const optimistic = isOptimisticRequest(request.id)
+  const cancellable = !optimistic && (request.status === 'Queued' || request.status === 'Running' || request.status === 'CancelRequested' || request.status === 'UsageLimited')
+  const resumable = !optimistic && (request.status === 'Failed' || request.status === 'Cancelled' || request.status === 'UsageLimited')
+  const archivable = !optimistic && request.status === 'Succeeded' && !request.archivedAt && !request.deletedAt
+  const editable = !optimistic && request.status === 'Queued'
+  const deletable = !optimistic && request.status !== 'Running' && request.status !== 'CancelRequested'
   const percent = progressFor(request)
   const requestUsageDelay = request.retryAfter ? formatRemainingTime(request.retryAfter, now) : null
 
