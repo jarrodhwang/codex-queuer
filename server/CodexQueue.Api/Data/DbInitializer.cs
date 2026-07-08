@@ -238,7 +238,7 @@ public static class DbInitializer
         }
 
         var commitRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Commit);
-        if (!request.GenerateCommit)
+        if (!request.GenerateCommit || !request.SeparateCommitSession)
         {
             CancelUnusedCommitRun(commitRun);
             MarkRequestSucceeded(request, requestRun);

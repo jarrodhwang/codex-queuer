@@ -10,6 +10,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  Gauge,
   GripVertical,
   History,
   Menu,
@@ -229,6 +230,14 @@ function App() {
     }
     setError(cause instanceof Error ? cause.message : 'Request failed.')
   }, [])
+
+  const addCreatedRequest = useCallback((request: CodexRequest) => {
+    setRequests((current) => {
+      const withoutCreated = current.filter((item) => item.id !== request.id)
+      return [...withoutCreated, request]
+    })
+    void loadLive().catch(handleApiError)
+  }, [handleApiError, loadLive])
 
   useEffect(() => {
     loadStatic().then(() => loadLive()).catch(handleApiError)
@@ -455,7 +464,7 @@ function App() {
               requests={requests}
               diagnostics={queueDiagnostics}
               now={liveNow}
-              onCreated={loadLive}
+              onCreated={addCreatedRequest}
             onCancel={async (id) => {
               await api.cancelRequest(id)
               await loadLive()
@@ -551,6 +560,7 @@ function LeftSidebar({
 }) {
   const [projectModalOpen, setProjectModalOpen] = useState(false)
   const [machineModalOpen, setMachineModalOpen] = useState(false)
+  const [usageModalOpen, setUsageModalOpen] = useState(false)
   const [projectDetailsId, setProjectDetailsId] = useState<string | null>(null)
   const [machineStatuses, setMachineStatuses] = useState<Record<string, { checking: boolean; success?: boolean; output: string }>>({})
   const detailProject = projects.find((project) => project.id === projectDetailsId)
@@ -629,6 +639,9 @@ function LeftSidebar({
             <GlassButton variant="ghost" size="icon" onClick={() => setProjectModalOpen(true)} title="Add project">
               <FolderPlus size={16} />
             </GlassButton>
+            <GlassButton variant="ghost" size="icon" onClick={() => setUsageModalOpen(true)} title="Codex usage">
+              <Gauge size={16} />
+            </GlassButton>
             <GlassButton variant="ghost" size="icon" onClick={() => setMachineModalOpen(true)} title="Manage machines">
               <Settings size={16} />
             </GlassButton>
@@ -689,8 +702,6 @@ function LeftSidebar({
         </div>
       </GlassPanel>
 
-      <UsageLimitSidebarPanel requests={usageLimitedRequests} now={now} />
-
       {projectModalOpen && (
         <ProjectModal
           machines={machines}
@@ -701,6 +712,13 @@ function LeftSidebar({
           }}
           onChanged={onChanged}
           onError={onError}
+        />
+      )}
+      {usageModalOpen && (
+        <UsageLimitModal
+          requests={usageLimitedRequests}
+          now={now}
+          onClose={() => setUsageModalOpen(false)}
         />
       )}
       {machineModalOpen && (
@@ -751,6 +769,16 @@ function MachineConnectionStatus({
   )
 }
 
+function UsageLimitModal({ requests, now, onClose }: { requests: CodexRequest[]; now: number; onClose: () => void }) {
+  return (
+    <Modal title="Codex usage" icon={<Gauge size={18} />} onClose={onClose}>
+      <div className="usage-modal">
+        <UsageLimitSidebarPanel requests={requests} now={now} />
+      </div>
+    </Modal>
+  )
+}
+
 function UsageLimitSidebarPanel({ requests, now }: { requests: CodexRequest[], now: number }) {
   const active = requests.length > 0
   const buckets = usageLimitBuckets(requests, now)
@@ -758,15 +786,25 @@ function UsageLimitSidebarPanel({ requests, now }: { requests: CodexRequest[], n
   return (
     <div className={`usage-sidebar ${active ? 'usage-sidebar--limited' : ''}`}>
       <div className="usage-sidebar-head">
-        <span>GPT usage level</span>
-        <span className="usage-sidebar-pill">{active ? `${requests.length} paused` : 'No pauses'}</span>
+        <span>Codex usage</span>
+        <a className="usage-sidebar-pill" href="https://chatgpt.com/codex/settings/usage" target="_blank" rel="noreferrer">
+          Open usage
+        </a>
+      </div>
+      <div className="usage-sidebar-tip">
+        <span>{active ? `${requests.length} paused by limits` : 'Live quota is available in Codex settings.'}</span>
+        <a href="https://community.openai.com/c/codex/37" target="_blank" rel="noreferrer">Forum</a>
       </div>
       <div className="usage-sidebar-list">
         {buckets.map((bucket) => (
-          <div key={bucket.label} className={`usage-sidebar-item ${bucket.limited ? 'limited' : ''}`}>
+          <div key={bucket.key} className={`usage-sidebar-item ${bucket.limited ? 'limited' : ''} ${bucket.section ? 'usage-sidebar-item--sectioned' : ''}`}>
+            {bucket.section && <div className="usage-section-title">{bucket.section}</div>}
             <div className="usage-row-head">
               <span className="truncate">{bucket.label}</span>
-              <span>{bucket.limited ? 'paused' : 'unknown'}</span>
+              <span>{bucket.percentLeft === null ? bucket.status : `${bucket.percentLeft}% left`}</span>
+            </div>
+            <div className={`usage-meter ${bucket.percentLeft === null ? 'unknown' : ''}`} aria-label={`${bucket.label} ${bucket.percentLeft ?? 'unknown'} percent left`}>
+              <span style={{ width: `${bucket.percentLeft ?? 0}%` }} />
             </div>
             <div className="meta truncate">{bucket.message}</div>
             {bucket.detail && <div className="meta truncate">{bucket.detail}</div>}
@@ -777,44 +815,93 @@ function UsageLimitSidebarPanel({ requests, now }: { requests: CodexRequest[], n
   )
 }
 
+type UsageBucket = {
+  key: string
+  label: string
+  section?: string
+  limited: boolean
+  status: string
+  percentLeft: number | null
+  message: string
+  detail?: string
+}
+
 function usageLimitBuckets(requests: CodexRequest[], now: number) {
   const limits = requests.map((request) => {
     const limitedRun = request.runs.find((run) => run.status === 'UsageLimited')
     const model = limitedRun?.model || request.model
     const retryAfter = limitedRun?.retryAfter ?? request.retryAfter
+    const reason = limitedRun?.retryReason ?? request.retryReason
     return {
       request,
       model,
       retryAfter,
       remaining: retryAfter ? formatRemainingTime(retryAfter, now) : null,
-      reason: limitedRun?.retryReason ?? request.retryReason,
+      reason,
+      parsed: parseCodexUsageText(reason),
     }
   })
   const spark = limits.find((limit) => /5\.3|spark/i.test(limit.model))
-  const anyLimit = limits[0]
+  const overall = limits.find((limit) => !/5\.3|spark/i.test(limit.model)) ?? limits[0]
+  const weeklyOverall = limits.find((limit) => !/5\.3|spark/i.test(limit.model) && /week|weekly/i.test(limit.reason ?? ''))
+  const weeklySpark = limits.find((limit) => /5\.3|spark/i.test(limit.model) && /week|weekly/i.test(limit.reason ?? ''))
 
   return [
-    usageLimitBucket('5h limit', anyLimit),
-    usageLimitBucket('Weekly limit', limits.find((limit) => /week|weekly/i.test(limit.reason ?? ''))),
-    usageLimitBucket('GPT-5.3 Codex Spark', spark),
+    usageLimitBucket('overall-5h', '5h limit', overall),
+    usageLimitBucket('overall-weekly', 'Weekly limit', weeklyOverall),
+    usageLimitBucket('spark-5h', '5h limit', spark, 'GPT-5.3-Codex-Spark limit'),
+    usageLimitBucket('spark-weekly', 'Weekly limit', weeklySpark),
   ]
 }
 
-function usageLimitBucket(label: string, limit?: { request: CodexRequest; model: string; retryAfter?: string | null; remaining: string | null }) {
+function usageLimitBucket(
+  key: string,
+  label: string,
+  limit?: {
+    request: CodexRequest
+    model: string
+    retryAfter?: string | null
+    remaining: string | null
+    reason?: string | null
+    parsed: { percentLeft: number | null; resetText: string | null }
+  },
+  section?: string,
+): UsageBucket {
   if (!limit) {
     return {
+      key,
       label,
+      section,
       limited: false,
-      message: 'Remaining quota is not exposed by Codex CLI.',
-      detail: 'Will update after a usage-limit response.',
+      status: 'unknown',
+      percentLeft: null,
+      message: 'Open Codex settings for live quota.',
+      detail: 'Updates here after a queue usage-limit response.',
     }
   }
 
+  const percentLeft = limit.parsed.percentLeft ?? 0
+  const resetText = limit.parsed.resetText ?? (limit.remaining ? `resets in ${limit.remaining}` : limit.retryAfter ? `resets ${formatDate(limit.retryAfter)}` : null)
+
   return {
+    key,
     label,
+    section,
     limited: true,
-    message: limit.remaining ? `Resume in ${limit.remaining}` : limit.retryAfter ? `Ready ${formatDate(limit.retryAfter)}` : 'Retry window unknown',
+    status: 'paused',
+    percentLeft,
+    message: resetText ?? 'Reset window unknown',
     detail: `${limit.model} · ${limit.request.projectName || shortId(limit.request.id)}`,
+  }
+}
+
+function parseCodexUsageText(value?: string | null) {
+  const text = value ?? ''
+  const percentMatch = text.match(/(\d{1,3})%\s+left/i)
+  const resetMatch = text.match(/resets?\s+([^.,;\n]+)/i)
+  return {
+    percentLeft: percentMatch ? Math.min(100, Math.max(0, Number.parseInt(percentMatch[1], 10))) : null,
+    resetText: resetMatch ? `resets ${resetMatch[1].trim()}` : null,
   }
 }
 
@@ -1312,7 +1399,7 @@ function QueueWorkspace({
   requests: CodexRequest[]
   diagnostics: QueueDiagnostics | null
   now: number
-  onCreated: () => Promise<void>
+  onCreated: (request: CodexRequest) => void
   onCancel: (id: string) => Promise<void>
   onResume: (id: string) => Promise<void>
   onArchiveRequest: (id: string) => Promise<void>
@@ -1518,7 +1605,7 @@ function QueueComposer({
   onTabChange: (tab: 'queue' | 'history' | 'terminal') => void
   onRefresh: () => Promise<void>
   onToggleFiles: () => void
-  onCreated: () => Promise<void>
+  onCreated: (request: CodexRequest) => void
   onUpdateRequest: (id: string, request: UpdateQueueRequest) => Promise<void>
   onCancelEdit: () => void
   onUpdateProjectDefaults: (project: Project, defaults: ProjectModelDefaults) => Promise<void>
@@ -1595,18 +1682,19 @@ function QueueComposer({
         await onUpdateRequest(editingRequest.id, payload)
         onCancelEdit()
       } else {
-        await api.createRequest({
+        const createdRequest = await api.createRequest({
           projectId: selectedProject.id,
           ...payload,
           attachments,
         })
+        onTabChange('queue')
+        onCreated(createdRequest)
       }
 
       setPrompt('')
       setAttachments([])
       setAttachmentError('')
       resetModelSelections()
-      await onCreated()
     } catch (cause) {
       onError(cause)
     }
@@ -2422,8 +2510,9 @@ type CompletionFileChange = {
 }
 
 function CompletionSummary({ request }: { request: CodexRequest }) {
-  const commitRun = request.runs.find((run) => run.kind === 'Commit')
-  const resultRun = commitRun ?? request.runs.find((run) => run.kind === 'Request')
+  const separateCommitRun = request.runs.find((run) => run.kind === 'Commit')
+  const commitMetadataRun = request.runs.find((run) => run.commitSha || run.commitMessage)
+  const resultRun = separateCommitRun ?? request.runs.find((run) => run.kind === 'Request')
   const fileChanges = extractFileChanges(request)
   const resultText = request.summary || lastUsefulText(resultRun?.output ?? '') || 'Completed successfully.'
 
@@ -2434,14 +2523,14 @@ function CompletionSummary({ request }: { request: CodexRequest }) {
           <div className="completion-title">Last result</div>
           <div className="completion-facts">
             <span>Finished {formatDate(request.finishedAt ?? request.createdAt)}</span>
-            {commitRun?.commitSha && <span>Commit {commitRun.commitSha.slice(0, 12)}</span>}
+            {commitMetadataRun?.commitSha && <span>Commit {commitMetadataRun.commitSha.slice(0, 12)}</span>}
             {fileChanges.length > 0 && <span>{fileChanges.length} files changed</span>}
           </div>
         </div>
         <Check size={18} />
       </div>
       <div className="completion-result-box">{resultText}</div>
-      {commitRun?.commitMessage && <div className="completion-message">{commitRun.commitMessage}</div>}
+      {commitMetadataRun?.commitMessage && <div className="completion-message">{commitMetadataRun.commitMessage}</div>}
       {fileChanges.length > 0 && (
         <div className="completion-changes">
           <div className="section-kicker">View changes</div>
@@ -2519,7 +2608,7 @@ function lastUsefulText(output: string) {
 }
 
 function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: number }) {
-  const commitRun = request?.runs.find((run) => run.kind === 'Commit')
+  const separateCommitRun = request?.runs.find((run) => run.kind === 'Commit')
 
   if (!request) {
     return (
@@ -2582,7 +2671,7 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
           <StructuredBodyView content={run.output} emptyText="No output yet." />
         </div>
       ))}
-      {request.generateCommit && !commitRun && (
+      {request.generateCommit && request.separateCommitSession && !separateCommitRun && (
         <div className="pending-run-row">
           <div className="run-title-stack">
             <strong>Commit</strong>
@@ -2866,7 +2955,7 @@ function progressFor(request: CodexRequest) {
   const requestRun = request.runs.find((run) => run.kind === 'Request')
   const commitRun = request.runs.find((run) => run.kind === 'Commit')
   if (commitRun?.status === 'Running') return 82
-  if (requestRun?.status === 'Succeeded' && request.generateCommit) return 68
+  if (requestRun?.status === 'Succeeded' && request.generateCommit && request.separateCommitSession) return 68
   return 42
 }
 
@@ -2968,7 +3057,7 @@ function RequestHistory({
       <div className="history-workbench">
         <div className="history-list" aria-label="History requests">
           {visibleRequests.slice(0, 50).map((request) => {
-            const commitRun = request.runs.find((run) => run.kind === 'Commit' && run.commitSha)
+            const commitRun = request.runs.find((run) => run.commitSha)
             const completedAt = request.deletedAt ?? request.finishedAt ?? request.createdAt
             const duration = formatDurationBetween(request.startedAt ?? request.createdAt, request.finishedAt ?? request.deletedAt ?? request.createdAt)
             return (

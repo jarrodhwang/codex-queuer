@@ -278,12 +278,13 @@ public sealed class QueueWorker(
             await using var scope = scopeFactory.CreateAsyncScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             var request = await db.Requests.Include(x => x.Runs).FirstAsync(x => x.Id == requestId, stoppingToken);
-            if (!request.GenerateCommit)
+            if (!request.GenerateCommit || !request.SeparateCommitSession)
             {
+                CancelUnusedCommitRun(request.Runs.FirstOrDefault(x => x.Kind == RunKind.Commit));
                 request.Status = QueueStatus.Succeeded;
                 request.FinishedAt = DateTimeOffset.UtcNow;
                 request.Summary = LastUsefulLine(request.Runs.First(x => x.Kind == RunKind.Request).Output);
-                await TrySaveChangesAsync(db, "complete request without commit", stoppingToken);
+                await TrySaveChangesAsync(db, "complete request without separate commit", stoppingToken);
                 return;
             }
 
@@ -316,17 +317,12 @@ public sealed class QueueWorker(
                 ResetRunForResume(commitRun);
             }
 
-            request.Status = request.SeparateCommitSession ? QueueStatus.Queued : QueueStatus.Running;
+            request.Status = QueueStatus.Queued;
             request.Error = null;
             request.FinishedAt = null;
             if (!await TrySaveChangesAsync(db, "prepare commit run", stoppingToken))
             {
                 return;
-            }
-
-            if (!request.SeparateCommitSession)
-            {
-                await RunCommitAsync(requestId, stoppingToken);
             }
         }
         finally
@@ -543,14 +539,19 @@ public sealed class QueueWorker(
             changed = true;
         }
 
-        if (requestRun.Status == QueueStatus.Succeeded && !request.GenerateCommit && request.Status != QueueStatus.Succeeded)
+        if (requestRun.Status == QueueStatus.Succeeded && (!request.GenerateCommit || !request.SeparateCommitSession))
         {
-            CancelUnusedCommitRun(commitRun);
-            MarkRequestSucceeded(request, requestRun);
-            return true;
+            var cancelledCommitRun = CancelUnusedCommitRun(commitRun);
+            if (request.Status != QueueStatus.Succeeded)
+            {
+                MarkRequestSucceeded(request, requestRun);
+                return true;
+            }
+
+            return changed || cancelledCommitRun;
         }
 
-        if (requestRun.Status == QueueStatus.Succeeded && request.GenerateCommit)
+        if (requestRun.Status == QueueStatus.Succeeded && request.GenerateCommit && request.SeparateCommitSession)
         {
             if (commitRun?.Status == QueueStatus.Succeeded && request.Status != QueueStatus.Succeeded)
             {
@@ -606,16 +607,17 @@ public sealed class QueueWorker(
         return true;
     }
 
-    private static void CancelUnusedCommitRun(CodexRun? commitRun)
+    private static bool CancelUnusedCommitRun(CodexRun? commitRun)
     {
         if (commitRun is null || commitRun.Status is QueueStatus.Succeeded or QueueStatus.Failed or QueueStatus.Cancelled)
         {
-            return;
+            return false;
         }
 
         commitRun.Status = QueueStatus.Cancelled;
         commitRun.Error = "Commit handled by the main request session.";
         commitRun.FinishedAt ??= DateTimeOffset.UtcNow;
+        return true;
     }
 
     private static CodexRun? NextRunForDispatch(CodexRequest request)
@@ -631,12 +633,13 @@ public sealed class QueueWorker(
             return requestRun.Status == QueueStatus.Queued ? requestRun : null;
         }
 
-        if (!request.GenerateCommit)
+        var commitRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Commit);
+        if (!request.GenerateCommit || !request.SeparateCommitSession)
         {
+            CancelUnusedCommitRun(commitRun);
             return null;
         }
 
-        var commitRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Commit);
         return commitRun?.Status == QueueStatus.Queued ? commitRun : null;
     }
 
@@ -679,8 +682,9 @@ public sealed class QueueWorker(
             return;
         }
 
-        if (!request.GenerateCommit)
+        if (!request.GenerateCommit || !request.SeparateCommitSession)
         {
+            CancelUnusedCommitRun(commitRun);
             MarkRequestSucceeded(request, requestRun);
             return;
         }
@@ -792,12 +796,16 @@ public sealed class QueueWorker(
                 await PopulateCommitMetadataAsync(db, request, run, cancellationToken);
             }
         }
-        else if (!request.GenerateCommit)
+        else if (!request.GenerateCommit || !request.SeparateCommitSession)
         {
             request.FinishedAt = run.FinishedAt;
             request.Status = result.Success ? QueueStatus.Succeeded : QueueStatus.Failed;
             request.Error = result.Success ? null : run.Error;
             request.Summary = LastUsefulLine(result.Output);
+            if (result.Success && request.GenerateCommit && result.Output.Contains("Commit created:", StringComparison.OrdinalIgnoreCase))
+            {
+                await PopulateCommitMetadataAsync(db, request, run, cancellationToken);
+            }
         }
         else if (!result.Success)
         {
@@ -1384,11 +1392,29 @@ public sealed class QueueWorker(
             return request.Prompt;
         }
 
+        if (request.SeparateCommitSession)
+        {
+            return request.Prompt.TrimEnd()
+                + """
+
+                Do not run git commit in this run.
+                Leave file changes for the queue-managed commit step.
+                """;
+        }
+
         return request.Prompt.TrimEnd()
             + """
 
-            Do not run git commit in this run.
-            Leave file changes for the queue-managed commit step.
+            After completing the requested changes in this same run, create a git commit for the current repository only if there are actual changes.
+            Do not ask for clarification and do not wait for further input.
+            Commit requirements:
+            1. Inspect git status and the diff.
+            2. Write one concise commit message.
+            3. Run git add -A.
+            4. Run git commit -m "<message>".
+            5. Return the commit SHA, commit message, and changed files. Include a line exactly named "Commit created:" immediately before the SHA.
+
+            If there are no changes, do not create an empty commit. Say that there were no changes and exit.
             """;
     }
 
