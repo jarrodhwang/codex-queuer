@@ -394,7 +394,7 @@ public sealed class QueueWorker(
                     : await runner.RunShellAsync(
                         machine,
                         projectPath,
-                        BuildCommitShellCommand(machine, BuildCommitMessage(request.Prompt)),
+                        BuildCommitShellCommand(machine, BuildCommitMessage(request)),
                         chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
                         cancellationToken);
 
@@ -507,7 +507,7 @@ public sealed class QueueWorker(
         var fallbackResult = await runner.RunShellAsync(
             machine,
             projectPath,
-            BuildCommitShellCommand(machine, BuildCommitMessage(request.Prompt)),
+            BuildCommitShellCommand(machine, BuildCommitMessage(request)),
             chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
             cancellationToken);
 
@@ -1380,16 +1380,18 @@ public sealed class QueueWorker(
         var quotedMessage = TargetCommandRunner.Quote(message);
         return "before_head=$(git rev-parse HEAD); "
             + "before=$(git status --porcelain); "
-            + "if [ -z \"$before\" ]; then printf 'No changes to commit.\\n'; exit 10; fi; "
+            + "if [ -z \"$before\" ]; then printf 'No changes to commit.\\n'; exit 0; fi; "
             + "printf 'Changed files before commit:\\n%s\\n' \"$before\"; "
             + "git add -A; "
             + "diff_exit=0; git diff --cached --quiet || diff_exit=$?; "
-            + "if [ \"$diff_exit\" -eq 0 ]; then printf 'No changes staged after git add.\\n'; exit 11; fi; "
+            + "if [ \"$diff_exit\" -eq 0 ]; then printf 'No changes staged after git add.\\n'; exit 0; fi; "
             + "if [ \"$diff_exit\" -ne 1 ]; then exit \"$diff_exit\"; fi; "
             + "git commit -m " + quotedMessage + "; "
             + "commit_exit=$?; if [ \"$commit_exit\" -ne 0 ]; then exit \"$commit_exit\"; fi; "
             + "after_head=$(git rev-parse HEAD); "
-            + "if [ \"$before_head\" = \"$after_head\" ]; then printf 'No changes were committed; HEAD did not change.\\n'; exit 12; fi; "
+            + "if [ \"$before_head\" = \"$after_head\" ]; then current=$(git status --porcelain); "
+            + "if [ -z \"$current\" ]; then printf 'No changes to commit.\\n'; exit 0; fi; "
+            + "printf 'No changes were committed; HEAD did not change.\\n'; exit 12; fi; "
             + "printf '\\nCommit created:\\n'; echo \"$after_head\"";
     }
 
@@ -1398,27 +1400,30 @@ public sealed class QueueWorker(
         var quotedMessage = TargetCommandRunner.QuotePowerShellValue(message);
         return "$beforeHead = (git rev-parse HEAD); "
             + "$before = git status --porcelain; "
-            + "if (-not $before) { Write-Output 'No changes to commit.'; exit 10 }; "
+            + "if (-not $before) { Write-Output 'No changes to commit.'; exit 0 }; "
             + "Write-Output 'Changed files before commit:'; $before; "
             + "git add -A; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; "
             + "git diff --cached --quiet; $diffExit = $LASTEXITCODE; "
-            + "if ($diffExit -eq 0) { Write-Output 'No changes staged after git add.'; exit 11 }; "
+            + "if ($diffExit -eq 0) { Write-Output 'No changes staged after git add.'; exit 0 }; "
             + "if ($diffExit -ne 1) { exit $diffExit }; "
             + "git commit -m " + quotedMessage + "; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; "
             + "$afterHead = (git rev-parse HEAD); "
-            + "if ($afterHead -eq $beforeHead) { Write-Output 'No changes were committed; HEAD did not change.'; exit 12 }; "
+            + "if ($afterHead -eq $beforeHead) { "
+            + "$current = git status --porcelain; "
+            + "if (-not $current) { Write-Output 'No changes to commit.'; exit 0 }; "
+            + "Write-Output 'No changes were committed; HEAD did not change.'; exit 12 }; "
             + "Write-Output ''; Write-Output 'Commit created:'; Write-Output $afterHead";
     }
 
-    private static string BuildCommitMessage(string prompt)
+    private static string BuildCommitMessage(CodexRequest request)
     {
-        var normalized = Regex.Replace(prompt, @"\s+", " ").Trim();
-        if (string.IsNullOrWhiteSpace(normalized))
+        var projectLabel = request.Project?.Name?.Trim();
+        if (string.IsNullOrWhiteSpace(projectLabel))
         {
-            return "Update project files";
+            return "Update repository files";
         }
 
-        return normalized.Length <= 72 ? normalized : normalized[..72].TrimEnd();
+        return $"Update {projectLabel} files";
     }
 
     private static bool CommitOutputClaimsCreated(string output) =>
@@ -1453,6 +1458,7 @@ public sealed class QueueWorker(
         You are running after a separate Codex implementation session.
 
         Inspect all current git changes, create a concise commit message from those changes, and commit all changes in the current repository only if there are actual changes.
+        Do not use any user-facing request sentence as the commit message; derive it from the file changes.
         Do not ask for clarification and do not wait for further input.
         Requirements:
         1. Inspect git status and the diff.

@@ -1615,6 +1615,7 @@ function QueueWorkspace({
           <QueueComposer
             config={config}
             selectedProject={selectedProject}
+            requests={queueRequests}
             activeTab={activeTab}
             editingRequest={editingRequest}
             error={error}
@@ -1749,6 +1750,7 @@ function ProjectDetailsModal({
 function QueueComposer({
   config,
   selectedProject,
+  requests,
   activeTab,
   editingRequest,
   error,
@@ -1764,6 +1766,7 @@ function QueueComposer({
 }: {
   config: ApiConfig
   selectedProject: Project
+  requests: CodexRequest[]
   activeTab: 'queue' | 'history' | 'terminal'
   editingRequest: CodexRequest | null
   error: string
@@ -1852,7 +1855,7 @@ function QueueComposer({
         previewId = `optimistic:${selectedProject.id}:${Date.now()}`
         const nextQueueOrder = requests
           .filter((item) => item.projectId === selectedProject.id && !item.deletedAt && !item.archivedAt)
-          .reduce((maxOrder, item) => Math.max(maxOrder, item.queueOrder), 0) + 1
+          .reduce<number>((maxOrder, item) => Math.max(maxOrder, item.queueOrder), 0) + 1
         const createdAt = new Date().toISOString()
         const previewRequest: CodexRequest = {
           id: previewId,
