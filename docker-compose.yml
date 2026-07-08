@@ -1,0 +1,39 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: server/CodexQueue.Api/Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__CodexQueue: Data Source=/app/data/codex-queue.db
+      CQ_API_TOKEN: ${CQ_API_TOKEN:-}
+      CQ_DEFAULT_MACHINE_KIND: ${CQ_DEFAULT_MACHINE_KIND:-Ssh}
+      CQ_DEFAULT_MACHINE_NAME: ${CQ_DEFAULT_MACHINE_NAME:-Local Linux}
+      CQ_DEFAULT_MACHINE_PLATFORM: ${CQ_DEFAULT_MACHINE_PLATFORM:-Linux}
+      CQ_DEFAULT_WORKING_ROOT: ${CQ_DEFAULT_WORKING_ROOT:-/home/jarrod}
+      CQ_DEFAULT_LOCAL_WORKING_ROOT: ${CQ_DEFAULT_LOCAL_WORKING_ROOT:-/host/home/jarrod}
+      CQ_DEFAULT_SSH_HOST: ${CQ_DEFAULT_SSH_HOST:-host.docker.internal}
+      CQ_DEFAULT_SSH_PORT: ${CQ_DEFAULT_SSH_PORT:-22}
+      CQ_DEFAULT_SSH_USER: ${CQ_DEFAULT_SSH_USER:-${USER:-jarrod}}
+      CQ_DEFAULT_SSH_KEY_PATH: ${CQ_DEFAULT_SSH_KEY_PATH:-/home/app/.ssh/id_ed25519}
+      CQ_CONTAINER_HOST_MOUNT_ROOT: ${CQ_CONTAINER_HOST_MOUNT_ROOT:-/host/home/jarrod}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - codex_queue_data:/app/data
+      - ${HOST_PROJECT_ROOT:-/home/jarrod}:${CQ_CONTAINER_HOST_MOUNT_ROOT:-/host/home/jarrod}
+      - ${HOST_SSH_DIR:-/home/jarrod/.ssh}:/home/app/.ssh:ro
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    depends_on:
+      - api
+    ports:
+      - "6767:80"
+    restart: unless-stopped
+
+volumes:
+  codex_queue_data:

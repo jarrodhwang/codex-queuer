@@ -1,0 +1,5 @@
+<Solution>
+  <Folder Name="/server/">
+    <Project Path="server/CodexQueue.Api/CodexQueue.Api.csproj" />
+  </Folder>
+</Solution>

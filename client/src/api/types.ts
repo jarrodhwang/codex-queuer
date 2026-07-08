@@ -1,0 +1,200 @@
+export type MachineKind = 'Local' | 'Ssh'
+export type MachinePlatform = 'Auto' | 'Linux' | 'MacOs' | 'Windows'
+export type QueueStatus =
+  | 'Queued'
+  | 'Running'
+  | 'UsageLimited'
+  | 'Succeeded'
+  | 'Failed'
+  | 'CancelRequested'
+  | 'Cancelled'
+
+export type RunKind = 'Request' | 'Commit'
+
+export type Machine = {
+  id: string
+  name: string
+  kind: MachineKind
+  host?: string | null
+  port: number
+  userName?: string | null
+  sshKeyPath?: string | null
+  workingRoot?: string | null
+  platform: MachinePlatform
+  createdAt: string
+  updatedAt: string
+}
+
+export type SaveMachineRequest = {
+  name: string
+  kind: MachineKind
+  host?: string | null
+  port?: number | null
+  userName?: string | null
+  sshKeyPath?: string | null
+  workingRoot?: string | null
+  platform?: MachinePlatform | null
+}
+
+export type Project = {
+  id: string
+  name: string
+  path: string
+  machineId: string
+  machineName: string
+  machineKind: MachineKind
+  defaultModel?: string | null
+  defaultModelEffort?: string | null
+  defaultModelSpeed?: string | null
+  defaultCommitModel?: string | null
+  defaultCommitModelEffort?: string | null
+  defaultCommitModelSpeed?: string | null
+  defaultGenerateCommit?: boolean | null
+  createdAt: string
+  updatedAt: string
+}
+
+export type SaveProjectRequest = {
+  name: string
+  path: string
+  machineId: string
+  defaultModel?: string | null
+  defaultModelEffort?: string | null
+  defaultModelSpeed?: string | null
+  defaultCommitModel?: string | null
+  defaultCommitModelEffort?: string | null
+  defaultCommitModelSpeed?: string | null
+  defaultGenerateCommit?: boolean | null
+}
+
+export type CreateQueueRequest = {
+  projectId: string
+  prompt: string
+  attachments?: QueueAttachment[]
+  model: string
+  modelEffort?: string | null
+  modelSpeed?: string | null
+  generateCommit: boolean
+  commitModel?: string | null
+  commitModelEffort?: string | null
+  commitModelSpeed?: string | null
+}
+
+export type QueueAttachment = {
+  name: string
+  contentType: string
+  size: number
+  contentBase64: string
+}
+
+export type CodexRun = {
+  id: string
+  kind: RunKind
+  model: string
+  modelEffort?: string | null
+  modelSpeed?: string | null
+  status: QueueStatus
+  retryAfter?: string | null
+  retryReason?: string | null
+  availableModel?: string | null
+  commandPreview?: string | null
+  output: string
+  exitCode?: number | null
+  commitMessage?: string | null
+  commitSha?: string | null
+  error?: string | null
+  createdAt: string
+  startedAt?: string | null
+  finishedAt?: string | null
+}
+
+export type CodexRequest = {
+  id: string
+  projectId: string
+  projectName: string
+  projectPath: string
+  machineId: string
+  machineName: string
+  machineKind: MachineKind
+  prompt: string
+  attachments: Array<{ name: string, contentType: string, size: number }>
+  model: string
+  modelEffort?: string | null
+  modelSpeed?: string | null
+  status: QueueStatus
+  generateCommit: boolean
+  retryAfter?: string | null
+  retryReason?: string | null
+  availableModel?: string | null
+  commitModel?: string | null
+  commitModelEffort?: string | null
+  commitModelSpeed?: string | null
+  summary?: string | null
+  error?: string | null
+  createdAt: string
+  startedAt?: string | null
+  finishedAt?: string | null
+  archivedAt?: string | null
+  deletedAt?: string | null
+  runs: CodexRun[]
+}
+
+export type Session = {
+  runId: string
+  requestId: string
+  projectName: string
+  machineName: string
+  kind: RunKind
+  model: string
+  status: QueueStatus
+  createdAt: string
+  startedAt?: string | null
+  finishedAt?: string | null
+  commitSha?: string | null
+}
+
+export type FileTreeEntry = {
+  name: string
+  path: string
+  isDirectory: boolean
+  size?: number | null
+}
+
+export type FileContent = {
+  path: string
+  content: string
+  size: number
+  truncated: boolean
+}
+
+export type TerminalCommandResult = {
+  success: boolean
+  output: string
+  exitCode: number
+  commandPreview: string
+}
+
+export type ModelOption = {
+  label: string
+  model: string
+  supportsPriority: boolean
+}
+
+export type ApiConfig = {
+  requiresToken: boolean
+  models: ModelOption[]
+}
+
+export type MachineTest = {
+  success: boolean
+  output: string
+}
+
+export type QueueDiagnostics = {
+  lastHeartbeat?: string | null
+  lastDispatch?: string | null
+  lastIdle?: string | null
+  lastError?: string | null
+  activeRequestIds: string[]
+  isProcessing: boolean
+}

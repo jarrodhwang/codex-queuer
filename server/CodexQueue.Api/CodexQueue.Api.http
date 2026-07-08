@@ -1,0 +1,11 @@
+@CodexQueue.Api_HostAddress = http://localhost:5153
+
+GET {{CodexQueue.Api_HostAddress}}/api/health
+Accept: application/json
+
+###
+
+GET {{CodexQueue.Api_HostAddress}}/api/projects
+Accept: application/json
+
+###
