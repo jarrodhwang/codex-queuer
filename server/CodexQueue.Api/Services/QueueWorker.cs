@@ -394,17 +394,7 @@ public sealed class QueueWorker(
             if (kind == RunKind.Commit)
             {
                 var commitResult = request.SeparateCommitSession
-                    ? await runner.RunCodexAsync(
-                        machine,
-                        projectPath,
-                        run.Model,
-                        run.ModelEffort,
-                        run.ModelSpeed,
-                        project.CodexSessionId,
-                        null,
-                        BuildProjectScopedPrompt(projectPath, BuildCommitPrompt()),
-                        chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
-                        cancellationToken)
+                    ? await RunSeparateCommitSessionAsync(request, run, machine, projectPath, cancellationToken)
                     : await runner.RunShellAsync(
                         machine,
                         projectPath,
@@ -456,6 +446,49 @@ public sealed class QueueWorker(
         }
     }
 
+    private async Task<CommandResult> RunSeparateCommitSessionAsync(
+        CodexRequest request,
+        CodexRun run,
+        TargetMachine machine,
+        string projectPath,
+        CancellationToken cancellationToken)
+    {
+        var codexResult = await runner.RunCodexAsync(
+            machine,
+            projectPath,
+            run.Model,
+            run.ModelEffort,
+            run.ModelSpeed,
+            null,
+            null,
+            BuildProjectScopedPrompt(projectPath, BuildCommitPrompt()),
+            chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
+            cancellationToken);
+
+        if (!codexResult.Success || CommitOutputClaimsCreated(codexResult.Output))
+        {
+            return codexResult;
+        }
+
+        await AppendOutputAsync(
+            run.Id,
+            Environment.NewLine + "Separate commit session did not report a created commit; running deterministic git commit fallback." + Environment.NewLine,
+            CancellationToken.None);
+
+        var fallbackResult = await runner.RunShellAsync(
+            machine,
+            projectPath,
+            BuildCommitShellCommand(machine, BuildCommitMessage(request.Prompt)),
+            chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
+            cancellationToken);
+
+        return new CommandResult(
+            fallbackResult.ExitCode,
+            codexResult.Output.TrimEnd() + Environment.NewLine + fallbackResult.Output,
+            codexResult.CommandPreview + " -> " + fallbackResult.CommandPreview,
+            codexResult.CodexSessionId);
+    }
+
     private async Task<bool> IsRunSucceededAsync(Guid requestId, RunKind kind, CancellationToken cancellationToken)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
@@ -481,7 +514,7 @@ public sealed class QueueWorker(
         var changed = false;
         foreach (var request in requests)
         {
-            changed |= ReconcileRequestState(request);
+            changed |= ReconcileRequestState(request, _activeRequests.ContainsKey(request.Id));
         }
 
         if (changed)
@@ -490,7 +523,7 @@ public sealed class QueueWorker(
         }
     }
 
-    private static bool ReconcileRequestState(CodexRequest request)
+    private static bool ReconcileRequestState(CodexRequest request, bool isActive)
     {
         var requestRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Request);
         var commitRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Commit);
@@ -534,6 +567,13 @@ public sealed class QueueWorker(
 
             if (commitRun.Status == QueueStatus.Queued && request.Status != QueueStatus.Queued)
             {
+                MarkRequestQueued(request);
+                return true;
+            }
+
+            if (commitRun.Status is QueueStatus.Running or QueueStatus.CancelRequested && !isActive)
+            {
+                ResetRunForResume(commitRun);
                 MarkRequestQueued(request);
                 return true;
             }
@@ -724,7 +764,9 @@ public sealed class QueueWorker(
         var run = runId == Guid.Empty
             ? request.Runs.First(x => x.Kind == kind)
             : request.Runs.First(x => x.Id == runId);
-        var sessionId = result.CodexSessionId ?? request.Project?.CodexSessionId;
+        var sessionId = kind == RunKind.Request
+            ? result.CodexSessionId ?? request.Project?.CodexSessionId
+            : result.CodexSessionId ?? run.CodexSessionId;
 
         run.CommandPreview = result.CommandPreview;
         run.CodexSessionId = sessionId;
@@ -1332,9 +1374,12 @@ public sealed class QueueWorker(
         return normalized.Length <= 72 ? normalized : normalized[..72].TrimEnd();
     }
 
+    private static bool CommitOutputClaimsCreated(string output) =>
+        output.Contains("Commit created:", StringComparison.OrdinalIgnoreCase);
+
     private static string BuildRequestPrompt(CodexRequest request)
     {
-        if (!request.GenerateCommit || request.SeparateCommitSession)
+        if (!request.GenerateCommit)
         {
             return request.Prompt;
         }
@@ -1352,6 +1397,7 @@ public sealed class QueueWorker(
         You are running after a separate Codex implementation session.
 
         Create a git commit for the current repository only if there are actual changes.
+        Do not ask for clarification and do not wait for further input.
         Requirements:
         1. Inspect git status and the diff.
         2. Write one concise commit message.
@@ -1359,7 +1405,7 @@ public sealed class QueueWorker(
         4. Run git commit -m "<message>".
         5. Return the commit SHA, commit message, and changed files. Include a line exactly named "Commit created:" immediately before the SHA.
 
-        If there are no changes, do not create an empty commit. Say that there were no changes.
+        If there are no changes, do not create an empty commit. Say that there were no changes and exit.
         """;
 
     private static string BuildProjectScopedPrompt(string projectPath, string userPrompt) =>

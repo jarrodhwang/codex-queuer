@@ -190,6 +190,15 @@ function App() {
 
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0]
   const activeFile = openFiles.find((file) => file.key === activeFileKey)
+  const hasLiveTimers = useMemo(
+    () => requests.some((request) =>
+      request.status === 'Running' ||
+      request.status === 'UsageLimited' ||
+      Boolean(request.retryAfter) ||
+      request.runs.some((run) => run.status === 'Running' || run.status === 'UsageLimited' || Boolean(run.retryAfter)),
+    ),
+    [requests],
+  )
 
   const loadStatic = useCallback(async () => {
     const nextConfig = await api.config()
@@ -205,13 +214,12 @@ function App() {
   }, [])
 
   const loadLive = useCallback(async () => {
-    const nextRequests = await api.requests(undefined, true)
+    const [nextRequests, nextDiagnostics] = await Promise.all([
+      api.requests(undefined, true),
+      api.queueDiagnostics().catch(() => null),
+    ])
     setRequests(nextRequests)
-    try {
-      setQueueDiagnostics(await api.queueDiagnostics())
-    } catch {
-      setQueueDiagnostics(null)
-    }
+    setQueueDiagnostics(nextDiagnostics)
   }, [])
 
   const handleApiError = useCallback((cause: unknown) => {
@@ -235,11 +243,12 @@ function App() {
   }, [authBlocked, handleApiError, loadLive])
 
   useEffect(() => {
+    if (!hasLiveTimers) return
     const timer = window.setInterval(() => {
       setLiveNow(Date.now())
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [])
+  }, [hasLiveTimers])
 
   const refreshAll = async () => {
     setError('')
@@ -549,6 +558,24 @@ function LeftSidebar({
     .filter((request) => !request.deletedAt && request.status === 'UsageLimited')
     .toSorted((left, right) => Date.parse(left.retryAfter ?? left.createdAt) - Date.parse(right.retryAfter ?? right.createdAt)),
   [requests])
+  const projectQueueStates = useMemo(() => {
+    const states: Record<string, { queued: number; running: number }> = {}
+    for (const request of requests) {
+      if (request.deletedAt || request.archivedAt || (request.status !== 'Queued' && request.status !== 'Running')) {
+        continue
+      }
+
+      const state = states[request.projectId] ?? { queued: 0, running: 0 }
+      if (request.status === 'Running') {
+        state.running += 1
+      } else {
+        state.queued += 1
+      }
+      states[request.projectId] = state
+    }
+
+    return states
+  }, [requests])
   const grouped = useMemo(
     () => machines.map((machine) => ({
       machine,
@@ -619,28 +646,42 @@ function LeftSidebar({
               {machineProjects.length === 0 ? (
                 <div className="empty-state">No projects</div>
               ) : (
-                machineProjects.map((project) => (
-                  <div
-                    key={project.id}
-                    className={`project-item ${project.id === selectedProjectId ? 'active' : ''}`}
-                  >
-                    <button type="button" className="project-item-main" onClick={() => onSelectProject(project.id)}>
-                      <div className="project-name truncate">{project.name}</div>
-                      <div className="meta truncate">{project.path}</div>
-                    </button>
-                    <button
-                      type="button"
-                      className="project-detail-button"
-                      title="Project details"
-                      onClick={() => {
-                        onSelectProject(project.id)
-                        setProjectDetailsId(project.id)
-                      }}
+                machineProjects.map((project) => {
+                  const queueState = projectQueueStates[project.id]
+                  const running = queueState?.running ?? 0
+                  const queued = queueState?.queued ?? 0
+                  const hasQueueActivity = running > 0 || queued > 0
+                  return (
+                    <div
+                      key={project.id}
+                      className={`project-item ${project.id === selectedProjectId ? 'active' : ''} ${running > 0 ? 'project-item--running' : hasQueueActivity ? 'project-item--queued' : ''}`}
                     >
-                      <Settings size={14} />
-                    </button>
-                  </div>
-                ))
+                      <button type="button" className="project-item-main" onClick={() => onSelectProject(project.id)}>
+                        <div className="project-name-row">
+                          <div className="project-name truncate">{project.name}</div>
+                          {hasQueueActivity && (
+                            <span className={`project-queue-chip ${running > 0 ? 'running' : 'queued'}`}>
+                              <span className="project-queue-dot" aria-hidden="true" />
+                              {running > 0 ? `${running} running` : `${queued} queued`}
+                            </span>
+                          )}
+                        </div>
+                        <div className="meta truncate">{project.path}</div>
+                      </button>
+                      <button
+                        type="button"
+                        className="project-detail-button"
+                        title="Project details"
+                        onClick={() => {
+                          onSelectProject(project.id)
+                          setProjectDetailsId(project.id)
+                        }}
+                      >
+                        <Settings size={14} />
+                      </button>
+                    </div>
+                  )
+                })
               )}
             </div>
           ))}
@@ -1937,16 +1978,14 @@ function QueueList({
         <h2>{selectedProject ? `${selectedProject.name} Queue` : 'Queue'}</h2>
         <div className="queue-header-actions">
           <span className="meta">{requests.length} requests</span>
+          <QueueKickButton diagnostics={diagnostics} onKickQueue={onKickQueue} />
           {succeededRequestIds.length > 0 && (
-            <GlassButton variant="secondary" size="sm" type="button" onClick={() => onArchiveAll(succeededRequestIds)}>
+            <GlassButton className="done-all-button" variant="primary" size="sm" type="button" onClick={() => onArchiveAll(succeededRequestIds)}>
               <Check size={13} /> Done all
             </GlassButton>
           )}
         </div>
       </div>
-      {requests.some((request) => request.status === 'Queued' || request.status === 'Running') && (
-        <QueueWorkerStatus diagnostics={diagnostics} onKickQueue={onKickQueue} />
-      )}
       <div className="queue-workbench">
         <div className="request-list" aria-label="Queued requests">
           {requests.length === 0 && <span className="muted">No queued requests yet.</span>}
@@ -2149,30 +2188,30 @@ function RequestCard({
   )
 }
 
-function QueueWorkerStatus({
+function QueueKickButton({
   diagnostics,
   onKickQueue,
 }: {
   diagnostics: QueueDiagnostics | null
   onKickQueue: () => Promise<void>
 }) {
-  const message = diagnostics
-    ? diagnostics.lastError
-      ? `Worker error: ${diagnostics.lastError}`
-      : diagnostics.isProcessing
-        ? `Worker processing ${diagnostics.activeRequestIds.length || 1} request`
-        : diagnostics.lastHeartbeat
-          ? `Worker idle · last check ${formatDate(diagnostics.lastHeartbeat)}`
-          : 'Worker has not reported yet'
-    : 'Worker diagnostics unavailable until API is rebuilt'
-
+  const title = diagnostics?.lastError
+    ? `Worker error: ${diagnostics.lastError}`
+    : diagnostics?.isProcessing
+      ? 'Worker is already processing'
+      : 'Kick worker'
   return (
-    <div className={`queue-worker-status ${diagnostics?.lastError ? 'queue-worker-status--bad' : ''}`}>
-      <span className="truncate">{message}</span>
-      <GlassButton variant="secondary" size="sm" type="button" onClick={onKickQueue}>
-        <Play size={13} /> Kick worker
-      </GlassButton>
-    </div>
+    <GlassButton
+      className={diagnostics?.lastError ? 'kick-worker-button kick-worker-button--bad' : 'kick-worker-button'}
+      variant="secondary"
+      size="sm"
+      type="button"
+      onClick={onKickQueue}
+      disabled={diagnostics?.isProcessing}
+      title={title}
+    >
+      <Play size={13} /> Kick worker
+    </GlassButton>
   )
 }
 
@@ -2733,9 +2772,11 @@ function TerminalPrompt({ machineName, path }: { machineName: string; path: stri
 }
 
 function TerminalOutput({ output, success }: { output: string; success: boolean }) {
+  const segments = useMemo(() => parseAnsiOutput(output), [output])
+
   return (
     <pre className={`terminal-output ${success ? 'terminal-output--ok' : 'terminal-output--bad'}`}>
-      {parseAnsiOutput(output).map((segment, index) => (
+      {segments.map((segment, index) => (
         <span key={index} className={segment.className}>{segment.text}</span>
       ))}
     </pre>
