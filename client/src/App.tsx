@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ClipboardEvent, DragEvent, FormEvent, KeyboardEvent, ReactNode } from 'react'
-import { createPortal } from 'react-dom'
+import { createPortal, flushSync } from 'react-dom'
 import {
   Check,
   ChevronDown,
@@ -179,6 +179,38 @@ function isOptimisticRequest(id: string) {
   return id.startsWith('optimistic:')
 }
 
+function requestOverrideConfirmed(request: CodexRequest, override: Partial<CodexRequest>) {
+  if (override.deletedAt !== undefined) {
+    return Boolean(request.deletedAt)
+  }
+
+  if (override.archivedAt !== undefined) {
+    return Boolean(request.archivedAt)
+  }
+
+  if (override.status === 'CancelRequested') {
+    return request.status === 'CancelRequested' || request.status === 'Cancelled'
+  }
+
+  if (override.status === 'Queued') {
+    return request.status === 'Queued' || request.status === 'Running'
+  }
+
+  if (override.status !== undefined && request.status !== override.status) {
+    return false
+  }
+
+  if (override.queueOrder !== undefined && request.queueOrder !== override.queueOrder) {
+    return false
+  }
+
+  if (override.prompt !== undefined && request.prompt !== override.prompt) {
+    return false
+  }
+
+  return true
+}
+
 function App() {
   const [config, setConfig] = useState<ApiConfig>({ requiresToken: false, models: defaultModels })
   const [machines, setMachines] = useState<Machine[]>([])
@@ -193,6 +225,7 @@ function App() {
   const [activeFileKey, setActiveFileKey] = useState<string | null>(null)
   const [liveNow, setLiveNow] = useState(() => Date.now())
   const pendingRequestOverridesRef = useRef(new Map<string, Partial<CodexRequest>>())
+  const liveRequestSequenceRef = useRef(0)
 
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0]
   const activeFile = openFiles.find((file) => file.key === activeFileKey)
@@ -220,15 +253,23 @@ function App() {
   }, [])
 
   const loadLive = useCallback(async () => {
+    const requestSequence = ++liveRequestSequenceRef.current
     const [nextRequests, nextDiagnostics] = await Promise.all([
       api.requests(undefined, true),
       api.queueDiagnostics().catch(() => null),
     ])
+    if (requestSequence !== liveRequestSequenceRef.current) {
+      return
+    }
     setRequests((current) => {
-      const requestsWithOverrides = nextRequests.map((request) => ({
-        ...request,
-        ...pendingRequestOverridesRef.current.get(request.id),
-      }))
+      const requestsWithOverrides = nextRequests.map((request) => {
+        const override = pendingRequestOverridesRef.current.get(request.id)
+        if (!override) return request
+        if (requestOverrideConfirmed(request, override)) {
+          pendingRequestOverridesRef.current.delete(request.id)
+        }
+        return { ...request, ...override }
+      })
       const optimisticPreviews = current.filter((request) => isOptimisticRequest(request.id))
       return [
         ...requestsWithOverrides,
@@ -250,19 +291,25 @@ function App() {
     void loadLive().catch(handleApiError)
   }, [handleApiError, loadLive])
 
+  const applyRequestsImmediately = useCallback((updater: (current: CodexRequest[]) => CodexRequest[]) => {
+    flushSync(() => {
+      setRequests(updater)
+    })
+  }, [])
+
   const addCreatedRequest = useCallback((request: CodexRequest, replaceId?: string) => {
-    setRequests((current) => {
+    applyRequestsImmediately((current) => {
       const withoutCreated = current.filter((item) => item.id !== request.id && item.id !== replaceId)
       return [...withoutCreated, request]
     })
     if (!isOptimisticRequest(request.id)) {
       refreshLiveInBackground()
     }
-  }, [refreshLiveInBackground])
+  }, [applyRequestsImmediately, refreshLiveInBackground])
 
   const discardRequestPreview = useCallback((id: string) => {
-    setRequests((current) => current.filter((request) => request.id !== id))
-  }, [])
+    applyRequestsImmediately((current) => current.filter((request) => request.id !== id))
+  }, [applyRequestsImmediately])
 
   useEffect(() => {
     loadStatic().then(() => loadLive()).catch(handleApiError)
@@ -384,11 +431,10 @@ function App() {
     setError('')
     const archivedAt = new Date().toISOString()
     pendingRequestOverridesRef.current.set(id, { archivedAt })
-    setRequests((current) => current.map((request) => (request.id === id ? { ...request, archivedAt } : request)))
+    applyRequestsImmediately((current) => current.map((request) => (request.id === id ? { ...request, archivedAt } : request)))
     try {
       const updated = await api.archiveRequest(id)
-      pendingRequestOverridesRef.current.delete(id)
-      setRequests((current) => current.map((request) => (request.id === id ? updated : request)))
+      setRequests((current) => current.map((request) => (request.id === id ? { ...updated, archivedAt: updated.archivedAt ?? archivedAt } : request)))
       refreshLiveInBackground()
     } catch (cause) {
       pendingRequestOverridesRef.current.delete(id)
@@ -404,11 +450,10 @@ function App() {
     const archivedAt = new Date().toISOString()
     const idSet = new Set(ids)
     ids.forEach((id) => pendingRequestOverridesRef.current.set(id, { archivedAt }))
-    setRequests((current) => current.map((request) => (idSet.has(request.id) ? { ...request, archivedAt } : request)))
+    applyRequestsImmediately((current) => current.map((request) => (idSet.has(request.id) ? { ...request, archivedAt } : request)))
     try {
       const updatedRequests = await Promise.all(ids.map((id) => api.archiveRequest(id)))
-      ids.forEach((id) => pendingRequestOverridesRef.current.delete(id))
-      const updatedById = new Map(updatedRequests.map((request) => [request.id, request]))
+      const updatedById = new Map(updatedRequests.map((request) => [request.id, { ...request, archivedAt: request.archivedAt ?? archivedAt }]))
       setRequests((current) => current.map((request) => updatedById.get(request.id) ?? request))
       refreshLiveInBackground()
     } catch (cause) {
@@ -425,7 +470,7 @@ function App() {
       attachments: request.attachments?.map(({ name, contentType, size }) => ({ name, contentType, size })),
     }
     pendingRequestOverridesRef.current.set(id, optimisticUpdate)
-    setRequests((current) => current.map((item) => (item.id === id
+    applyRequestsImmediately((current) => current.map((item) => (item.id === id
       ? {
           ...item,
           ...optimisticUpdate,
@@ -434,7 +479,6 @@ function App() {
       : item)))
     try {
       const updated = await api.updateRequest(id, request)
-      pendingRequestOverridesRef.current.delete(id)
       setRequests((current) => current.map((item) => (item.id === id ? updated : item)))
       refreshLiveInBackground()
     } catch (cause) {
@@ -449,14 +493,13 @@ function App() {
     setError('')
     const orderById = new Map(requestIds.map((id, index) => [id, index + 1]))
     requestIds.forEach((id) => pendingRequestOverridesRef.current.set(id, { queueOrder: orderById.get(id) }))
-    setRequests((current) => current.map((request) => (
+    applyRequestsImmediately((current) => current.map((request) => (
       request.projectId === projectId && orderById.has(request.id)
         ? { ...request, queueOrder: orderById.get(request.id) ?? request.queueOrder }
         : request
     )))
     try {
       await api.reorderRequests(projectId, requestIds)
-      requestIds.forEach((id) => pendingRequestOverridesRef.current.delete(id))
       refreshLiveInBackground()
     } catch (cause) {
       requestIds.forEach((id) => pendingRequestOverridesRef.current.delete(id))
@@ -475,10 +518,9 @@ function App() {
     setError('')
     const deletedAt = new Date().toISOString()
     pendingRequestOverridesRef.current.set(id, { deletedAt })
-    setRequests((current) => current.map((item) => (item.id === id ? { ...item, deletedAt } : item)))
+    applyRequestsImmediately((current) => current.map((item) => (item.id === id ? { ...item, deletedAt } : item)))
     try {
       await api.deleteRequest(id)
-      pendingRequestOverridesRef.current.delete(id)
       refreshLiveInBackground()
     } catch (cause) {
       pendingRequestOverridesRef.current.delete(id)
@@ -495,7 +537,7 @@ function App() {
       retryReason: null,
     }
     pendingRequestOverridesRef.current.set(id, optimisticUpdate)
-    setRequests((current) => current.map((request) => (request.id === id
+    applyRequestsImmediately((current) => current.map((request) => (request.id === id
       ? {
           ...request,
           ...optimisticUpdate,
@@ -503,7 +545,6 @@ function App() {
       : request)))
     try {
       await api.cancelRequest(id)
-      pendingRequestOverridesRef.current.delete(id)
       refreshLiveInBackground()
     } catch (cause) {
       pendingRequestOverridesRef.current.delete(id)
@@ -523,7 +564,7 @@ function App() {
       finishedAt: null,
     }
     pendingRequestOverridesRef.current.set(id, optimisticUpdate)
-    setRequests((current) => current.map((request) => (request.id === id
+    applyRequestsImmediately((current) => current.map((request) => (request.id === id
       ? {
           ...request,
           ...optimisticUpdate,
@@ -531,7 +572,6 @@ function App() {
       : request)))
     try {
       await api.resumeRequest(id)
-      pendingRequestOverridesRef.current.delete(id)
       refreshLiveInBackground()
     } catch (cause) {
       pendingRequestOverridesRef.current.delete(id)
@@ -1824,7 +1864,7 @@ function QueueComposer({
           model: requestModel.model,
           modelEffort: requestModel.effort,
           modelSpeed: requestModel.speed,
-          queueOrder: Number.MAX_SAFE_INTEGER,
+          queueOrder: Number.MIN_SAFE_INTEGER,
           status: 'Queued',
           generateCommit,
           separateCommitSession: generateCommit && separateCommitSession,
@@ -2230,7 +2270,7 @@ function QueueList({
           <span className="meta">{requests.length} requests</span>
           <QueueKickButton diagnostics={diagnostics} onKickQueue={onKickQueue} />
           {succeededRequestIds.length > 0 && (
-            <GlassButton className="done-all-button" variant="primary" size="sm" type="button" onClick={() => onArchiveAll(succeededRequestIds)}>
+            <GlassButton className="done-all-button" variant="primary" size="sm" type="button" onClick={() => { void onArchiveAll(succeededRequestIds) }}>
               <Check size={13} /> Done all
             </GlassButton>
           )}
@@ -2369,7 +2409,7 @@ function RequestCard({
               size="sm"
               onClick={(event) => {
                 event.stopPropagation()
-                onResume(request.id)
+                void onResume(request.id)
               }}
             >
               <Play size={13} /> Resume
@@ -2381,7 +2421,7 @@ function RequestCard({
               size="sm"
               onClick={(event) => {
                 event.stopPropagation()
-                onCancel(request.id)
+                void onCancel(request.id)
               }}
             >
               <Square size={13} /> Cancel
@@ -2393,7 +2433,7 @@ function RequestCard({
               size="sm"
               onClick={(event) => {
                 event.stopPropagation()
-                onArchive(request.id)
+                void onArchive(request.id)
               }}
             >
               <Check size={13} /> Done
@@ -2419,7 +2459,7 @@ function RequestCard({
             onClick={(event) => {
               event.stopPropagation()
               if (!deletable) return
-              onDelete(request.id)
+              void onDelete(request.id)
             }}
           >
             <Trash2 size={14} />
@@ -3257,7 +3297,7 @@ function RequestHistory({
                       title="Move to trash"
                       onClick={(event) => {
                         event.stopPropagation()
-                        onDelete(request.id)
+                        void onDelete(request.id)
                       }}
                     >
                       <Trash2 size={14} />

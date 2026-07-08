@@ -427,6 +427,18 @@ public sealed class QueueWorker(
                 return false;
             }
 
+            if (result.Success && request.GenerateCommit && !request.SeparateCommitSession && !CommitOutputClaimsCreated(result.Output))
+            {
+                result = await RunDeterministicCommitFallbackAsync(
+                    request,
+                    run,
+                    machine,
+                    projectPath,
+                    result,
+                    "Request run did not report a created commit; running deterministic git commit fallback.",
+                    cancellationToken);
+            }
+
             await CompleteRunAsync(requestId, run.Id, kind, result, cancellationToken);
             return result.Success;
         }
@@ -461,14 +473,35 @@ public sealed class QueueWorker(
             chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
             cancellationToken);
 
-        if (!codexResult.Success || CommitOutputClaimsCreated(codexResult.Output))
+        if (CommitOutputClaimsCreated(codexResult.Output))
         {
             return codexResult;
         }
 
+        return await RunDeterministicCommitFallbackAsync(
+            request,
+            run,
+            machine,
+            projectPath,
+            codexResult,
+            codexResult.Success
+                ? "Separate commit session did not report a created commit; running deterministic git commit fallback."
+                : "Separate commit session failed before creating a commit; running deterministic git commit fallback.",
+            cancellationToken);
+    }
+
+    private async Task<CommandResult> RunDeterministicCommitFallbackAsync(
+        CodexRequest request,
+        CodexRun run,
+        TargetMachine machine,
+        string projectPath,
+        CommandResult priorResult,
+        string reason,
+        CancellationToken cancellationToken)
+    {
         await AppendOutputAsync(
             run.Id,
-            Environment.NewLine + "Separate commit session did not report a created commit; running deterministic git commit fallback." + Environment.NewLine,
+            Environment.NewLine + reason + Environment.NewLine,
             CancellationToken.None);
 
         var fallbackResult = await runner.RunShellAsync(
@@ -480,9 +513,9 @@ public sealed class QueueWorker(
 
         return new CommandResult(
             fallbackResult.ExitCode,
-            codexResult.Output.TrimEnd() + Environment.NewLine + fallbackResult.Output,
-            codexResult.CommandPreview + " -> " + fallbackResult.CommandPreview,
-            codexResult.CodexSessionId);
+            priorResult.Output.TrimEnd() + Environment.NewLine + fallbackResult.Output,
+            priorResult.CommandPreview + " -> " + fallbackResult.CommandPreview,
+            priorResult.CodexSessionId);
     }
 
     private async Task<bool> IsRunSucceededAsync(Guid requestId, RunKind kind, CancellationToken cancellationToken)
@@ -1405,16 +1438,7 @@ public sealed class QueueWorker(
         return request.Prompt.TrimEnd()
             + """
 
-            After completing the requested changes in this same run, create a git commit for the current repository only if there are actual changes.
-            Do not ask for clarification and do not wait for further input.
-            Commit requirements:
-            1. Inspect git status and the diff.
-            2. Write one concise commit message.
-            3. Run git add -A.
-            4. Run git commit -m "<message>".
-            5. Return the commit SHA, commit message, and changed files. Include a line exactly named "Commit created:" immediately before the SHA.
-
-            If there are no changes, do not create an empty commit. Say that there were no changes and exit.
+            Create a git commit after completing the requested changes if there are actual changes.
             """;
     }
 
@@ -1422,7 +1446,7 @@ public sealed class QueueWorker(
         """
         You are running after a separate Codex implementation session.
 
-        Create a git commit for the current repository only if there are actual changes.
+        Inspect all current git changes, create a concise commit message from those changes, and commit all changes in the current repository only if there are actual changes.
         Do not ask for clarification and do not wait for further input.
         Requirements:
         1. Inspect git status and the diff.
