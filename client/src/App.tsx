@@ -2727,17 +2727,6 @@ function CompletionSummary({ request }: { request: CodexRequest }) {
 
   return (
     <section className="completion-summary" aria-label="Completion summary">
-      <div className="completion-summary-head">
-        <div>
-          <div className="completion-title">Last result</div>
-          <div className="completion-facts">
-            <span>Finished {formatDate(request.finishedAt ?? request.createdAt)}</span>
-            {commitMetadataRun?.commitSha && <span>Commit {commitMetadataRun.commitSha.slice(0, 12)}</span>}
-            {fileChanges.length > 0 && <span>{fileChanges.length} files changed</span>}
-          </div>
-        </div>
-        <Check size={18} />
-      </div>
       <div className="completion-result-box">{resultText}</div>
       {commitMetadataRun?.commitMessage && <div className="completion-message">{commitMetadataRun.commitMessage}</div>}
       {fileChanges.length > 0 && (
