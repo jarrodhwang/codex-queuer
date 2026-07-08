@@ -1850,6 +1850,9 @@ function QueueComposer({
         onCancelEdit()
       } else {
         previewId = `optimistic:${selectedProject.id}:${Date.now()}`
+        const nextQueueOrder = requests
+          .filter((item) => item.projectId === selectedProject.id && !item.deletedAt && !item.archivedAt)
+          .reduce((maxOrder, item) => Math.max(maxOrder, item.queueOrder), 0) + 1
         const createdAt = new Date().toISOString()
         const previewRequest: CodexRequest = {
           id: previewId,
@@ -1864,7 +1867,7 @@ function QueueComposer({
           model: requestModel.model,
           modelEffort: requestModel.effort,
           modelSpeed: requestModel.speed,
-          queueOrder: Number.MIN_SAFE_INTEGER,
+          queueOrder: nextQueueOrder,
           status: 'Queued',
           generateCommit,
           separateCommitSession: generateCommit && separateCommitSession,
