@@ -15,8 +15,10 @@ public static class DbInitializer
         await EnsureColumnAsync(db, "Machines", "Platform", "ALTER TABLE \"Machines\" ADD COLUMN \"Platform\" TEXT NOT NULL DEFAULT 'Auto'", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "ModelEffort", "ALTER TABLE \"Requests\" ADD COLUMN \"ModelEffort\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "ModelSpeed", "ALTER TABLE \"Requests\" ADD COLUMN \"ModelSpeed\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "Requests", "QueueOrder", "ALTER TABLE \"Requests\" ADD COLUMN \"QueueOrder\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "CommitModelEffort", "ALTER TABLE \"Requests\" ADD COLUMN \"CommitModelEffort\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "CommitModelSpeed", "ALTER TABLE \"Requests\" ADD COLUMN \"CommitModelSpeed\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "Requests", "SeparateCommitSession", "ALTER TABLE \"Requests\" ADD COLUMN \"SeparateCommitSession\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "AttachmentsJson", "ALTER TABLE \"Requests\" ADD COLUMN \"AttachmentsJson\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "RetryAfter", "ALTER TABLE \"Requests\" ADD COLUMN \"RetryAfter\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "RetryReason", "ALTER TABLE \"Requests\" ADD COLUMN \"RetryReason\" TEXT NULL", cancellationToken);
@@ -31,12 +33,14 @@ public static class DbInitializer
         await EnsureColumnAsync(db, "Projects", "DefaultCommitModelEffort", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultCommitModelEffort\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Projects", "DefaultCommitModelSpeed", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultCommitModelSpeed\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Projects", "DefaultGenerateCommit", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultGenerateCommit\" INTEGER NOT NULL DEFAULT 1", cancellationToken);
+        await EnsureColumnAsync(db, "Projects", "DefaultSeparateCommitSession", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultSeparateCommitSession\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "ModelEffort", "ALTER TABLE \"Runs\" ADD COLUMN \"ModelEffort\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "ModelSpeed", "ALTER TABLE \"Runs\" ADD COLUMN \"ModelSpeed\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "CodexSessionId", "ALTER TABLE \"Runs\" ADD COLUMN \"CodexSessionId\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "RetryAfter", "ALTER TABLE \"Runs\" ADD COLUMN \"RetryAfter\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "RetryReason", "ALTER TABLE \"Runs\" ADD COLUMN \"RetryReason\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "AvailableModel", "ALTER TABLE \"Runs\" ADD COLUMN \"AvailableModel\" TEXT NULL", cancellationToken);
+        await EnsureQueueOrderAsync(db, cancellationToken);
 
         var defaultMachine = DefaultPaths.DefaultMachine();
         if (!await db.Machines.AnyAsync(cancellationToken))
@@ -129,6 +133,34 @@ public static class DbInitializer
         }
     }
 
+    private static async Task EnsureQueueOrderAsync(AppDbContext db, CancellationToken cancellationToken)
+    {
+        var unorderedRequests = await db.Requests
+            .Where(x => x.QueueOrder == 0)
+            .ToArrayAsync(cancellationToken);
+
+        if (unorderedRequests.Length == 0)
+        {
+            return;
+        }
+
+        foreach (var group in unorderedRequests
+                     .OrderBy(x => x.ProjectId)
+                     .ThenBy(x => x.CreatedAt)
+                     .GroupBy(x => x.ProjectId))
+        {
+            var nextOrder = await db.Requests
+                .Where(x => x.ProjectId == group.Key)
+                .MaxAsync(x => (int?)x.QueueOrder, cancellationToken) ?? 0;
+            foreach (var request in group)
+            {
+                request.QueueOrder = ++nextOrder;
+            }
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
     private static async Task EnsureColumnAsync(
         AppDbContext db,
         string tableName,
@@ -205,13 +237,14 @@ public static class DbInitializer
             return false;
         }
 
-        if (!request.GenerateCommit)
+        var commitRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Commit);
+        if (!UsesSeparateCommitSession(request))
         {
+            CancelUnusedCommitRun(commitRun);
             MarkRequestSucceeded(request, requestRun);
             return true;
         }
 
-        var commitRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Commit);
         if (commitRun?.Status == QueueStatus.Succeeded)
         {
             MarkRequestSucceeded(request, commitRun);
@@ -255,6 +288,21 @@ public static class DbInitializer
         run.ModelEffort = useRequestModel ? request.ModelEffort : request.CommitModelEffort;
         run.ModelSpeed = useRequestModel ? request.ModelSpeed : request.CommitModelSpeed;
         return run;
+    }
+
+    private static bool UsesSeparateCommitSession(CodexRequest request) =>
+        request.GenerateCommit && request.SeparateCommitSession;
+
+    private static void CancelUnusedCommitRun(CodexRun? commitRun)
+    {
+        if (commitRun is null || commitRun.Status is QueueStatus.Succeeded or QueueStatus.Failed or QueueStatus.Cancelled)
+        {
+            return;
+        }
+
+        commitRun.Status = QueueStatus.Cancelled;
+        commitRun.Error = "Commit handled by the main request session.";
+        commitRun.FinishedAt ??= DateTimeOffset.UtcNow;
     }
 
     private static void ResetRunForQueue(CodexRun run)

@@ -43,6 +43,7 @@ builder.Services.AddSingleton<IQueueCoordinator>(sp => sp.GetRequiredService<Que
 var app = builder.Build();
 
 app.UseCors("dev");
+app.UseWebSockets();
 app.UseMiddleware<ApiTokenMiddleware>();
 
 await DbInitializer.InitializeAsync(app.Services);

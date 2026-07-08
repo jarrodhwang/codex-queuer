@@ -198,7 +198,7 @@ public sealed class QueueWorker(
 
             Guid? nextRequestId = null;
             Guid? nextRunId = null;
-            foreach (var candidate in queuedRequests.OrderBy(x => x.CreatedAt))
+            foreach (var candidate in queuedRequests.OrderBy(x => x.QueueOrder).ThenBy(x => x.CreatedAt))
             {
                 var candidateRun = NextRunForDispatch(candidate);
                 if (candidateRun is null)
@@ -268,7 +268,7 @@ public sealed class QueueWorker(
             await using var scope = scopeFactory.CreateAsyncScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             var request = await db.Requests.Include(x => x.Runs).FirstAsync(x => x.Id == requestId, stoppingToken);
-            if (!request.GenerateCommit)
+            if (!UsesSeparateCommitSession(request))
             {
                 request.Status = QueueStatus.Succeeded;
                 request.FinishedAt = DateTimeOffset.UtcNow;
@@ -375,10 +375,16 @@ public sealed class QueueWorker(
         {
             if (kind == RunKind.Commit)
             {
-                var commitResult = await runner.RunShellAsync(
+                var commitPrompt = BuildProjectScopedPrompt(projectPath, BuildCommitPrompt());
+                var commitResult = await runner.RunCodexAsync(
                     machine,
                     projectPath,
-                    BuildCommitShellCommand(machine, BuildCommitMessage(request.Prompt)),
+                    run.Model,
+                    run.ModelEffort,
+                    run.ModelSpeed,
+                    project.CodexSessionId,
+                    null,
+                    commitPrompt,
                     chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
                     cancellationToken);
 
@@ -386,7 +392,7 @@ public sealed class QueueWorker(
                 return commitResult.Success;
             }
 
-            var prompt = BuildProjectScopedPrompt(projectPath, request.Prompt);
+            var prompt = BuildProjectScopedPrompt(projectPath, BuildRequestPrompt(request));
             var attachments = await MaterializeAttachmentsAsync(request, project, machine, cancellationToken);
             if (!string.IsNullOrWhiteSpace(attachments.PromptSection))
             {
@@ -480,13 +486,14 @@ public sealed class QueueWorker(
             changed = true;
         }
 
-        if (requestRun.Status == QueueStatus.Succeeded && !request.GenerateCommit && request.Status != QueueStatus.Succeeded)
+        if (requestRun.Status == QueueStatus.Succeeded && !UsesSeparateCommitSession(request) && request.Status != QueueStatus.Succeeded)
         {
+            CancelUnusedCommitRun(commitRun);
             MarkRequestSucceeded(request, requestRun);
             return true;
         }
 
-        if (requestRun.Status == QueueStatus.Succeeded && request.GenerateCommit)
+        if (requestRun.Status == QueueStatus.Succeeded && UsesSeparateCommitSession(request))
         {
             if (commitRun?.Status == QueueStatus.Succeeded && request.Status != QueueStatus.Succeeded)
             {
@@ -535,6 +542,21 @@ public sealed class QueueWorker(
         return true;
     }
 
+    private static bool UsesSeparateCommitSession(CodexRequest request) =>
+        request.GenerateCommit && request.SeparateCommitSession;
+
+    private static void CancelUnusedCommitRun(CodexRun? commitRun)
+    {
+        if (commitRun is null || commitRun.Status is QueueStatus.Succeeded or QueueStatus.Failed or QueueStatus.Cancelled)
+        {
+            return;
+        }
+
+        commitRun.Status = QueueStatus.Cancelled;
+        commitRun.Error = "Commit handled by the main request session.";
+        commitRun.FinishedAt ??= DateTimeOffset.UtcNow;
+    }
+
     private static CodexRun? NextRunForDispatch(CodexRequest request)
     {
         var requestRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Request);
@@ -548,7 +570,7 @@ public sealed class QueueWorker(
             return requestRun.Status == QueueStatus.Queued ? requestRun : null;
         }
 
-        if (!request.GenerateCommit)
+        if (!UsesSeparateCommitSession(request))
         {
             return null;
         }
@@ -596,7 +618,7 @@ public sealed class QueueWorker(
             return;
         }
 
-        if (!request.GenerateCommit)
+        if (!UsesSeparateCommitSession(request))
         {
             MarkRequestSucceeded(request, requestRun);
             return;
@@ -707,7 +729,7 @@ public sealed class QueueWorker(
                 await PopulateCommitMetadataAsync(db, request, run, cancellationToken);
             }
         }
-        else if (!request.GenerateCommit)
+        else if (!UsesSeparateCommitSession(request))
         {
             request.FinishedAt = run.FinishedAt;
             request.Status = result.Success ? QueueStatus.Succeeded : QueueStatus.Failed;
@@ -1289,6 +1311,22 @@ public sealed class QueueWorker(
         return normalized.Length <= 72 ? normalized : normalized[..72].TrimEnd();
     }
 
+    private static string BuildRequestPrompt(CodexRequest request)
+    {
+        if (!request.GenerateCommit || request.SeparateCommitSession)
+        {
+            return request.Prompt;
+        }
+
+        return request.Prompt.TrimEnd()
+            + """
+
+
+            After completing the requested changes, create a git commit for this project if there are actual changes.
+            Use one concise commit message. Do not create an empty commit.
+            """;
+    }
+
     private static string BuildCommitPrompt() =>
         """
         You are running after a separate Codex implementation session.
@@ -1299,7 +1337,7 @@ public sealed class QueueWorker(
         2. Write one concise commit message.
         3. Run git add -A.
         4. Run git commit -m "<message>".
-        5. Return the commit SHA, commit message, and changed files.
+        5. Return the commit SHA, commit message, and changed files. Include a line exactly named "Commit created:" immediately before the SHA.
 
         If there are no changes, do not create an empty commit. Say that there were no changes.
         """;

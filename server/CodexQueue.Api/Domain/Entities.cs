@@ -30,6 +30,7 @@ public sealed class Project
     public string? DefaultCommitModelEffort { get; set; }
     public string? DefaultCommitModelSpeed { get; set; }
     public bool DefaultGenerateCommit { get; set; } = true;
+    public bool DefaultSeparateCommitSession { get; set; }
     public Guid MachineId { get; set; }
     public TargetMachine? Machine { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
@@ -50,8 +51,10 @@ public sealed class CodexRequest
     public string Model { get; set; } = "";
     public string? ModelEffort { get; set; }
     public string? ModelSpeed { get; set; }
+    public int QueueOrder { get; set; }
     public QueueStatus Status { get; set; } = QueueStatus.Queued;
     public bool GenerateCommit { get; set; }
+    public bool SeparateCommitSession { get; set; }
     public string? CommitModel { get; set; }
     public string? CommitModelEffort { get; set; }
     public string? CommitModelSpeed { get; set; }

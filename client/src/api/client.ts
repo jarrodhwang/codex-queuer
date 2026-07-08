@@ -12,10 +12,23 @@ import type {
   SaveProjectRequest,
   Session,
   TerminalCommandResult,
+  UpdateQueueRequest,
 } from './types'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '/api'
 const TOKEN_KEY = 'codex-queue-token'
+
+export function apiWebSocketUrl(path: string) {
+  const base = new URL(API_BASE, window.location.origin)
+  const url = new URL(`${base.pathname.replace(/\/$/, '')}${path}`, base.origin)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  const token = getStoredToken()
+  if (token) {
+    url.searchParams.set('access_token', token)
+  }
+
+  return url.toString()
+}
 
 export class ApiError extends Error {
   status: number
@@ -97,6 +110,10 @@ export const api = {
   },
   createRequest: (request: CreateQueueRequest) =>
     apiFetch<CodexRequest>('/requests', { method: 'POST', body: JSON.stringify(request) }),
+  updateRequest: (id: string, request: UpdateQueueRequest) =>
+    apiFetch<CodexRequest>(`/requests/${id}`, { method: 'PUT', body: JSON.stringify(request) }),
+  reorderRequests: (projectId: string, requestIds: string[]) =>
+    apiFetch<{ ok: boolean }>('/requests/reorder', { method: 'POST', body: JSON.stringify({ projectId, requestIds }) }),
   deleteRequest: (id: string) => apiFetch<void>(`/requests/${id}`, { method: 'DELETE' }),
   archiveRequest: (id: string) => apiFetch<CodexRequest>(`/requests/${id}/archive`, { method: 'POST' }),
   cancelRequest: (id: string) => apiFetch<{ ok: boolean }>(`/requests/${id}/cancel`, { method: 'POST' }),

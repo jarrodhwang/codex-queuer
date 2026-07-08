@@ -42,6 +42,8 @@ public sealed class ApiTokenMiddleware(RequestDelegate next, IConfiguration conf
 
         return context.Request.Headers.TryGetValue("X-CQ-Token", out var token)
             ? token.ToString()
+            : context.Request.Query.TryGetValue("access_token", out var queryToken)
+                ? queryToken.ToString()
             : null;
     }
 }

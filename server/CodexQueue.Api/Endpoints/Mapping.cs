@@ -34,6 +34,7 @@ public static class Mapping
             project.DefaultCommitModelEffort,
             project.DefaultCommitModelSpeed,
             project.DefaultGenerateCommit,
+            project.DefaultSeparateCommitSession,
             project.CreatedAt,
             project.UpdatedAt);
 
@@ -51,8 +52,10 @@ public static class Mapping
             request.Model,
             request.ModelEffort,
             request.ModelSpeed,
+            request.QueueOrder,
             request.Status,
             request.GenerateCommit,
+            request.SeparateCommitSession,
             request.CommitModel,
             request.CommitModelEffort,
             request.CommitModelSpeed,

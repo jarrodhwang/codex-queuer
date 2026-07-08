@@ -39,6 +39,7 @@ public sealed record ProjectDto(
     string? DefaultCommitModelEffort,
     string? DefaultCommitModelSpeed,
     bool DefaultGenerateCommit,
+    bool DefaultSeparateCommitSession,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt);
 
@@ -52,7 +53,8 @@ public sealed record SaveProjectRequest(
     string? DefaultCommitModel,
     string? DefaultCommitModelEffort,
     string? DefaultCommitModelSpeed,
-    bool? DefaultGenerateCommit);
+    bool? DefaultGenerateCommit,
+    bool? DefaultSeparateCommitSession);
 
 public sealed record CreateQueueRequest(
     Guid ProjectId,
@@ -62,9 +64,24 @@ public sealed record CreateQueueRequest(
     string? ModelEffort,
     string? ModelSpeed,
     bool GenerateCommit,
+    bool SeparateCommitSession,
     string? CommitModel,
     string? CommitModelEffort,
     string? CommitModelSpeed);
+
+public sealed record UpdateQueueRequest(
+    string Prompt,
+    IReadOnlyList<QueueAttachmentDto>? Attachments,
+    string Model,
+    string? ModelEffort,
+    string? ModelSpeed,
+    bool GenerateCommit,
+    bool SeparateCommitSession,
+    string? CommitModel,
+    string? CommitModelEffort,
+    string? CommitModelSpeed);
+
+public sealed record ReorderQueueRequest(Guid ProjectId, IReadOnlyList<Guid> RequestIds);
 
 public sealed record QueueAttachmentDto(string Name, string ContentType, long Size, string ContentBase64);
 
@@ -103,8 +120,10 @@ public sealed record CodexRequestDto(
     string Model,
     string? ModelEffort,
     string? ModelSpeed,
+    int QueueOrder,
     QueueStatus Status,
     bool GenerateCommit,
+    bool SeparateCommitSession,
     string? CommitModel,
     string? CommitModelEffort,
     string? CommitModelSpeed,

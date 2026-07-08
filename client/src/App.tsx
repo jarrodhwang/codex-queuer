@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { DragEvent, FormEvent, ReactNode } from 'react'
+import type { ClipboardEvent, DragEvent, FormEvent, KeyboardEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Check,
@@ -10,9 +10,11 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  GripVertical,
   History,
   Menu,
   Monitor,
+  Pencil,
   Play,
   Plus,
   RefreshCcw,
@@ -23,7 +25,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
-import { ApiError, api, getStoredToken, storeToken } from '@/api/client'
+import { ApiError, api, apiWebSocketUrl, getStoredToken, storeToken } from '@/api/client'
 import type {
   ApiConfig,
   CodexRequest,
@@ -38,6 +40,7 @@ import type {
   QueueDiagnostics,
   SaveMachineRequest,
   SaveProjectRequest,
+  UpdateQueueRequest,
 } from '@/api/types'
 import { FieldLabel, GlassButton, GlassInput, GlassPanel, GlassSelect, GlassTextarea } from '@/components/einui/Glass'
 import { ProgressLine, StatusBadge } from '@/components/einui/Status'
@@ -60,6 +63,7 @@ type ProjectModelDefaults = {
   requestModel: ModelValue
   commitModel: ModelValue
   generateCommit: boolean
+  separateCommitSession: boolean
 }
 
 const defaultModels: ModelOption[] = [
@@ -92,6 +96,7 @@ function projectSavePayload(project: Project, overrides: Partial<SaveProjectRequ
     defaultCommitModelEffort: project.defaultCommitModelEffort,
     defaultCommitModelSpeed: project.defaultCommitModelSpeed,
     defaultGenerateCommit: project.defaultGenerateCommit ?? true,
+    defaultSeparateCommitSession: project.defaultSeparateCommitSession ?? false,
     ...overrides,
   }
 }
@@ -111,6 +116,7 @@ function projectModelDefaults(project: Project, models: ModelOption[]): ProjectM
     requestModel: modelValueFromDefaults(project.defaultModel, project.defaultModelEffort, project.defaultModelSpeed, requestFallback),
     commitModel: modelValueFromDefaults(project.defaultCommitModel, project.defaultCommitModelEffort, project.defaultCommitModelSpeed, commitFallback),
     generateCommit: project.defaultGenerateCommit ?? true,
+    separateCommitSession: project.defaultSeparateCommitSession ?? false,
   }
 }
 
@@ -126,6 +132,29 @@ async function readQueueAttachment(file: File): Promise<QueueAttachment> {
     size: file.size,
     contentBase64: arrayBufferToBase64(buffer),
   }
+}
+
+function normalizeAttachmentFile(file: File, index: number) {
+  if (file.name.trim()) {
+    return file
+  }
+
+  const extension = extensionForContentType(file.type)
+  return new File([file], `pasted-file-${index + 1}${extension}`, {
+    type: file.type || 'application/octet-stream',
+    lastModified: file.lastModified,
+  })
+}
+
+function extensionForContentType(contentType: string) {
+  if (contentType === 'image/png') return '.png'
+  if (contentType === 'image/jpeg') return '.jpg'
+  if (contentType === 'image/gif') return '.gif'
+  if (contentType === 'image/webp') return '.webp'
+  if (contentType === 'text/plain') return '.txt'
+  if (contentType === 'text/csv') return '.csv'
+  if (contentType === 'application/json') return '.json'
+  return ''
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer) {
@@ -270,6 +299,7 @@ function App() {
         defaultCommitModelEffort: defaults.commitModel.effort,
         defaultCommitModelSpeed: defaults.commitModel.speed,
         defaultGenerateCommit: defaults.generateCommit,
+        defaultSeparateCommitSession: defaults.separateCommitSession,
       }), project.id)
       setProjects((current) => current.map((item) => (item.id === updated.id ? updated : item)))
     } catch (cause) {
@@ -326,6 +356,28 @@ function App() {
       await loadLive()
     } catch (cause) {
       handleApiError(cause)
+    }
+  }
+
+  const updateRequest = async (id: string, request: UpdateQueueRequest) => {
+    setError('')
+    try {
+      await api.updateRequest(id, request)
+      await loadLive()
+    } catch (cause) {
+      handleApiError(cause)
+      throw cause
+    }
+  }
+
+  const reorderRequests = async (projectId: string, requestIds: string[]) => {
+    setError('')
+    try {
+      await api.reorderRequests(projectId, requestIds)
+      await loadLive()
+    } catch (cause) {
+      handleApiError(cause)
+      throw cause
     }
   }
 
@@ -405,6 +457,8 @@ function App() {
             }}
             onArchiveRequest={archiveRequest}
             onArchiveRequests={archiveRequests}
+            onUpdateRequest={updateRequest}
+            onReorderRequests={reorderRequests}
             onDeleteRequest={deleteRequest}
             onUpdateProjectDefaults={updateProjectDefaults}
             onKickQueue={kickQueue}
@@ -1168,6 +1222,8 @@ function QueueWorkspace({
   onResume,
   onArchiveRequest,
   onArchiveRequests,
+  onUpdateRequest,
+  onReorderRequests,
   onDeleteRequest,
   onUpdateProjectDefaults,
   onKickQueue,
@@ -1186,6 +1242,8 @@ function QueueWorkspace({
   onResume: (id: string) => Promise<void>
   onArchiveRequest: (id: string) => Promise<void>
   onArchiveRequests: (ids: string[]) => Promise<void>
+  onUpdateRequest: (id: string, request: UpdateQueueRequest) => Promise<void>
+  onReorderRequests: (projectId: string, requestIds: string[]) => Promise<void>
   onDeleteRequest: (id: string) => Promise<void>
   onUpdateProjectDefaults: (project: Project, defaults: ProjectModelDefaults) => Promise<void>
   onKickQueue: () => Promise<void>
@@ -1195,6 +1253,7 @@ function QueueWorkspace({
   onToggleFiles: () => void
 }) {
   const [activeTab, setActiveTab] = useState<'queue' | 'history' | 'terminal'>('queue')
+  const [editingRequest, setEditingRequest] = useState<CodexRequest | null>(null)
   const scopedRequests = useMemo(() => {
     if (!selectedProject) {
       return []
@@ -1211,12 +1270,18 @@ function QueueWorkspace({
   [scopedRequests])
   const queueRequests = useMemo(() => scopedRequests
     .filter((request) => !request.deletedAt && !request.archivedAt)
-    .toSorted((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)),
+    .toSorted((left, right) => (left.queueOrder - right.queueOrder) || Date.parse(left.createdAt) - Date.parse(right.createdAt)),
   [scopedRequests])
   const deletedRequests = useMemo(() => scopedRequests
     .filter((request) => request.deletedAt)
     .toSorted((left, right) => Date.parse(right.deletedAt ?? right.createdAt) - Date.parse(left.deletedAt ?? left.createdAt)),
   [scopedRequests])
+
+  useEffect(() => {
+    if (editingRequest && !queueRequests.some((request) => request.id === editingRequest.id && request.status === 'Queued')) {
+      setEditingRequest(null)
+    }
+  }, [editingRequest, queueRequests])
 
   return (
     <div className="section-stack queue-workspace-stack">
@@ -1226,11 +1291,14 @@ function QueueWorkspace({
             config={config}
             selectedProject={selectedProject}
             activeTab={activeTab}
+            editingRequest={editingRequest}
             error={error}
             onTabChange={setActiveTab}
             onRefresh={onRefresh}
             onToggleFiles={onToggleFiles}
             onCreated={onCreated}
+            onUpdateRequest={onUpdateRequest}
+            onCancelEdit={() => setEditingRequest(null)}
             onUpdateProjectDefaults={onUpdateProjectDefaults}
             onError={onError}
           />
@@ -1244,6 +1312,8 @@ function QueueWorkspace({
               onResume={onResume}
               onArchive={onArchiveRequest}
               onArchiveAll={onArchiveRequests}
+              onEdit={(request) => setEditingRequest(request)}
+              onReorder={(requestIds) => onReorderRequests(selectedProject.id, requestIds)}
               onDelete={onDeleteRequest}
               onKickQueue={onKickQueue}
             />
@@ -1354,22 +1424,28 @@ function QueueComposer({
   config,
   selectedProject,
   activeTab,
+  editingRequest,
   error,
   onTabChange,
   onRefresh,
   onToggleFiles,
   onCreated,
+  onUpdateRequest,
+  onCancelEdit,
   onUpdateProjectDefaults,
   onError,
 }: {
   config: ApiConfig
   selectedProject: Project
   activeTab: 'queue' | 'history' | 'terminal'
+  editingRequest: CodexRequest | null
   error: string
   onTabChange: (tab: 'queue' | 'history' | 'terminal') => void
   onRefresh: () => Promise<void>
   onToggleFiles: () => void
   onCreated: () => Promise<void>
+  onUpdateRequest: (id: string, request: UpdateQueueRequest) => Promise<void>
+  onCancelEdit: () => void
   onUpdateProjectDefaults: (project: Project, defaults: ProjectModelDefaults) => Promise<void>
   onError: (cause: unknown) => void
 }) {
@@ -1377,6 +1453,7 @@ function QueueComposer({
   const [requestModel, setRequestModel] = useState<ModelValue>(defaults.requestModel)
   const [commitModel, setCommitModel] = useState<ModelValue>(defaults.commitModel)
   const [generateCommit, setGenerateCommit] = useState(defaults.generateCommit)
+  const [separateCommitSession, setSeparateCommitSession] = useState(defaults.separateCommitSession)
   const [prompt, setPrompt] = useState('')
   const [attachments, setAttachments] = useState<QueueAttachment[]>([])
   const [attachmentError, setAttachmentError] = useState('')
@@ -1385,10 +1462,26 @@ function QueueComposer({
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
+    if (editingRequest) {
+      setRequestModel({ model: editingRequest.model, effort: editingRequest.modelEffort || 'medium', speed: editingRequest.modelSpeed || 'normal' })
+      setCommitModel({
+        model: editingRequest.commitModel || defaults.commitModel.model,
+        effort: editingRequest.commitModelEffort || defaults.commitModel.effort,
+        speed: editingRequest.commitModelSpeed || defaults.commitModel.speed,
+      })
+      setGenerateCommit(editingRequest.generateCommit)
+      setSeparateCommitSession(editingRequest.separateCommitSession)
+      setPrompt(editingRequest.prompt)
+      setAttachments([])
+      setAttachmentError('')
+      return
+    }
+
     setRequestModel(defaults.requestModel)
     setCommitModel(defaults.commitModel)
     setGenerateCommit(defaults.generateCommit)
-  }, [defaults, selectedProject.id])
+    setSeparateCommitSession(defaults.separateCommitSession)
+  }, [defaults, editingRequest, selectedProject.id])
 
   const defaultsChanged =
     requestModel.model !== defaults.requestModel.model ||
@@ -1397,26 +1490,47 @@ function QueueComposer({
     commitModel.model !== defaults.commitModel.model ||
     commitModel.effort !== defaults.commitModel.effort ||
     commitModel.speed !== defaults.commitModel.speed ||
-    generateCommit !== defaults.generateCommit
+    generateCommit !== defaults.generateCommit ||
+    separateCommitSession !== defaults.separateCommitSession
+
+  const resetModelSelections = () => {
+    setRequestModel(defaults.requestModel)
+    setCommitModel(defaults.commitModel)
+    setGenerateCommit(defaults.generateCommit)
+    setSeparateCommitSession(defaults.separateCommitSession)
+  }
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     try {
-      await api.createRequest({
-        projectId: selectedProject.id,
+      const payload: UpdateQueueRequest = {
         prompt,
-        attachments,
+        attachments: editingRequest && attachments.length === 0 ? undefined : attachments,
         model: requestModel.model,
         modelEffort: requestModel.effort,
         modelSpeed: requestModel.speed,
         generateCommit,
+        separateCommitSession: generateCommit && separateCommitSession,
         commitModel: commitModel.model,
         commitModelEffort: commitModel.effort,
         commitModelSpeed: commitModel.speed,
-      })
+      }
+
+      if (editingRequest) {
+        await onUpdateRequest(editingRequest.id, payload)
+        onCancelEdit()
+      } else {
+        await api.createRequest({
+          projectId: selectedProject.id,
+          ...payload,
+          attachments,
+        })
+      }
+
       setPrompt('')
       setAttachments([])
       setAttachmentError('')
+      resetModelSelections()
       await onCreated()
     } catch (cause) {
       onError(cause)
@@ -1426,7 +1540,8 @@ function QueueComposer({
   const addFiles = async (files: FileList | File[]) => {
     setAttachmentError('')
     try {
-      const nextAttachments = await Promise.all(Array.from(files).map(readQueueAttachment))
+      const normalizedFiles = Array.from(files).map(normalizeAttachmentFile)
+      const nextAttachments = await Promise.all(normalizedFiles.map(readQueueAttachment))
       setAttachments((current) => {
         const merged = [...current, ...nextAttachments]
         if (merged.length > 8) {
@@ -1449,10 +1564,25 @@ function QueueComposer({
     }
   }
 
+  const pasteFiles = (event: ClipboardEvent<HTMLDivElement>) => {
+    const files = Array.from(event.clipboardData.files)
+    const itemFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === 'file')
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file))
+    const pastedFiles = files.length > 0 ? files : itemFiles
+    if (pastedFiles.length === 0) {
+      return
+    }
+
+    event.preventDefault()
+    void addFiles(pastedFiles)
+  }
+
   const saveDefaults = async () => {
     setSavingDefaults(true)
     try {
-      await onUpdateProjectDefaults(selectedProject, { requestModel, commitModel, generateCommit })
+      await onUpdateProjectDefaults(selectedProject, { requestModel, commitModel, generateCommit, separateCommitSession: generateCommit && separateCommitSession })
     } catch (cause) {
       onError(cause)
     } finally {
@@ -1486,6 +1616,14 @@ function QueueComposer({
       </div>
       <form className="composer-form" onSubmit={submit}>
         <FieldLabel label="Prompt">
+          {editingRequest && (
+            <div className="edit-request-banner">
+              <span>Editing queued request {shortId(editingRequest.id)}</span>
+              <GlassButton variant="ghost" size="sm" type="button" onClick={onCancelEdit}>
+                <X size={13} /> Cancel edit
+              </GlassButton>
+            </div>
+          )}
           <div
             className={`prompt-dropzone ${draggingFiles ? 'dragging' : ''}`}
             onDragOver={(event) => {
@@ -1494,6 +1632,7 @@ function QueueComposer({
             }}
             onDragLeave={() => setDraggingFiles(false)}
             onDrop={dropFiles}
+            onPaste={pasteFiles}
           >
             <GlassTextarea value={prompt} onChange={(event) => setPrompt(event.target.value)} required placeholder="Describe the change Codex should make in the selected project." />
             <div className="attachment-row">
@@ -1512,8 +1651,11 @@ function QueueComposer({
               <GlassButton variant="secondary" size="sm" type="button" onClick={() => fileInputRef.current?.click()}>
                 <Plus size={13} /> Attach files
               </GlassButton>
-              <span className="meta">Images pass to Codex CLI; text/code/CSV include previews.</span>
+              <span className="meta">Drag, attach, or paste files/images. Images pass to Codex CLI; text/code/CSV include previews.</span>
             </div>
+            {editingRequest && editingRequest.attachments.length > 0 && attachments.length === 0 && (
+              <span className="meta">Existing attachments are kept unless you attach replacement files.</span>
+            )}
             {attachments.length > 0 && (
               <div className="attachment-list">
                 {attachments.map((attachment, index) => (
@@ -1532,19 +1674,41 @@ function QueueComposer({
         </FieldLabel>
         <div className="composer-grid compact">
           <ModelPicker label="Request" options={config.models} value={requestModel} onChange={setRequestModel} />
-          <ModelPicker label="Commit" options={config.models} value={commitModel} onChange={setCommitModel} disabled={!generateCommit} />
+          <ModelPicker label="Commit" options={config.models} value={commitModel} onChange={setCommitModel} disabled={!generateCommit || !separateCommitSession} />
         </div>
         <div className="composer-actions-row">
-          <label className="commit-toggle">
-            <input type="checkbox" checked={generateCommit} onChange={(event) => setGenerateCommit(event.target.checked)} />
-            Generate git commit
-          </label>
+          <div className="commit-toggle-group" aria-label="Commit options">
+            <label className={`commit-toggle ${generateCommit ? 'active' : ''}`}>
+              <input
+                type="checkbox"
+                checked={generateCommit}
+                onChange={(event) => {
+                  setGenerateCommit(event.target.checked)
+                  if (!event.target.checked) {
+                    setSeparateCommitSession(false)
+                  }
+                }}
+              />
+              <span className="commit-toggle-icon"><Check size={12} /></span>
+              <span>Generate git commit</span>
+            </label>
+            <label className={`commit-toggle ${generateCommit && separateCommitSession ? 'active' : ''} ${!generateCommit ? 'disabled' : ''}`}>
+              <input
+                type="checkbox"
+                checked={generateCommit && separateCommitSession}
+                disabled={!generateCommit}
+                onChange={(event) => setSeparateCommitSession(event.target.checked)}
+              />
+              <span className="commit-toggle-icon"><Check size={12} /></span>
+              <span>Separate commit session</span>
+            </label>
+          </div>
           <div className="button-row">
             <GlassButton variant="secondary" size="sm" type="button" onClick={saveDefaults} disabled={!defaultsChanged || savingDefaults}>
               <Check size={13} /> {savingDefaults ? 'Saving' : 'Save defaults'}
             </GlassButton>
             <GlassButton variant="primary" type="submit" disabled={!prompt.trim() || !requestModel.model.trim()}>
-              <Play size={16} /> Queue
+              <Play size={16} /> {editingRequest ? 'Update' : 'Queue'}
             </GlassButton>
           </div>
         </div>
@@ -1570,7 +1734,7 @@ function ModelPicker({
   const supportsPriority = selectedOption?.supportsPriority ?? false
 
   return (
-    <div className="model-picker-grid">
+    <div className={`model-picker-grid ${disabled ? 'model-picker-grid--disabled' : ''}`} aria-disabled={disabled}>
       <div className="model-picker-head">
         <span className="model-picker-title">{label}</span>
         <GlassSelect
@@ -1672,6 +1836,8 @@ function QueueList({
   onResume,
   onArchive,
   onArchiveAll,
+  onEdit,
+  onReorder,
   onDelete,
   onKickQueue,
 }: {
@@ -1683,10 +1849,14 @@ function QueueList({
   onResume: (id: string) => Promise<void>
   onArchive: (id: string) => Promise<void>
   onArchiveAll: (ids: string[]) => Promise<void>
+  onEdit: (request: CodexRequest) => void
+  onReorder: (requestIds: string[]) => Promise<void>
   onDelete: (id: string) => Promise<void>
   onKickQueue: () => Promise<void>
 }) {
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null)
+  const [draggedRequestId, setDraggedRequestId] = useState<string | null>(null)
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null)
   const selectedRequest = requests.find((request) => request.id === selectedRequestId) ?? requests[0]
   const succeededRequestIds = requests
     .filter((request) => request.status === 'Succeeded' && !request.archivedAt && !request.deletedAt)
@@ -1702,6 +1872,30 @@ function QueueList({
       setSelectedRequestId(requests[0].id)
     }
   }, [requests, selectedRequestId])
+
+  const reorderQueuedRequests = async (targetRequestId: string) => {
+    if (!draggedRequestId || draggedRequestId === targetRequestId) {
+      setDraggedRequestId(null)
+      setDropTargetId(null)
+      return
+    }
+
+    const queuedIds = requests.filter((request) => request.status === 'Queued').map((request) => request.id)
+    const fromIndex = queuedIds.indexOf(draggedRequestId)
+    const toIndex = queuedIds.indexOf(targetRequestId)
+    if (fromIndex === -1 || toIndex === -1) {
+      setDraggedRequestId(null)
+      setDropTargetId(null)
+      return
+    }
+
+    const nextIds = [...queuedIds]
+    const [movedId] = nextIds.splice(fromIndex, 1)
+    nextIds.splice(toIndex, 0, movedId)
+    setDraggedRequestId(null)
+    setDropTargetId(null)
+    await onReorder(nextIds)
+  }
 
   return (
     <GlassPanel className="queue-panel">
@@ -1733,7 +1927,30 @@ function QueueList({
               onCancel={onCancel}
               onResume={onResume}
               onArchive={onArchive}
+              onEdit={onEdit}
               onDelete={onDelete}
+              dragging={request.id === draggedRequestId}
+              dragOver={request.id === dropTargetId}
+              onDragStart={() => {
+                if (request.status === 'Queued') {
+                  setDraggedRequestId(request.id)
+                }
+              }}
+              onDragOver={(event) => {
+                if (draggedRequestId && request.status === 'Queued') {
+                  event.preventDefault()
+                  setDropTargetId(request.id)
+                }
+              }}
+              onDrop={() => {
+                if (request.status === 'Queued') {
+                  void reorderQueuedRequests(request.id)
+                }
+              }}
+              onDragEnd={() => {
+                setDraggedRequestId(null)
+                setDropTargetId(null)
+              }}
             />
           ))}
         </div>
@@ -1752,7 +1969,14 @@ function RequestCard({
   onCancel,
   onResume,
   onArchive,
+  onEdit,
   onDelete,
+  dragging,
+  dragOver,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
 }: {
   request: CodexRequest
   now: number
@@ -1762,21 +1986,34 @@ function RequestCard({
   onCancel: (id: string) => Promise<void>
   onResume: (id: string) => Promise<void>
   onArchive: (id: string) => Promise<void>
+  onEdit: (request: CodexRequest) => void
   onDelete: (id: string) => Promise<void>
+  dragging: boolean
+  dragOver: boolean
+  onDragStart: () => void
+  onDragOver: (event: DragEvent<HTMLElement>) => void
+  onDrop: () => void
+  onDragEnd: () => void
 }) {
   const cancellable = request.status === 'Queued' || request.status === 'Running' || request.status === 'CancelRequested' || request.status === 'UsageLimited'
   const resumable = request.status === 'Failed' || request.status === 'Cancelled' || request.status === 'UsageLimited'
   const archivable = request.status === 'Succeeded' && !request.archivedAt && !request.deletedAt
+  const editable = request.status === 'Queued'
   const deletable = request.status !== 'Running' && request.status !== 'CancelRequested'
   const percent = progressFor(request)
   const requestUsageDelay = request.retryAfter ? formatRemainingTime(request.retryAfter, now) : null
 
   return (
     <article
-      className={`request-card request-card--${request.status.toLowerCase()} ${selected ? 'active' : ''}`}
+      className={`request-card request-card--${request.status.toLowerCase()} ${selected ? 'active' : ''} ${dragging ? 'dragging' : ''} ${dragOver ? 'drag-over' : ''}`}
       role="button"
       tabIndex={0}
+      draggable={editable}
       onClick={onSelect}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault()
@@ -1785,7 +2022,9 @@ function RequestCard({
       }}
     >
       <div className="request-head">
-        <div className="queue-index" aria-label={`Queue position ${queueNumber}`}>{queueNumber}</div>
+        <div className={`queue-index ${editable ? 'queue-index--draggable' : ''}`} aria-label={`Queue position ${queueNumber}`}>
+          {editable ? <GripVertical size={14} /> : queueNumber}
+        </div>
         <div className="request-card-main">
           <div className="request-title-row">
             <div className="request-title-stack">
@@ -1834,6 +2073,18 @@ function RequestCard({
               }}
             >
               <Check size={13} /> Done
+            </GlassButton>
+          )}
+          {editable && (
+            <GlassButton
+              variant="secondary"
+              size="sm"
+              onClick={(event) => {
+                event.stopPropagation()
+                onEdit(request)
+              }}
+            >
+              <Pencil size={13} /> Edit
             </GlassButton>
           )}
           <GlassButton
@@ -2107,27 +2358,30 @@ function CompletionSummary({ request }: { request: CodexRequest }) {
     <section className="completion-summary" aria-label="Completion summary">
       <div className="completion-summary-head">
         <div>
-          <div className="completion-title">Completed</div>
-          <div className="completion-result">{resultText}</div>
+          <div className="completion-title">Last result</div>
+          <div className="completion-facts">
+            <span>Finished {formatDate(request.finishedAt ?? request.createdAt)}</span>
+            {commitRun?.commitSha && <span>Commit {commitRun.commitSha.slice(0, 12)}</span>}
+            {fileChanges.length > 0 && <span>{fileChanges.length} files changed</span>}
+          </div>
         </div>
         <Check size={18} />
       </div>
-      <div className="completion-facts">
-        <span>Finished {formatDate(request.finishedAt ?? request.createdAt)}</span>
-        {commitRun?.commitSha && <span>Commit {commitRun.commitSha.slice(0, 12)}</span>}
-        {fileChanges.length > 0 && <span>{fileChanges.length} files changed</span>}
-      </div>
+      <div className="completion-result-box">{resultText}</div>
       {commitRun?.commitMessage && <div className="completion-message">{commitRun.commitMessage}</div>}
       {fileChanges.length > 0 && (
-        <div className="completion-files">
-          {fileChanges.slice(0, 8).map((change, index) => (
-            <div key={`${change.path}:${index}`} className="completion-file">
-              <Code2 size={13} />
-              <span className="truncate">{change.path}</span>
-              <span>{change.kind}</span>
-            </div>
-          ))}
-          {fileChanges.length > 8 && <div className="meta">+{fileChanges.length - 8} more files</div>}
+        <div className="completion-changes">
+          <div className="section-kicker">View changes</div>
+          <div className="completion-files">
+            {fileChanges.slice(0, 8).map((change, index) => (
+              <div key={`${change.path}:${index}`} className="completion-file">
+                <Code2 size={13} />
+                <span className="truncate">{change.path}</span>
+                <span>{change.kind}</span>
+              </div>
+            ))}
+            {fileChanges.length > 8 && <div className="meta">+{fileChanges.length - 8} more files</div>}
+          </div>
         </div>
       )}
     </section>
@@ -2213,7 +2467,6 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
         </div>
         <StatusBadge status={request.status} busy={request.status === 'Running'} />
       </div>
-      {request.status === 'Succeeded' && <CompletionSummary request={request} />}
       <div className="queue-detail-body">
         <div className="section-kicker">Request body</div>
         {request.attachments.length > 0 && (
@@ -2229,6 +2482,7 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
           <StructuredBodyView content={request.prompt} forceExpanded />
         </div>
       </div>
+      {request.status === 'Succeeded' && <CompletionSummary request={request} />}
       {request.runs.map((run) => (
         <div key={run.id} className="run-detail-card">
           <div className="row-between">
@@ -2256,7 +2510,7 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
           <StructuredBodyView content={run.output} emptyText="No output yet." />
         </div>
       ))}
-      {request.generateCommit && !commitRun && (
+      {request.generateCommit && request.separateCommitSession && !commitRun && (
         <div className="pending-run-row">
           <div className="run-title-stack">
             <strong>Commit</strong>
@@ -2267,14 +2521,6 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
       )}
     </aside>
   )
-}
-
-type TerminalEntry = {
-  id: number
-  command: string
-  output: string
-  exitCode: number
-  success: boolean
 }
 
 function ProjectTerminal({
@@ -2289,49 +2535,96 @@ function ProjectTerminal({
   onError: (cause: unknown) => void
 }) {
   const [command, setCommand] = useState('')
-  const [runningCommand, setRunningCommand] = useState('')
-  const [running, setRunning] = useState(false)
-  const [entries, setEntries] = useState<TerminalEntry[]>([])
+  const [terminalOutput, setTerminalOutput] = useState('')
+  const [socketStatus, setSocketStatus] = useState<'connecting' | 'connected' | 'closed'>('connecting')
+  const [commandHistory, setCommandHistory] = useState<string[]>([])
+  const [historyCursor, setHistoryCursor] = useState<number | null>(null)
+  const screenRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const socketRef = useRef<WebSocket | null>(null)
   const queuedCount = requests.filter((request) => request.status === 'Queued').length
   const runningCount = requests.filter((request) => request.status === 'Running').length
   const limitedRequest = requests.find((request) => request.status === 'UsageLimited')
   const limitedRemaining = limitedRequest?.retryAfter ? formatRemainingTime(limitedRequest.retryAfter, now) : null
+  const promptPath = terminalPathLabel(project.path)
+
+  useEffect(() => {
+    screenRef.current?.scrollTo({ top: screenRef.current.scrollHeight })
+  }, [terminalOutput, command])
+
+  useEffect(() => {
+    setTerminalOutput('')
+    setSocketStatus('connecting')
+    const socket = new WebSocket(apiWebSocketUrl(`/projects/${project.id}/terminal/ws`))
+    socketRef.current = socket
+    socket.onopen = () => {
+      setSocketStatus('connected')
+      inputRef.current?.focus()
+    }
+    socket.onmessage = (event) => {
+      setTerminalOutput((current) => current + String(event.data))
+    }
+    socket.onerror = () => {
+      setSocketStatus('closed')
+      setTerminalOutput((current) => current + '\n[terminal disconnected]\n')
+    }
+    socket.onclose = () => {
+      setSocketStatus('closed')
+    }
+
+    return () => {
+      socket.close()
+      socketRef.current = null
+    }
+  }, [project.id])
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     const trimmed = command.trim()
-    if (!trimmed || running) return
+    if (!trimmed) return
 
     setCommand('')
-    setRunningCommand(trimmed)
-    setRunning(true)
-    try {
-      const result = await api.terminal(project.id, trimmed)
-      setEntries((current) => [
-        ...current,
-        {
-          id: Date.now(),
-          command: trimmed,
-          output: result.output,
-          exitCode: result.exitCode,
-          success: result.success,
-        },
-      ].slice(-25))
-    } catch (cause) {
-      onError(cause)
-      setEntries((current) => [
-        ...current,
-        {
-          id: Date.now(),
-          command: trimmed,
-          output: cause instanceof Error ? cause.message : 'Command failed.',
-          exitCode: 1,
-          success: false,
-        },
-      ].slice(-25))
-    } finally {
-      setRunning(false)
-      setRunningCommand('')
+    setCommandHistory((current) => (current.at(-1) === trimmed ? current : [...current, trimmed].slice(-100)))
+    setHistoryCursor(null)
+    if (socketRef.current?.readyState !== WebSocket.OPEN) {
+      const message = 'Terminal is not connected.'
+      setTerminalOutput((current) => current + `\n${message}\n`)
+      onError(new Error(message))
+      return
+    }
+
+    setTerminalOutput((current) => current + `${project.machineName}:${promptPath}$ ${trimmed}\n`)
+    socketRef.current.send(`${trimmed}\n`)
+  }
+
+  const handleTerminalKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.ctrlKey && event.key.toLowerCase() === 'l') {
+      event.preventDefault()
+      setTerminalOutput('')
+      return
+    }
+
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      if (commandHistory.length === 0) return
+      const nextCursor = historyCursor === null ? commandHistory.length - 1 : Math.max(0, historyCursor - 1)
+      setHistoryCursor(nextCursor)
+      setCommand(commandHistory[nextCursor] ?? '')
+      return
+    }
+
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      if (commandHistory.length === 0 || historyCursor === null) return
+      const nextCursor = historyCursor + 1
+      if (nextCursor >= commandHistory.length) {
+        setHistoryCursor(null)
+        setCommand('')
+        return
+      }
+
+      setHistoryCursor(nextCursor)
+      setCommand(commandHistory[nextCursor] ?? '')
     }
   }
 
@@ -2344,36 +2637,131 @@ function ProjectTerminal({
           <strong>{limitedRequest ? 'Limited' : 'Ready'}</strong>
           {limitedRequest ? ` ${limitedRemaining ? `for ${limitedRemaining}` : 'retry pending'}` : ' usage'}
         </span>
+        <span className={socketStatus === 'connected' ? 'terminal-status-ok' : ''}>
+          <strong>{socketStatus}</strong> shell
+        </span>
       </div>
-      <div className="terminal-screen" aria-live="polite">
-        {entries.length === 0 && (
-          <div className="terminal-empty">
-            <div>{project.machineName}</div>
-            <div>{project.path}</div>
+      <form className="terminal-form" onSubmit={submit}>
+        <div
+          ref={screenRef}
+          className="terminal-screen"
+          aria-live="polite"
+          onClick={() => inputRef.current?.focus()}
+        >
+          {!terminalOutput && (
+            <div className="terminal-empty">
+              <div>Codex Queue terminal</div>
+              <div>{project.machineName}:{project.path}</div>
+            </div>
+          )}
+          <TerminalOutput output={terminalOutput} success />
+          <div className="terminal-live-line">
+            <TerminalPrompt machineName={project.machineName} path={promptPath} />
+            <input
+              ref={inputRef}
+              className="terminal-inline-input"
+              value={command}
+              onChange={(event) => {
+                setCommand(event.target.value)
+                setHistoryCursor(null)
+              }}
+              onKeyDown={handleTerminalKeyDown}
+              readOnly={socketStatus !== 'connected'}
+              spellCheck={false}
+              autoCapitalize="off"
+              autoComplete="off"
+              aria-label="Terminal command"
+              autoFocus
+            />
+            <span className="terminal-cursor" aria-hidden="true" />
           </div>
-        )}
-        {entries.map((entry) => (
-          <div key={entry.id} className="terminal-entry">
-            <div className="terminal-command">$ {entry.command}</div>
-            <pre>{entry.output || (entry.success ? 'Command completed with no output.' : 'Command failed with no output.')}</pre>
-            <div className={`terminal-exit ${entry.success ? 'ok' : 'bad'}`}>exit {entry.exitCode}</div>
-          </div>
-        ))}
-        {running && (
-          <div className="terminal-entry">
-            <div className="terminal-command">$ {runningCommand || 'running...'}</div>
-            <pre>Running...</pre>
-          </div>
-        )}
-      </div>
-      <form className="terminal-input-row" onSubmit={submit}>
-        <GlassInput value={command} onChange={(event) => setCommand(event.target.value)} disabled={running} placeholder="command" />
-        <GlassButton variant="primary" type="submit" disabled={running || !command.trim()}>
-          <Play size={14} /> Run
-        </GlassButton>
+        </div>
       </form>
     </GlassPanel>
   )
+}
+
+function TerminalPrompt({ machineName, path }: { machineName: string; path: string }) {
+  return (
+    <span className="terminal-prompt" aria-hidden="true">
+      <span className="terminal-prompt-user">{machineName}</span>
+      <span className="terminal-prompt-separator">:</span>
+      <span className="terminal-prompt-path">{path}</span>
+      <span className="terminal-prompt-symbol">$</span>
+    </span>
+  )
+}
+
+function TerminalOutput({ output, success }: { output: string; success: boolean }) {
+  return (
+    <pre className={`terminal-output ${success ? 'terminal-output--ok' : 'terminal-output--bad'}`}>
+      {parseAnsiOutput(output).map((segment, index) => (
+        <span key={index} className={segment.className}>{segment.text}</span>
+      ))}
+    </pre>
+  )
+}
+
+function terminalPathLabel(path: string) {
+  const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '')
+  const name = normalized.split('/').filter(Boolean).at(-1)
+  return name ? `~/${name}` : '~'
+}
+
+function parseAnsiOutput(value: string) {
+  const segments: Array<{ text: string; className?: string }> = []
+  const escape = String.fromCharCode(27)
+  let cursor = 0
+  let className: string | undefined
+
+  while (cursor < value.length) {
+    const start = value.indexOf(`${escape}[`, cursor)
+    if (start === -1) {
+      segments.push({ text: value.slice(cursor), className })
+      break
+    }
+
+    if (start > cursor) {
+      segments.push({ text: value.slice(cursor, start), className })
+    }
+
+    const end = value.indexOf('m', start + 2)
+    if (end === -1) {
+      segments.push({ text: value.slice(start), className })
+      break
+    }
+
+    const codesText = value.slice(start + 2, end)
+    if (/^[\d;]*$/.test(codesText)) {
+      className = ansiClassName(codesText)
+      cursor = end + 1
+    } else {
+      segments.push({ text: value.slice(start, end + 1), className })
+      cursor = end + 1
+    }
+  }
+
+  return segments.length > 0 ? segments : [{ text: value }]
+}
+
+function ansiClassName(codesText: string) {
+  const codes = codesText.split(';').filter(Boolean).map((code) => Number.parseInt(code, 10))
+  if (codes.length === 0 || codes.includes(0)) return undefined
+  if (codes.includes(31)) return 'ansi-red'
+  if (codes.includes(32)) return 'ansi-green'
+  if (codes.includes(33)) return 'ansi-yellow'
+  if (codes.includes(34)) return 'ansi-blue'
+  if (codes.includes(35)) return 'ansi-magenta'
+  if (codes.includes(36)) return 'ansi-cyan'
+  if (codes.includes(37)) return 'ansi-white'
+  if (codes.includes(90)) return 'ansi-gray'
+  if (codes.includes(91)) return 'ansi-bright-red'
+  if (codes.includes(92)) return 'ansi-bright-green'
+  if (codes.includes(93)) return 'ansi-bright-yellow'
+  if (codes.includes(94)) return 'ansi-bright-blue'
+  if (codes.includes(95)) return 'ansi-bright-magenta'
+  if (codes.includes(96)) return 'ansi-bright-cyan'
+  return undefined
 }
 
 function progressFor(request: CodexRequest) {
@@ -2384,7 +2772,7 @@ function progressFor(request: CodexRequest) {
   const requestRun = request.runs.find((run) => run.kind === 'Request')
   const commitRun = request.runs.find((run) => run.kind === 'Commit')
   if (commitRun?.status === 'Running') return 82
-  if (requestRun?.status === 'Succeeded' && request.generateCommit) return 68
+  if (requestRun?.status === 'Succeeded' && request.generateCommit && request.separateCommitSession) return 68
   return 42
 }
 

@@ -36,6 +36,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.DefaultCommitModelEffort).HasMaxLength(32);
             entity.Property(x => x.DefaultCommitModelSpeed).HasMaxLength(32);
             entity.Property(x => x.DefaultGenerateCommit);
+            entity.Property(x => x.DefaultSeparateCommitSession);
             entity.HasOne(x => x.Machine)
                 .WithMany(x => x.Projects)
                 .HasForeignKey(x => x.MachineId)
@@ -50,6 +51,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.Model).HasMaxLength(120).IsRequired();
             entity.Property(x => x.ModelEffort).HasMaxLength(32);
             entity.Property(x => x.ModelSpeed).HasMaxLength(32);
+            entity.Property(x => x.QueueOrder);
+            entity.Property(x => x.SeparateCommitSession);
             entity.Property(x => x.CommitModel).HasMaxLength(120);
             entity.Property(x => x.CommitModelEffort).HasMaxLength(32);
             entity.Property(x => x.CommitModelSpeed).HasMaxLength(32);
@@ -68,6 +71,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
                 .HasForeignKey(x => x.MachineId)
                 .OnDelete(DeleteBehavior.Restrict);
             entity.HasIndex(x => new { x.ProjectId, x.CreatedAt });
+            entity.HasIndex(x => new { x.ProjectId, x.QueueOrder });
             entity.HasIndex(x => x.Status);
             entity.HasIndex(x => x.DeletedAt);
         });

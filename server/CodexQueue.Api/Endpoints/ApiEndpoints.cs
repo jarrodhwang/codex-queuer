@@ -2,6 +2,9 @@ using CodexQueue.Api.Data;
 using CodexQueue.Api.Domain;
 using CodexQueue.Api.Services;
 using Microsoft.EntityFrameworkCore;
+using System.Diagnostics;
+using System.Net.WebSockets;
+using System.Text;
 using System.Text.Json;
 
 namespace CodexQueue.Api.Endpoints;
@@ -159,7 +162,8 @@ public static class ApiEndpoints
                 DefaultCommitModel = NormalizeOptional(input.DefaultCommitModel),
                 DefaultCommitModelEffort = NormalizeEffort(input.DefaultCommitModelEffort),
                 DefaultCommitModelSpeed = NormalizeOptionalSpeed(input.DefaultCommitModelSpeed),
-                DefaultGenerateCommit = input.DefaultGenerateCommit ?? true
+                DefaultGenerateCommit = input.DefaultGenerateCommit ?? true,
+                DefaultSeparateCommitSession = input.DefaultSeparateCommitSession ?? false
             };
             db.Projects.Add(project);
             await db.SaveChangesAsync(cancellationToken);
@@ -195,6 +199,7 @@ public static class ApiEndpoints
             project.DefaultCommitModelEffort = NormalizeEffort(input.DefaultCommitModelEffort);
             project.DefaultCommitModelSpeed = NormalizeOptionalSpeed(input.DefaultCommitModelSpeed);
             project.DefaultGenerateCommit = input.DefaultGenerateCommit ?? true;
+            project.DefaultSeparateCommitSession = input.DefaultSeparateCommitSession ?? false;
             project.UpdatedAt = DateTimeOffset.UtcNow;
             await db.SaveChangesAsync(cancellationToken);
             await db.Entry(project).Reference(x => x.Machine).LoadAsync(cancellationToken);
@@ -285,6 +290,26 @@ public static class ApiEndpoints
             }
         });
 
+        api.MapGet("/projects/{id:guid}/terminal/ws", async (Guid id, HttpContext context, AppDbContext db) =>
+        {
+            if (!context.WebSockets.IsWebSocketRequest)
+            {
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                await context.Response.WriteAsJsonAsync(new { error = "WebSocket request is required." });
+                return;
+            }
+
+            var project = await db.Projects.Include(x => x.Machine).AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, context.RequestAborted);
+            if (project?.Machine is null)
+            {
+                context.Response.StatusCode = StatusCodes.Status404NotFound;
+                return;
+            }
+
+            using var socket = await context.WebSockets.AcceptWebSocketAsync();
+            await RunInteractiveTerminalAsync(project, socket, context.RequestAborted);
+        });
+
         api.MapGet("/requests", async (Guid? projectId, bool? includeDeleted, AppDbContext db, CancellationToken cancellationToken) =>
         {
             var query = db.Requests
@@ -352,9 +377,11 @@ public static class ApiEndpoints
                 ModelEffort = NormalizeEffort(input.ModelEffort),
                 ModelSpeed = NormalizeSpeed(input.ModelSpeed),
                 GenerateCommit = input.GenerateCommit,
+                SeparateCommitSession = input.GenerateCommit && input.SeparateCommitSession,
                 CommitModel = string.IsNullOrWhiteSpace(input.CommitModel) ? null : input.CommitModel.Trim(),
                 CommitModelEffort = NormalizeEffort(input.CommitModelEffort),
                 CommitModelSpeed = NormalizeSpeed(input.CommitModelSpeed),
+                QueueOrder = await NextQueueOrderAsync(db, project.Id, cancellationToken),
                 Status = QueueStatus.Queued,
                 CreatedAt = DateTimeOffset.UtcNow
             };
@@ -373,6 +400,112 @@ public static class ApiEndpoints
             await db.Entry(request).Reference(x => x.Project).LoadAsync(cancellationToken);
             await db.Entry(request).Reference(x => x.Machine).LoadAsync(cancellationToken);
             return Results.Created($"/api/requests/{request.Id}", request.ToDto());
+        });
+
+        api.MapPut("/requests/{id:guid}", async (Guid id, UpdateQueueRequest input, AppDbContext db, CancellationToken cancellationToken) =>
+        {
+            var request = await db.Requests
+                .Include(x => x.Project)
+                .Include(x => x.Machine)
+                .Include(x => x.Runs)
+                .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            if (request is null || request.DeletedAt is not null || request.ArchivedAt is not null)
+            {
+                return Results.NotFound();
+            }
+
+            if (request.Status != QueueStatus.Queued || request.Runs.Any(x => x.Status != QueueStatus.Queued))
+            {
+                return Results.BadRequest(new { error = "Only queued requests can be edited." });
+            }
+
+            if (string.IsNullOrWhiteSpace(input.Prompt) || string.IsNullOrWhiteSpace(input.Model))
+            {
+                return Results.BadRequest(new { error = "Prompt and model are required." });
+            }
+
+            if (input.Attachments is not null)
+            {
+                var attachments = NormalizeAttachments(input.Attachments, out var attachmentError);
+                if (attachmentError is not null)
+                {
+                    return Results.BadRequest(new { error = attachmentError });
+                }
+
+                request.AttachmentsJson = attachments.Length == 0 ? null : JsonSerializer.Serialize(attachments);
+            }
+
+            request.Prompt = input.Prompt.Trim();
+            request.Model = input.Model.Trim();
+            request.ModelEffort = NormalizeEffort(input.ModelEffort);
+            request.ModelSpeed = NormalizeSpeed(input.ModelSpeed);
+            request.GenerateCommit = input.GenerateCommit;
+            request.SeparateCommitSession = input.GenerateCommit && input.SeparateCommitSession;
+            request.CommitModel = string.IsNullOrWhiteSpace(input.CommitModel) ? null : input.CommitModel.Trim();
+            request.CommitModelEffort = NormalizeEffort(input.CommitModelEffort);
+            request.CommitModelSpeed = NormalizeSpeed(input.CommitModelSpeed);
+            request.Error = null;
+            request.Summary = null;
+            request.RetryAfter = null;
+            request.RetryReason = null;
+            request.AvailableModel = null;
+
+            var requestRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Request);
+            if (requestRun is null)
+            {
+                requestRun = new CodexRun { Kind = RunKind.Request, Status = QueueStatus.Queued, CreatedAt = request.CreatedAt };
+                request.Runs.Add(requestRun);
+            }
+
+            requestRun.Model = request.Model;
+            requestRun.ModelEffort = request.ModelEffort;
+            requestRun.ModelSpeed = request.ModelSpeed;
+            requestRun.Output = "";
+            requestRun.Error = null;
+            requestRun.RetryAfter = null;
+            requestRun.RetryReason = null;
+            requestRun.AvailableModel = null;
+            requestRun.CommandPreview = null;
+            requestRun.ExitCode = null;
+
+            await db.SaveChangesAsync(cancellationToken);
+            return Results.Ok(request.ToDto());
+        });
+
+        api.MapPost("/requests/reorder", async (ReorderQueueRequest input, AppDbContext db, CancellationToken cancellationToken) =>
+        {
+            if (input.RequestIds.Count == 0)
+            {
+                return Results.BadRequest(new { error = "Request order is required." });
+            }
+
+            var requestIds = input.RequestIds.Distinct().ToArray();
+            if (requestIds.Length != input.RequestIds.Count)
+            {
+                return Results.BadRequest(new { error = "Request order contains duplicates." });
+            }
+
+            var requests = await db.Requests
+                .Where(x => x.ProjectId == input.ProjectId && requestIds.Contains(x.Id))
+                .ToArrayAsync(cancellationToken);
+            if (requests.Length != requestIds.Length)
+            {
+                return Results.BadRequest(new { error = "Request order contains unknown requests." });
+            }
+
+            if (requests.Any(x => x.Status != QueueStatus.Queued || x.DeletedAt is not null || x.ArchivedAt is not null))
+            {
+                return Results.BadRequest(new { error = "Only queued requests can be reordered." });
+            }
+
+            var requestsById = requests.ToDictionary(x => x.Id);
+            for (var index = 0; index < requestIds.Length; index++)
+            {
+                requestsById[requestIds[index]].QueueOrder = index + 1;
+            }
+
+            await db.SaveChangesAsync(cancellationToken);
+            return Results.Ok(new { ok = true });
         });
 
         api.MapPost("/requests/{id:guid}/cancel", async (Guid id, IQueueCoordinator queue, CancellationToken cancellationToken) =>
@@ -580,6 +713,206 @@ public static class ApiEndpoints
 
     private static string? NormalizeOptionalSpeed(string? speed) =>
         string.IsNullOrWhiteSpace(speed) ? null : NormalizeSpeed(speed);
+
+    private static async Task<int> NextQueueOrderAsync(AppDbContext db, Guid projectId, CancellationToken cancellationToken)
+    {
+        var maxOrder = await db.Requests
+            .Where(x => x.ProjectId == projectId)
+            .MaxAsync(x => (int?)x.QueueOrder, cancellationToken);
+        return (maxOrder ?? 0) + 1;
+    }
+
+    private static async Task RunInteractiveTerminalAsync(Project project, WebSocket socket, CancellationToken cancellationToken)
+    {
+        ProcessStartInfo startInfo;
+        try
+        {
+            startInfo = BuildInteractiveTerminalStartInfo(project);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+        {
+            await SendTerminalTextAsync(socket, ex.Message + "\n", cancellationToken);
+            return;
+        }
+
+        using var process = new Process
+        {
+            StartInfo = startInfo,
+            EnableRaisingEvents = true
+        };
+
+        try
+        {
+            if (!process.Start())
+            {
+                await SendTerminalTextAsync(socket, "Failed to start terminal process.\n", cancellationToken);
+                return;
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+        {
+            await SendTerminalTextAsync(socket, ex.Message + "\n", cancellationToken);
+            return;
+        }
+
+        var stdoutTask = PumpTerminalReaderAsync(process.StandardOutput, socket, cancellationToken);
+        var stderrTask = PumpTerminalReaderAsync(process.StandardError, socket, cancellationToken);
+        var inputTask = PumpTerminalInputAsync(socket, process.StandardInput, cancellationToken);
+        var exitTask = process.WaitForExitAsync(cancellationToken);
+
+        await Task.WhenAny(inputTask, exitTask);
+        if (!process.HasExited)
+        {
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch
+            {
+                // Best effort cleanup after the browser closes the terminal.
+            }
+        }
+
+        await Task.WhenAll(stdoutTask, stderrTask).WaitAsync(TimeSpan.FromSeconds(2), CancellationToken.None).ContinueWith(_ => { });
+        if (socket.State == WebSocketState.Open)
+        {
+            await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "terminal closed", CancellationToken.None);
+        }
+    }
+
+    private static ProcessStartInfo BuildInteractiveTerminalStartInfo(Project project)
+    {
+        var machine = project.Machine ?? throw new InvalidOperationException("Project machine is missing.");
+        if (machine.Kind == MachineKind.Local)
+        {
+            if (machine.TargetsWindows())
+            {
+                return TerminalStartInfo(
+                    "powershell",
+                    new[] { "-NoLogo", "-NoExit", "-Command", "Set-Location -LiteralPath " + TargetCommandRunner.QuotePowerShellValue(project.Path) },
+                    null);
+            }
+
+            return TerminalStartInfo("/bin/bash", new[] { "-li" }, project.Path);
+        }
+
+        if (string.IsNullOrWhiteSpace(machine.Host))
+        {
+            throw new InvalidOperationException("SSH machine host is required.");
+        }
+
+        var destination = string.IsNullOrWhiteSpace(machine.UserName)
+            ? machine.Host
+            : machine.UserName + "@" + machine.Host;
+        var arguments = new List<string>
+        {
+            "-tt",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-p",
+            machine.Port.ToString()
+        };
+
+        if (!string.IsNullOrWhiteSpace(machine.SshKeyPath))
+        {
+            var keyPath = ResolveSshKeyPath(machine.SshKeyPath);
+            if (!File.Exists(keyPath))
+            {
+                throw new InvalidOperationException("SSH key file is not accessible inside the API runtime: " + keyPath + ".");
+            }
+
+            arguments.Add("-i");
+            arguments.Add(keyPath);
+        }
+
+        arguments.Add(destination);
+        arguments.Add(machine.TargetsWindows()
+            ? "powershell -NoLogo"
+            : "cd " + QuoteShell(project.Path) + " && exec ${SHELL:-/bin/bash} -li");
+        return TerminalStartInfo("ssh", arguments, null);
+    }
+
+    private static ProcessStartInfo TerminalStartInfo(string fileName, IReadOnlyList<string> arguments, string? workingDirectory)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = fileName,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+
+        if (!string.IsNullOrWhiteSpace(workingDirectory))
+        {
+            startInfo.WorkingDirectory = workingDirectory;
+        }
+
+        startInfo.Environment["TERM"] = "xterm-256color";
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        return startInfo;
+    }
+
+    private static async Task PumpTerminalReaderAsync(StreamReader reader, WebSocket socket, CancellationToken cancellationToken)
+    {
+        var buffer = new char[2048];
+        while (socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
+        {
+            var read = await reader.ReadAsync(buffer, cancellationToken);
+            if (read <= 0)
+            {
+                break;
+            }
+
+            await SendTerminalTextAsync(socket, new string(buffer, 0, read), cancellationToken);
+        }
+    }
+
+    private static async Task PumpTerminalInputAsync(WebSocket socket, StreamWriter input, CancellationToken cancellationToken)
+    {
+        var buffer = new byte[4096];
+        while (socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
+        {
+            var received = await socket.ReceiveAsync(buffer, cancellationToken);
+            if (received.MessageType == WebSocketMessageType.Close)
+            {
+                break;
+            }
+
+            if (received.MessageType != WebSocketMessageType.Text)
+            {
+                continue;
+            }
+
+            var text = Encoding.UTF8.GetString(buffer, 0, received.Count);
+            await input.WriteAsync(text.AsMemory(), cancellationToken);
+            await input.FlushAsync(cancellationToken);
+        }
+    }
+
+    private static Task SendTerminalTextAsync(WebSocket socket, string text, CancellationToken cancellationToken)
+    {
+        var bytes = Encoding.UTF8.GetBytes(text);
+        return socket.SendAsync(bytes, WebSocketMessageType.Text, true, cancellationToken);
+    }
+
+    private static string QuoteShell(string value) => "'" + value.Replace("'", "'\"'\"'", StringComparison.Ordinal) + "'";
+
+    private static string ResolveSshKeyPath(string configuredPath)
+    {
+        var expanded = configuredPath.Replace("~", Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StringComparison.Ordinal);
+        if (Path.IsPathRooted(expanded))
+        {
+            return expanded;
+        }
+
+        var fileName = Path.GetFileName(expanded);
+        return Path.Combine("/home/app/.ssh", fileName);
+    }
 
     private static string NormalizeSpeed(string? speed)
     {

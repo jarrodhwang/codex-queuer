@@ -50,6 +50,7 @@ export type Project = {
   defaultCommitModelEffort?: string | null
   defaultCommitModelSpeed?: string | null
   defaultGenerateCommit?: boolean | null
+  defaultSeparateCommitSession?: boolean | null
   createdAt: string
   updatedAt: string
 }
@@ -65,6 +66,7 @@ export type SaveProjectRequest = {
   defaultCommitModelEffort?: string | null
   defaultCommitModelSpeed?: string | null
   defaultGenerateCommit?: boolean | null
+  defaultSeparateCommitSession?: boolean | null
 }
 
 export type CreateQueueRequest = {
@@ -75,10 +77,13 @@ export type CreateQueueRequest = {
   modelEffort?: string | null
   modelSpeed?: string | null
   generateCommit: boolean
+  separateCommitSession: boolean
   commitModel?: string | null
   commitModelEffort?: string | null
   commitModelSpeed?: string | null
 }
+
+export type UpdateQueueRequest = Omit<CreateQueueRequest, 'projectId'>
 
 export type QueueAttachment = {
   name: string
@@ -93,6 +98,7 @@ export type CodexRun = {
   model: string
   modelEffort?: string | null
   modelSpeed?: string | null
+  queueOrder: number
   status: QueueStatus
   retryAfter?: string | null
   retryReason?: string | null
@@ -121,8 +127,10 @@ export type CodexRequest = {
   model: string
   modelEffort?: string | null
   modelSpeed?: string | null
+  queueOrder: number
   status: QueueStatus
   generateCommit: boolean
+  separateCommitSession: boolean
   retryAfter?: string | null
   retryReason?: string | null
   availableModel?: string | null
