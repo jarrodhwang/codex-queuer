@@ -2570,12 +2570,18 @@ function StructuredBodyView({
   content,
   emptyText = 'No content yet.',
   forceExpanded = false,
+  hideJson = false,
 }: {
   content?: string | null
   emptyText?: string
   forceExpanded?: boolean
+  hideJson?: boolean
 }) {
   const parsed = useMemo(() => parseBody(content ?? ''), [content])
+  if (hideJson && parsed.kind === 'json') {
+    return null
+  }
+
   const [expanded, setExpanded] = useState(false)
   const expandable = isBodyExpandable(parsed)
   const compact = expandable && !expanded && !forceExpanded
@@ -2795,7 +2801,7 @@ function CompletionSummary({ request }: { request: CodexRequest }) {
   const commitMetadataRun = latestRunWithCommitMetadata(request.runs)
   const resultRun = separateCommitRun ?? latestRunOfKind(request.runs, 'Request')
   const fileChanges = extractFileChanges(request)
-  const resultText = request.summary || lastUsefulText(resultRun?.output ?? '') || 'Completed successfully.'
+  const resultText = request.summary || completionResultText(resultRun?.output) || 'Completed successfully.'
 
   return (
     <section className="completion-summary" aria-label="Completion summary">
@@ -2877,6 +2883,70 @@ function lastUsefulText(output: string) {
   return output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).at(-1)
 }
 
+function completionResultText(output?: string) {
+  if (!output) {
+    return undefined
+  }
+
+  const trimmedOutput = output.trim()
+  if (!trimmedOutput) {
+    return undefined
+  }
+
+  const parsed = parseBody(trimmedOutput)
+  if (parsed.kind === 'json') {
+    const topLevelText = textFromUnknownJson(parsed.value)
+    if (topLevelText) {
+      return topLevelText
+    }
+
+    return undefined
+  }
+
+  if (parsed.kind === 'events') {
+    const textFromEvents = [...parsed.events].reverse().find((event) => event.text && event.text.trim())
+    if (textFromEvents?.text) {
+      return textFromEvents.text
+    }
+    const outputFromEvents = [...parsed.events].reverse().find((event) => event.output && event.output.trim())
+    if (outputFromEvents?.output) {
+      return lastUsefulText(outputFromEvents.output)
+    }
+    return undefined
+  }
+
+  if (parsed.kind === 'text') {
+    return lastUsefulText(parsed.text)
+  }
+
+  return undefined
+}
+
+function textFromUnknownJson(value: unknown): string | undefined {
+  if (!isRecord(value)) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim()
+    }
+
+    return undefined
+  }
+
+  const directText = stringValue(value.message) ?? stringValue(value.output) ?? stringValue(value.text)
+  if (directText) {
+    return directText
+  }
+
+  const nested = value.item
+  if (isRecord(nested)) {
+    const nestedText = stringValue(nested.message) ?? stringValue(nested.output) ?? stringValue(nested.text)
+    if (nestedText) {
+      return nestedText
+    }
+  }
+
+  return undefined
+}
+
 function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: number }) {
   const separateCommitRun = request ? latestRunOfKind(request.runs, 'Commit') : undefined
   const [showDetails, setShowDetails] = useState(false)
@@ -2892,11 +2962,6 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
   return (
     <aside className="queue-detail-panel" aria-label="Selected request details">
       <div className="queue-detail-header">
-        <div className="queue-detail-heading">
-          <div className="queue-detail-title truncate" title={request.prompt}>{requestDisplayName(request)}</div>
-          <ModelChips model={request.model} effort={request.modelEffort} speed={request.modelSpeed} />
-          <div className="meta truncate">{request.machineName} · {formatDate(request.createdAt)}</div>
-        </div>
         <StatusBadge status={request.status} busy={request.status === 'Running'} />
       </div>
       {request.status === 'Succeeded' && <CompletionSummary request={request} />}
@@ -2953,7 +3018,7 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
                 </div>
               )}
               {run.error && <div className="error-text">{run.error}</div>}
-              <StructuredBodyView content={run.output} emptyText="No output yet." />
+              <StructuredBodyView content={run.output} emptyText="No output yet." hideJson />
             </div>
           ))}
           {request.generateCommit && request.separateCommitSession && !separateCommitRun && (
