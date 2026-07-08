@@ -29,7 +29,9 @@ import {
 import { ApiError, api, apiWebSocketUrl, getStoredToken, storeToken } from '@/api/client'
 import type {
   ApiConfig,
+  CodexRun,
   CodexRequest,
+  RunKind,
   FileContent,
   FileTreeEntry,
   Machine,
@@ -224,6 +226,7 @@ function App() {
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([])
   const [activeFileKey, setActiveFileKey] = useState<string | null>(null)
   const [liveNow, setLiveNow] = useState(() => Date.now())
+  const [deleteRequestId, setDeleteRequestId] = useState<string | null>(null)
   const pendingRequestOverridesRef = useRef(new Map<string, Partial<CodexRequest>>())
   const liveRequestSequenceRef = useRef(0)
 
@@ -510,11 +513,6 @@ function App() {
   }
 
   const deleteRequest = async (id: string) => {
-    const request = requests.find((item) => item.id === id)
-    const label = request ? shortId(request.id) : 'this request'
-    const confirmed = window.confirm(`Move ${label} to trash? This will hide it from Queue and History unless the History trash view is enabled.`)
-    if (!confirmed) return
-
     setError('')
     const deletedAt = new Date().toISOString()
     pendingRequestOverridesRef.current.set(id, { deletedAt })
@@ -528,6 +526,8 @@ function App() {
       refreshLiveInBackground()
     }
   }
+
+  const requestToDelete = useMemo(() => requests.find((request) => request.id === deleteRequestId) ?? null, [deleteRequestId, requests])
 
   const cancelRequest = async (id: string) => {
     setError('')
@@ -624,7 +624,7 @@ function App() {
         {activeFile ? (
           <CodeViewer file={activeFile} />
         ) : (
-          <QueueWorkspace
+        <QueueWorkspace
             config={config}
             selectedProject={selectedProject}
             requests={requests}
@@ -638,7 +638,7 @@ function App() {
             onArchiveRequests={archiveRequests}
             onUpdateRequest={updateRequest}
             onReorderRequests={reorderRequests}
-            onDeleteRequest={deleteRequest}
+            onDeleteRequest={setDeleteRequestId}
             onUpdateProjectDefaults={updateProjectDefaults}
             onKickQueue={kickQueue}
             onError={handleApiError}
@@ -649,6 +649,16 @@ function App() {
         )}
       </main>
 
+      {requestToDelete && (
+        <DeleteQueueItemDialog
+          request={requestToDelete}
+          onCancel={() => setDeleteRequestId(null)}
+          onConfirm={() => {
+            void deleteRequest(requestToDelete.id).then(() => setDeleteRequestId(null))
+          }}
+        />
+      )}
+
       {rightOpen && (
         <RightRail
           selectedProject={selectedProject}
@@ -658,6 +668,35 @@ function App() {
         />
       )}
     </div>
+  )
+}
+
+function DeleteQueueItemDialog({
+  request,
+  onCancel,
+  onConfirm,
+}: {
+  request: CodexRequest
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const label = `${request.machineName || 'request'} #${shortId(request.id)}`
+  return (
+    <Modal title="Move request to trash" icon={<Trash2 size={18} />} onClose={onCancel}>
+      <div className="modal-body">
+        <p className="muted" style={{ margin: 0 }}>
+          Move <strong>{label}</strong> to trash? It will be removed from Queue and active History views until you open trash.
+        </p>
+        <div className="button-row">
+          <GlassButton variant="ghost" onClick={onCancel}>
+            Cancel
+          </GlassButton>
+          <GlassButton variant="danger" onClick={onConfirm}>
+            <Trash2 size={13} /> Move to trash
+          </GlassButton>
+        </div>
+      </div>
+    </Modal>
   )
 }
 
@@ -989,7 +1028,7 @@ type UsageBucket = {
 
 function usageLimitBuckets(requests: CodexRequest[], now: number) {
   const limits = requests.map((request) => {
-    const limitedRun = request.runs.find((run) => run.status === 'UsageLimited')
+    const limitedRun = latestRunByPredicate(request.runs, (run) => run.status === 'UsageLimited')
     const model = limitedRun?.model || request.model
     const retryAfter = limitedRun?.retryAfter ?? request.retryAfter
     const reason = limitedRun?.retryReason ?? request.retryReason
@@ -1569,7 +1608,7 @@ function QueueWorkspace({
   onArchiveRequests: (ids: string[]) => Promise<void>
   onUpdateRequest: (id: string, request: UpdateQueueRequest) => Promise<void>
   onReorderRequests: (projectId: string, requestIds: string[]) => Promise<void>
-  onDeleteRequest: (id: string) => Promise<void>
+  onDeleteRequest: (id: string) => void
   onUpdateProjectDefaults: (project: Project, defaults: ProjectModelDefaults) => Promise<void>
   onKickQueue: () => Promise<void>
   onError: (cause: unknown) => void
@@ -2222,7 +2261,7 @@ function QueueList({
   onArchiveAll: (ids: string[]) => Promise<void>
   onEdit: (request: CodexRequest) => void
   onReorder: (requestIds: string[]) => Promise<void>
-  onDelete: (id: string) => Promise<void>
+  onDelete: (id: string) => void
   onKickQueue: () => Promise<void>
 }) {
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null)
@@ -2356,7 +2395,7 @@ function RequestCard({
   onResume: (id: string) => Promise<void>
   onArchive: (id: string) => Promise<void>
   onEdit: (request: CodexRequest) => void
-  onDelete: (id: string) => Promise<void>
+  onDelete: (id: string) => void
   dragging: boolean
   dragOver: boolean
   onDragStart: () => void
@@ -2465,7 +2504,7 @@ function RequestCard({
             onClick={(event) => {
               event.stopPropagation()
               if (!deletable) return
-              void onDelete(request.id)
+              onDelete(request.id)
             }}
           >
             <Trash2 size={14} />
@@ -2706,6 +2745,39 @@ function numberValue(value: unknown) {
   return typeof value === 'number' ? value : undefined
 }
 
+function latestRunByPredicate(runs: readonly CodexRun[], predicate: (run: CodexRun) => boolean) {
+  let best: CodexRun | undefined
+  for (const run of runs) {
+    if (!predicate(run)) {
+      continue
+    }
+
+    if (!best) {
+      best = run
+      continue
+    }
+
+    if (run.createdAt > best.createdAt) {
+      best = run
+      continue
+    }
+
+    if (run.createdAt === best.createdAt && run.id > best.id) {
+      best = run
+    }
+  }
+
+  return best
+}
+
+function latestRunOfKind(runs: readonly CodexRun[], kind: RunKind) {
+  return latestRunByPredicate(runs, (run) => run.kind === kind)
+}
+
+function latestRunWithCommitMetadata(runs: readonly CodexRun[]) {
+  return latestRunByPredicate(runs, (run) => Boolean(run.commitSha || run.commitMessage))
+}
+
 function formatEventType(value: string) {
   return value
     .replace(/^item\./, '')
@@ -2719,9 +2791,9 @@ type CompletionFileChange = {
 }
 
 function CompletionSummary({ request }: { request: CodexRequest }) {
-  const separateCommitRun = request.runs.find((run) => run.kind === 'Commit')
-  const commitMetadataRun = request.runs.find((run) => run.commitSha || run.commitMessage)
-  const resultRun = separateCommitRun ?? request.runs.find((run) => run.kind === 'Request')
+  const separateCommitRun = latestRunOfKind(request.runs, 'Commit')
+  const commitMetadataRun = latestRunWithCommitMetadata(request.runs)
+  const resultRun = separateCommitRun ?? latestRunOfKind(request.runs, 'Request')
   const fileChanges = extractFileChanges(request)
   const resultText = request.summary || lastUsefulText(resultRun?.output ?? '') || 'Completed successfully.'
 
@@ -2806,7 +2878,8 @@ function lastUsefulText(output: string) {
 }
 
 function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: number }) {
-  const separateCommitRun = request?.runs.find((run) => run.kind === 'Commit')
+  const separateCommitRun = request ? latestRunOfKind(request.runs, 'Commit') : undefined
+  const [showDetails, setShowDetails] = useState(false)
 
   if (!request) {
     return (
@@ -2826,57 +2899,73 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
         </div>
         <StatusBadge status={request.status} busy={request.status === 'Running'} />
       </div>
-      <div className="queue-detail-body">
-        <div className="section-kicker">Request body</div>
-        {request.attachments.length > 0 && (
-          <div className="request-attachments">
-            {request.attachments.map((attachment, index) => (
-              <span key={`${attachment.name}:${index}`} className="model-chip">
-                {attachment.name} · {formatBytes(attachment.size)}
-              </span>
-            ))}
-          </div>
-        )}
-        <div className="request-body-scroll">
-          <StructuredBodyView content={request.prompt} forceExpanded />
-        </div>
-      </div>
       {request.status === 'Succeeded' && <CompletionSummary request={request} />}
-      {request.runs.map((run) => (
-        <div key={run.id} className="run-detail-card">
-          <div className="row-between">
-            <div className="run-title-stack">
-              <strong>{run.kind}</strong>
-              <ModelChips model={run.model} effort={run.modelEffort} speed={run.modelSpeed} />
+
+      <GlassButton
+        className="detail-toggle"
+        variant="ghost"
+        size="sm"
+        type="button"
+        onClick={() => setShowDetails((current) => !current)}
+      >
+        {showDetails ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        {showDetails ? 'Show less' : 'Show more'}
+      </GlassButton>
+
+      {showDetails && (
+        <>
+          <div className="queue-detail-body">
+            <div className="section-kicker">Request body</div>
+            {request.attachments.length > 0 && (
+              <div className="request-attachments">
+                {request.attachments.map((attachment, index) => (
+                  <span key={`${attachment.name}:${index}`} className="model-chip">
+                    {attachment.name} · {formatBytes(attachment.size)}
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="request-body-scroll">
+              <StructuredBodyView content={request.prompt} />
             </div>
-            <StatusBadge status={run.status} busy={run.status === 'Running'} />
           </div>
-          {run.status === 'UsageLimited' && (
-            <UsageLimitBanner
-              reason={run.retryReason}
-              retryAfter={run.retryAfter}
-              availableModel={run.availableModel}
-              remaining={run.retryAfter ? formatRemainingTime(run.retryAfter, now) : null}
-            />
-          )}
-          {run.commitSha && (
-            <div className="commit-box">
-              <div><strong>{run.commitSha.slice(0, 12)}</strong></div>
-              <div>{run.commitMessage}</div>
+          {request.runs.map((run) => (
+            <div key={run.id} className="run-detail-card">
+              <div className="row-between">
+                <div className="run-title-stack">
+                  <strong>{run.kind}</strong>
+                  <ModelChips model={run.model} effort={run.modelEffort} speed={run.modelSpeed} />
+                </div>
+                <StatusBadge status={run.status} busy={run.status === 'Running'} />
+              </div>
+              {run.status === 'UsageLimited' && (
+                <UsageLimitBanner
+                  reason={run.retryReason}
+                  retryAfter={run.retryAfter}
+                  availableModel={run.availableModel}
+                  remaining={run.retryAfter ? formatRemainingTime(run.retryAfter, now) : null}
+                />
+              )}
+              {run.commitSha && (
+                <div className="commit-box">
+                  <div><strong>{run.commitSha.slice(0, 12)}</strong></div>
+                  <div>{run.commitMessage}</div>
+                </div>
+              )}
+              {run.error && <div className="error-text">{run.error}</div>}
+              <StructuredBodyView content={run.output} emptyText="No output yet." />
+            </div>
+          ))}
+          {request.generateCommit && request.separateCommitSession && !separateCommitRun && (
+            <div className="pending-run-row">
+              <div className="run-title-stack">
+                <strong>Commit</strong>
+                <ModelChips model={request.commitModel || request.model} effort={request.commitModelEffort || request.modelEffort} speed={request.commitModelSpeed || request.modelSpeed} />
+              </div>
+              <StatusBadge status="Queued" />
             </div>
           )}
-          {run.error && <div className="error-text">{run.error}</div>}
-          <StructuredBodyView content={run.output} emptyText="No output yet." />
-        </div>
-      ))}
-      {request.generateCommit && request.separateCommitSession && !separateCommitRun && (
-        <div className="pending-run-row">
-          <div className="run-title-stack">
-            <strong>Commit</strong>
-            <ModelChips model={request.commitModel || request.model} effort={request.commitModelEffort || request.modelEffort} speed={request.commitModelSpeed || request.modelSpeed} />
-          </div>
-          <StatusBadge status="Queued" />
-        </div>
+        </>
       )}
     </aside>
   )
@@ -3150,8 +3239,8 @@ function progressFor(request: CodexRequest) {
   if (request.status === 'Succeeded') return 100
   if (request.status === 'Failed' || request.status === 'Cancelled') return 100
   if (request.status === 'Queued') return 8
-  const requestRun = request.runs.find((run) => run.kind === 'Request')
-  const commitRun = request.runs.find((run) => run.kind === 'Commit')
+  const requestRun = latestRunOfKind(request.runs, 'Request')
+  const commitRun = latestRunOfKind(request.runs, 'Commit')
   if (commitRun?.status === 'Running') return 82
   if (requestRun?.status === 'Succeeded' && request.generateCommit && request.separateCommitSession) return 68
   return 42
@@ -3217,7 +3306,7 @@ function RequestHistory({
   requests: CodexRequest[]
   deletedRequests: CodexRequest[]
   now: number
-  onDelete: (id: string) => Promise<void>
+  onDelete: (id: string) => void
 }) {
   const [showTrash, setShowTrash] = useState(false)
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null)
@@ -3255,7 +3344,7 @@ function RequestHistory({
       <div className="history-workbench">
         <div className="history-list" aria-label="History requests">
           {visibleRequests.slice(0, 50).map((request) => {
-            const commitRun = request.runs.find((run) => run.commitSha)
+            const commitRun = latestRunWithCommitMetadata(request.runs)
             const completedAt = request.deletedAt ?? request.finishedAt ?? request.createdAt
             const duration = formatDurationBetween(request.startedAt ?? request.createdAt, request.finishedAt ?? request.deletedAt ?? request.createdAt)
             return (
@@ -3292,7 +3381,7 @@ function RequestHistory({
                       title="Move to trash"
                       onClick={(event) => {
                         event.stopPropagation()
-                        void onDelete(request.id)
+                        onDelete(request.id)
                       }}
                     >
                       <Trash2 size={14} />

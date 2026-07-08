@@ -238,7 +238,7 @@ public sealed class QueueWorker(
             request.StartedAt ??= DateTimeOffset.UtcNow;
             var run = nextRunId.HasValue
                 ? request.Runs.First(x => x.Id == nextRunId.Value)
-                : request.Runs.First(x => x.Kind == RunKind.Request);
+                : GetLatestRunOfKind(request.Runs, RunKind.Request) ?? throw new InvalidOperationException("Request run was not found.");
             run.Status = QueueStatus.Running;
             run.StartedAt = DateTimeOffset.UtcNow;
             _lastDispatch = DateTimeOffset.UtcNow;
@@ -280,15 +280,15 @@ public sealed class QueueWorker(
             var request = await db.Requests.Include(x => x.Runs).FirstAsync(x => x.Id == requestId, stoppingToken);
             if (!request.GenerateCommit || !request.SeparateCommitSession)
             {
-                CancelUnusedCommitRun(request.Runs.FirstOrDefault(x => x.Kind == RunKind.Commit));
+                CancelUnusedCommitRun(GetLatestRunOfKind(request.Runs, RunKind.Commit));
                 request.Status = QueueStatus.Succeeded;
                 request.FinishedAt = DateTimeOffset.UtcNow;
-                request.Summary = LastUsefulLine(request.Runs.First(x => x.Kind == RunKind.Request).Output);
+                request.Summary = LastUsefulLine(GetLatestRunOfKind(request.Runs, RunKind.Request)?.Output ?? string.Empty);
                 await TrySaveChangesAsync(db, "complete request without separate commit", stoppingToken);
                 return;
             }
 
-            var commitRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Commit);
+            var commitRun = GetLatestRunOfKind(request.Runs, RunKind.Commit);
             if (commitRun?.Status == QueueStatus.Succeeded)
             {
                 request.Status = QueueStatus.Succeeded;
@@ -372,7 +372,7 @@ public sealed class QueueWorker(
                 .Include(x => x.Machine)
                 .Include(x => x.Runs)
                 .FirstAsync(x => x.Id == requestId, cancellationToken);
-            run = request.Runs.First(x => x.Kind == kind);
+            run = GetLatestRunOfKind(request.Runs, kind) ?? throw new InvalidOperationException("Request run was not found.");
             run.Status = QueueStatus.Running;
             run.StartedAt ??= DateTimeOffset.UtcNow;
             if (!await TrySaveChangesAsync(db, "mark run running", cancellationToken))
@@ -522,11 +522,12 @@ public sealed class QueueWorker(
     {
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        return await db.Runs.AnyAsync(x =>
-                x.RequestId == requestId &&
-                x.Kind == kind &&
-                x.Status == QueueStatus.Succeeded,
-            cancellationToken);
+        var latest = await db.Runs
+            .Where(x => x.RequestId == requestId && x.Kind == kind)
+            .OrderByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+        return latest?.Status == QueueStatus.Succeeded;
     }
 
     private async Task ReconcileQueueStateAsync(AppDbContext db, CancellationToken cancellationToken)
@@ -554,8 +555,8 @@ public sealed class QueueWorker(
 
     private static bool ReconcileRequestState(CodexRequest request, bool isActive)
     {
-        var requestRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Request);
-        var commitRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Commit);
+        var requestRun = GetLatestRunOfKind(request.Runs, RunKind.Request);
+        var commitRun = GetLatestRunOfKind(request.Runs, RunKind.Commit);
         if (requestRun is null)
         {
             return false;
@@ -605,7 +606,7 @@ public sealed class QueueWorker(
                 return true;
             }
 
-            if (commitRun.Status is QueueStatus.Running or QueueStatus.CancelRequested && !isActive)
+            if ((commitRun.Status is QueueStatus.Running or QueueStatus.CancelRequested) && !isActive)
             {
                 ResetRunForResume(commitRun);
                 MarkRequestQueued(request);
@@ -655,7 +656,7 @@ public sealed class QueueWorker(
 
     private static CodexRun? NextRunForDispatch(CodexRequest request)
     {
-        var requestRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Request);
+        var requestRun = GetLatestRunOfKind(request.Runs, RunKind.Request);
         if (requestRun is null)
         {
             return null;
@@ -666,7 +667,7 @@ public sealed class QueueWorker(
             return requestRun.Status == QueueStatus.Queued ? requestRun : null;
         }
 
-        var commitRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Commit);
+        var commitRun = GetLatestRunOfKind(request.Runs, RunKind.Commit);
         if (!request.GenerateCommit || !request.SeparateCommitSession)
         {
             CancelUnusedCommitRun(commitRun);
@@ -676,10 +677,17 @@ public sealed class QueueWorker(
         return commitRun?.Status == QueueStatus.Queued ? commitRun : null;
     }
 
+    private static CodexRun? GetLatestRunOfKind(ICollection<CodexRun> runs, RunKind kind) =>
+        runs
+            .Where(x => x.Kind == kind)
+            .OrderByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .FirstOrDefault();
+
     private static void ResumeRequest(CodexRequest request)
     {
-        var requestRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Request);
-        var commitRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Commit);
+        var requestRun = GetLatestRunOfKind(request.Runs, RunKind.Request);
+        var commitRun = GetLatestRunOfKind(request.Runs, RunKind.Commit);
 
         if (requestRun is null)
         {
@@ -799,8 +807,12 @@ public sealed class QueueWorker(
             .Include(x => x.Runs)
             .FirstAsync(x => x.Id == requestId, cancellationToken);
         var run = runId == Guid.Empty
-            ? request.Runs.First(x => x.Kind == kind)
+            ? GetLatestRunOfKind(request.Runs, kind)
             : request.Runs.First(x => x.Id == runId);
+        if (run is null)
+        {
+            return;
+        }
         var sessionId = kind == RunKind.Request
             ? result.CodexSessionId ?? request.Project?.CodexSessionId
             : result.CodexSessionId ?? run.CodexSessionId;
@@ -1036,7 +1048,7 @@ public sealed class QueueWorker(
         request = await db.Requests
             .Include(x => x.Runs)
             .FirstAsync(x => x.Id == request.Id, cancellationToken);
-        run = request.Runs.First(x => x.Kind == kind);
+        run = GetLatestRunOfKind(request.Runs, kind) ?? throw new InvalidOperationException("Request run was not found.");
         var finishedAt = DateTimeOffset.UtcNow;
         run.CommandPreview = result.CommandPreview;
         run.CodexSessionId = result.CodexSessionId ?? run.CodexSessionId;
@@ -1152,8 +1164,12 @@ public sealed class QueueWorker(
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var request = await db.Requests.Include(x => x.Runs).FirstAsync(x => x.Id == requestId, cancellationToken);
         var run = runId == Guid.Empty
-            ? request.Runs.First(x => x.Kind == kind)
+            ? GetLatestRunOfKind(request.Runs, kind)
             : request.Runs.First(x => x.Id == runId);
+        if (run is null)
+        {
+            return;
+        }
         run.Status = QueueStatus.Cancelled;
         run.FinishedAt = DateTimeOffset.UtcNow;
         run.Error = "Cancelled by user.";
@@ -1177,8 +1193,12 @@ public sealed class QueueWorker(
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var request = await db.Requests.Include(x => x.Runs).FirstAsync(x => x.Id == requestId, cancellationToken);
         var run = runId == Guid.Empty
-            ? request.Runs.First(x => x.Kind == kind)
+            ? GetLatestRunOfKind(request.Runs, kind)
             : request.Runs.First(x => x.Id == runId);
+        if (run is null)
+        {
+            return;
+        }
         run.Status = QueueStatus.Failed;
         run.FinishedAt = DateTimeOffset.UtcNow;
         run.Error = exception.Message;

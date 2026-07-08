@@ -231,13 +231,21 @@ public static class DbInitializer
 
     private static bool RepairInterruptedRequest(CodexRequest request)
     {
-        var requestRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Request);
+        var requestRun = request.Runs
+            .Where(x => x.Kind == RunKind.Request)
+            .OrderByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .FirstOrDefault();
         if (requestRun?.Status != QueueStatus.Succeeded)
         {
             return false;
         }
 
-        var commitRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Commit);
+        var commitRun = request.Runs
+            .Where(x => x.Kind == RunKind.Commit)
+            .OrderByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .FirstOrDefault();
         if (!request.GenerateCommit || !request.SeparateCommitSession)
         {
             CancelUnusedCommitRun(commitRun);

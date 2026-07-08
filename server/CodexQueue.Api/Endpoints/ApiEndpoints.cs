@@ -450,7 +450,11 @@ public static class ApiEndpoints
             request.RetryReason = null;
             request.AvailableModel = null;
 
-            var requestRun = request.Runs.FirstOrDefault(x => x.Kind == RunKind.Request);
+            var requestRun = request.Runs
+                .Where(x => x.Kind == RunKind.Request)
+                .OrderByDescending(x => x.CreatedAt)
+                .ThenByDescending(x => x.Id)
+                .FirstOrDefault();
             if (requestRun is null)
             {
                 requestRun = new CodexRun { Kind = RunKind.Request, Status = QueueStatus.Queued, CreatedAt = request.CreatedAt };
