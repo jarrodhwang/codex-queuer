@@ -327,7 +327,7 @@ public sealed class ProjectFileService(ITargetCommandRunner runner) : IProjectFi
 
     private static string GetMachineRoot(TargetMachine machine) =>
         string.IsNullOrWhiteSpace(machine.WorkingRoot)
-            ? DefaultPaths.LocalWorkingRoot()
+            ? DefaultPaths.DefaultWorkingRoot(machine.Kind, machine.Platform)
             : machine.WorkingRoot.Trim();
 
     private static string NormalizeRelativePath(string? path)

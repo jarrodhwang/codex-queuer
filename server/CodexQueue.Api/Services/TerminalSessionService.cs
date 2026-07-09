@@ -170,7 +170,7 @@ public sealed class TerminalSessionService(ILogger<TerminalSessionService> logge
             {
                 return new TerminalCommand(
                     "powershell",
-                    new[] { "-NoLogo", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", "Set-Location -LiteralPath " + QuotePowerShellValue(project.Path) });
+                    new[] { "-NoLogo", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", TargetCommandRunner.BuildPowerShellSetLocationCommand(project.Path) });
             }
 
             return new TerminalCommand(Environment.GetEnvironmentVariable("SHELL") ?? "/bin/bash", new[] { "-l" });
@@ -183,7 +183,7 @@ public sealed class TerminalSessionService(ILogger<TerminalSessionService> logge
 
         var arguments = BuildSshArguments(machine);
         arguments.Add(machine.TargetsWindows()
-            ? "powershell -NoLogo -NoExit -ExecutionPolicy Bypass -Command \"Set-Location -LiteralPath " + QuotePowerShellValue(project.Path) + "\""
+            ? "powershell -NoLogo -NoExit -ExecutionPolicy Bypass -Command \"" + TargetCommandRunner.BuildPowerShellSetLocationCommand(project.Path) + "\""
             : BuildInteractiveUnixShellCommand(project.Path));
         return new TerminalCommand("ssh", arguments);
     }
@@ -421,8 +421,6 @@ public sealed class TerminalSessionService(ILogger<TerminalSessionService> logge
         "export PATH=\"$HOME/.local/bin:$HOME/bin:$PATH\"; cd " + QuoteShell(projectPath) + " && exec ${SHELL:-/bin/bash} -l";
 
     private static string QuoteShell(string value) => "'" + value.Replace("'", "'\"'\"'", StringComparison.Ordinal) + "'";
-
-    private static string QuotePowerShellValue(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
 
     private static string ResolveSshKeyPath(string configuredPath)
     {

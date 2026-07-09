@@ -79,7 +79,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
         if (machine.TargetsWindows())
         {
-            var windowsCommand = "Set-Location -LiteralPath " + QuotePowerShellValue(projectPath) + "; "
+            var windowsCommand = BuildPowerShellSetLocationCommand(projectPath) + "; "
                 + "codex " + string.Join(" ", BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt, allowGitWrites).Select(QuotePowerShellValue));
 
             return RunSshAsync(
@@ -123,7 +123,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             {
                 var command = string.IsNullOrWhiteSpace(projectPath)
                     ? shellCommand
-                    : "Set-Location -LiteralPath " + QuotePowerShellValue(projectPath) + "; " + shellCommand;
+                    : BuildPowerShellSetLocationCommand(projectPath) + "; " + shellCommand;
                 return RunProcessAsync(
                     "powershell",
                     new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command },
@@ -146,7 +146,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         {
             var command = string.IsNullOrWhiteSpace(projectPath)
                 ? shellCommand
-                : "Set-Location -LiteralPath " + QuotePowerShellValue(projectPath) + "; " + shellCommand;
+                : BuildPowerShellSetLocationCommand(projectPath) + "; " + shellCommand;
             var windowsRemoteCommand = BuildPowerShellRemoteCommand(command);
             return RunSshAsync(machine, windowsRemoteCommand, "ssh " + machine.Host + " " + shellCommand, onOutput, cancellationToken);
         }
@@ -398,6 +398,9 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
     public static string Quote(string value) => "'" + value.Replace("'", "'\"'\"'", StringComparison.Ordinal) + "'";
 
     public static string QuotePowerShellValue(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+
+    public static string BuildPowerShellSetLocationCommand(string path) =>
+        "Set-Location -LiteralPath " + QuotePowerShellValue(path) + " -ErrorAction Stop";
 
     private static string ResolveSshKeyPath(string configuredPath)
     {
