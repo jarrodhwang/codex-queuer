@@ -92,6 +92,9 @@ type LocalQueueAttachment = QueueAttachment & {
 }
 
 const defaultModels: ModelOption[] = [
+  { label: 'GPT-5.6 Sol', model: 'gpt-5.6-sol', supportsPriority: true },
+  { label: 'GPT-5.6 Terra', model: 'gpt-5.6-terra', supportsPriority: true },
+  { label: 'GPT-5.6 Luna', model: 'gpt-5.6-luna', supportsPriority: true },
   { label: 'GPT-5.5', model: 'gpt-5.5', supportsPriority: true },
   { label: 'GPT-5.4', model: 'gpt-5.4', supportsPriority: true },
   { label: 'GPT-5.4 Mini', model: 'gpt-5.4-mini', supportsPriority: false },
@@ -2528,7 +2531,7 @@ function ModelPicker({
       )}
       <div className={`model-options-row ${supportsPriority ? '' : 'model-options-row--single'}`}>
         <SegmentedRadio
-          label="Intensity"
+          label="Effort"
           name={`${label}-effort`}
           value={value.effort}
           disabled={disabled}
@@ -2537,6 +2540,7 @@ function ModelPicker({
             { label: 'Medium', value: 'medium' },
             { label: 'High', value: 'high' },
             { label: 'XHigh', value: 'xhigh' },
+            { label: 'Ultra', value: 'ultra' },
           ]}
           onChange={(effort) => onChange({ ...value, effort })}
         />
@@ -4871,6 +4875,7 @@ function formatModel(model: string, effort?: string | null, speed?: string | nul
     medium: 'medium',
     high: 'high',
     xhigh: 'extra high',
+    ultra: 'ultra',
   }
   const parts = [model]
   if (effort) parts.push(labels[effort] ?? effort)
@@ -4915,6 +4920,7 @@ function ModelChips({ model, effort, speed }: { model: string, effort?: string |
     medium: 'medium',
     high: 'high',
     xhigh: 'xhigh',
+    ultra: 'ultra',
   }
   const normalizedSpeed = speed === 'priority' ? 'x1.5' : speed || 'normal'
 

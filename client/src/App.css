@@ -1281,6 +1281,13 @@
   box-shadow: inset 0 1px 0 var(--glass-edge), 0 4px 12px rgba(220, 38, 38, 0.14);
 }
 
+.segmented-radio label.segmented-radio-option--ultra.active {
+  border-color: rgba(249, 115, 22, 0.38);
+  background: linear-gradient(145deg, rgba(255, 237, 213, 0.94), rgba(249, 115, 22, 0.26));
+  color: #c2410c;
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 4px 12px rgba(249, 115, 22, 0.18);
+}
+
 .segmented-radio label.segmented-radio-option--priority.active {
   border-color: rgba(245, 158, 11, 0.34);
   background: linear-gradient(145deg, rgba(254, 243, 199, 0.94), rgba(245, 158, 11, 0.24));
@@ -1729,6 +1736,12 @@
   border-color: rgba(220, 38, 38, 0.32);
   background: linear-gradient(145deg, rgba(254, 226, 226, 0.9), rgba(220, 38, 38, 0.2));
   color: #b91c1c;
+}
+
+.model-chip--effort-ultra {
+  border-color: rgba(249, 115, 22, 0.38);
+  background: linear-gradient(145deg, rgba(255, 237, 213, 0.94), rgba(249, 115, 22, 0.26));
+  color: #c2410c;
 }
 
 .model-chip--speed-priority {
@@ -4012,6 +4025,12 @@
   border-color: rgba(220, 38, 38, 0.32);
   background: linear-gradient(145deg, rgba(254, 226, 226, 0.9), rgba(220, 38, 38, 0.2));
   color: #b91c1c;
+}
+
+.model-chip--effort-ultra {
+  border-color: rgba(249, 115, 22, 0.38);
+  background: linear-gradient(145deg, rgba(255, 237, 213, 0.94), rgba(249, 115, 22, 0.26));
+  color: #c2410c;
 }
 
 .status-badge--queued,

@@ -907,7 +907,7 @@ public static class ApiEndpoints
         }
 
         var normalized = effort.Trim().ToLowerInvariant();
-        return normalized is "low" or "medium" or "high" or "xhigh" ? normalized : null;
+        return normalized is "low" or "medium" or "high" or "xhigh" or "ultra" ? normalized : null;
     }
 
     private static string? NormalizeOptional(string? value) =>
@@ -1212,6 +1212,9 @@ public static class ApiEndpoints
 
     private static readonly ModelOptionDto[] DefaultModels =
     {
+        new("GPT-5.6 Sol", "gpt-5.6-sol", true),
+        new("GPT-5.6 Terra", "gpt-5.6-terra", true),
+        new("GPT-5.6 Luna", "gpt-5.6-luna", true),
         new("GPT-5.5", "gpt-5.5", true),
         new("GPT-5.4", "gpt-5.4", true),
         new("GPT-5.4 Mini", "gpt-5.4-mini", false),
