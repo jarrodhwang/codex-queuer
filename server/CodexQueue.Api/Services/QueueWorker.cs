@@ -118,7 +118,7 @@ public sealed class QueueWorker(
         {
             try
             {
-                await ProcessNextAsync(CancellationToken.None);
+                await ProcessAvailableAsync(CancellationToken.None);
             }
             catch (Exception ex)
             {
@@ -149,7 +149,7 @@ public sealed class QueueWorker(
         {
             try
             {
-                var processed = await ProcessNextLockedAsync(stoppingToken);
+                var processed = await ProcessAvailableLockedAsync(stoppingToken);
                 if (!processed)
                 {
                     await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
@@ -168,17 +168,34 @@ public sealed class QueueWorker(
         }
     }
 
-    private async Task<bool> ProcessNextLockedAsync(CancellationToken stoppingToken)
+    private async Task<bool> ProcessAvailableLockedAsync(CancellationToken stoppingToken)
     {
         await _processLock.WaitAsync(stoppingToken);
         try
         {
-            return await ProcessNextAsync(stoppingToken);
+            return await ProcessAvailableAsync(stoppingToken);
         }
         finally
         {
             _processLock.Release();
         }
+    }
+
+    private async Task<bool> ProcessAvailableAsync(CancellationToken stoppingToken)
+    {
+        var processedAny = false;
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            var processed = await ProcessNextAsync(stoppingToken);
+            if (!processed)
+            {
+                return processedAny;
+            }
+
+            processedAny = true;
+        }
+
+        return processedAny;
     }
 
     private async Task<bool> ProcessNextAsync(CancellationToken stoppingToken)
@@ -328,8 +345,6 @@ public sealed class QueueWorker(
                     return;
                 }
             }
-
-            await RunCommitAsync(requestId, requestCancellation.Token);
         }
         finally
         {
