@@ -214,15 +214,20 @@
 
 .glass-button,
 .glass-field {
-  border: 1px solid rgba(255, 255, 255, 0.52);
+  border: 1px solid rgba(255, 255, 255, 0.62);
   border-radius: 7px;
-  background: var(--glass-bg-strong);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.84), rgba(255, 255, 255, 0.46) 52%, rgba(37, 99, 235, 0.12));
   color: var(--text-strong);
   font: inherit;
   min-width: 0;
-  box-shadow: inset 0 1px 0 var(--glass-edge), 0 5px 14px rgba(15, 23, 42, 0.07);
-  backdrop-filter: blur(16px) saturate(1.14);
-  -webkit-backdrop-filter: blur(16px) saturate(1.14);
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge),
+    inset 0 -1px 0 rgba(37, 99, 235, 0.12),
+    0 8px 22px rgba(15, 23, 42, 0.08),
+    0 0 22px rgba(37, 99, 235, 0.08);
+  backdrop-filter: blur(20px) saturate(1.22);
+  -webkit-backdrop-filter: blur(20px) saturate(1.22);
 }
 
 .glass-button {
@@ -246,7 +251,7 @@
   inset: 0;
   pointer-events: none;
   content: "";
-  background: linear-gradient(120deg, transparent 14%, rgba(255, 255, 255, 0.22) 36%, transparent 58%);
+  background: linear-gradient(120deg, transparent 12%, rgba(255, 255, 255, 0.5) 36%, rgba(14, 165, 233, 0.2) 48%, transparent 64%);
   opacity: 0;
   transform: translateX(-36%);
   transition: opacity 0.18s ease, transform 0.28s ease;
@@ -264,8 +269,13 @@
 
 .glass-button:not(:disabled):hover {
   transform: translateY(-1px);
-  border-color: rgba(37, 99, 235, 0.38);
-  background: linear-gradient(145deg, rgba(226, 242, 255, 0.82), rgba(239, 246, 255, 0.62));
+  border-color: rgba(37, 99, 235, 0.54);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.9), rgba(219, 234, 254, 0.72) 58%, rgba(255, 255, 255, 0.52));
+  box-shadow:
+    inset 0 1px 0 var(--glass-edge),
+    0 10px 26px rgba(15, 23, 42, 0.1),
+    0 0 30px rgba(37, 99, 235, 0.18);
   color: var(--text-strong);
 }
 
@@ -287,36 +297,44 @@
 }
 
 .glass-button--primary {
-  background: linear-gradient(145deg, rgba(59, 130, 246, 0.96), rgba(37, 99, 235, 0.92));
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.7), rgba(59, 130, 246, 0.96) 42%, rgba(14, 165, 233, 0.92));
   color: white;
-  border-color: rgba(255, 255, 255, 0.3);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.34), 0 10px 22px rgba(37, 99, 235, 0.22);
+  border-color: rgba(37, 99, 235, 0.56);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.74),
+    inset 0 -1px 0 rgba(29, 78, 216, 0.24),
+    0 12px 30px rgba(37, 99, 235, 0.22),
+    0 0 34px rgba(14, 165, 233, 0.24);
 }
 
 .glass-button--primary:not(:disabled):hover {
-  background: linear-gradient(145deg, rgba(37, 99, 235, 0.96), rgba(29, 78, 216, 0.94));
-  border-color: rgba(255, 255, 255, 0.38);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.82), rgba(37, 99, 235, 0.98) 44%, rgba(2, 132, 199, 0.94));
+  border-color: rgba(255, 255, 255, 0.72);
   color: white;
 }
 
 .glass-button--secondary {
   box-shadow:
     inset 0 1px 0 var(--glass-edge),
-    0 5px 14px rgba(15, 23, 42, 0.07),
-    0 0 22px rgba(37, 99, 235, 0.08);
+    inset 0 -1px 0 rgba(37, 99, 235, 0.1),
+    0 8px 22px rgba(15, 23, 42, 0.07),
+    0 0 24px rgba(37, 99, 235, 0.09);
 }
 
 .glass-button--secondary:not(:disabled):hover {
-  background: linear-gradient(145deg, rgba(219, 234, 254, 0.8), rgba(239, 246, 255, 0.58));
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.82), rgba(219, 234, 254, 0.68) 58%, rgba(255, 255, 255, 0.5));
   color: var(--text-strong);
 }
 
 .glass-button--primary:not(:disabled),
 .done-all-button:not(:disabled) {
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.34),
-    0 10px 22px rgba(37, 99, 235, 0.22),
-    0 0 28px rgba(14, 165, 233, 0.18);
+    inset 0 1px 0 rgba(255, 255, 255, 0.74),
+    0 12px 30px rgba(37, 99, 235, 0.22),
+    0 0 36px rgba(14, 165, 233, 0.24);
 }
 
 .glass-button--danger {
@@ -336,7 +354,8 @@
 }
 
 .glass-button--ghost:not(:disabled):hover {
-  background: rgba(219, 234, 254, 0.46);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.76), rgba(219, 234, 254, 0.56) 58%, rgba(255, 255, 255, 0.38));
   color: var(--text-strong);
 }
 
