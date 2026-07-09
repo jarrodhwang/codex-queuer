@@ -277,7 +277,6 @@ public sealed class QueueWorker(
                 return;
             }
 
-            var runCommitNow = false;
             await using (var scope = scopeFactory.CreateAsyncScope())
             {
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -328,19 +327,9 @@ public sealed class QueueWorker(
                 {
                     return;
                 }
-
-                runCommitNow = !await IsRunModelUsageLimitedAsync(
-                    db,
-                    request.MachineId,
-                    commitRun.Model,
-                    DateTimeOffset.UtcNow,
-                    stoppingToken);
             }
 
-            if (runCommitNow)
-            {
-                await RunCommitAsync(requestId, requestCancellation.Token);
-            }
+            await RunCommitAsync(requestId, requestCancellation.Token);
         }
         finally
         {
@@ -474,9 +463,19 @@ public sealed class QueueWorker(
     {
         var beforeCommitHead = await ReadGitHeadAsync(machine, projectPath, cancellationToken);
         var beforeStatus = await ReadGitStatusPorcelainAsync(machine, projectPath, cancellationToken);
-        var projectLabel = request.Project?.Name?.Trim();
-        var target = string.IsNullOrWhiteSpace(projectLabel) ? "repository" : "project " + projectLabel;
-        var prompt = BuildProjectScopedPrompt(projectPath, GitCommitMessageHelper.BuildCommitPrompt(target));
+        var prompt = BuildProjectScopedPrompt(
+            projectPath,
+            """
+            Review Changes and Create Commit
+
+            Inspect the current git changes and create exactly one git commit yourself.
+            Stage only changes under this project root. Prefer pathspec-limited commands such as `git add -A -- .`.
+            Choose one concise imperative commit message.
+            If there are no changes, do not create a commit and return exactly: No changes to commit.
+            Do not amend existing commits.
+            Do not push.
+            After committing, report the commit SHA and commit message.
+            """);
 
         var result = await runner.RunCodexAsync(
             machine,
