@@ -4,6 +4,9 @@ import type {
   CreateQueueRequest,
   FileContent,
   FileTreeEntry,
+  GitCommitRequest,
+  GitCommitResult,
+  GitStatus,
   Machine,
   MachineTest,
   Project,
@@ -11,6 +14,8 @@ import type {
   SaveMachineRequest,
   SaveProjectRequest,
   Session,
+  SuggestGitCommitMessageRequest,
+  SuggestGitCommitMessageResult,
   TerminalCommandResult,
   UpdateQueueRequest,
 } from './types'
@@ -129,5 +134,16 @@ export const api = {
     apiFetch<TerminalCommandResult>(`/projects/${projectId}/terminal`, {
       method: 'POST',
       body: JSON.stringify({ command }),
+    }),
+  gitStatus: (projectId: string) => apiFetch<GitStatus>(`/projects/${projectId}/git/status`),
+  gitCommit: (projectId: string, request: GitCommitRequest) =>
+    apiFetch<GitCommitResult>(`/projects/${projectId}/git/commit`, {
+      method: 'POST',
+      body: JSON.stringify(request),
+    }),
+  suggestGitCommitMessage: (projectId: string, request: SuggestGitCommitMessageRequest) =>
+    apiFetch<SuggestGitCommitMessageResult>(`/projects/${projectId}/git/suggest-message`, {
+      method: 'POST',
+      body: JSON.stringify(request),
     }),
 }

@@ -98,8 +98,36 @@ public static class DbInitializer
             var repairedRequests = false;
             foreach (var request in interruptedRequests)
             {
+                if (request.Status == QueueStatus.CancelRequested)
+                {
+                    MarkRequestCancelled(request, "Cancelled by user.");
+                    repairedRequests = true;
+                    continue;
+                }
+
                 if (RepairInterruptedRequest(request))
                 {
+                    repairedRequests = true;
+                    continue;
+                }
+
+                if (request.Status == QueueStatus.Running)
+                {
+                    request.Status = QueueStatus.Queued;
+                    request.StartedAt = null;
+                    request.FinishedAt = null;
+                    request.Error = null;
+                    request.RetryAfter = null;
+                    request.RetryReason = null;
+                    request.AvailableModel = null;
+                    foreach (var run in request.Runs)
+                    {
+                        if (run.Status is QueueStatus.Running or QueueStatus.CancelRequested or QueueStatus.UsageLimited)
+                        {
+                            ResetRunForQueue(run);
+                        }
+                    }
+
                     repairedRequests = true;
                     continue;
                 }
@@ -313,6 +341,11 @@ public static class DbInitializer
     private static void ResetRunForQueue(CodexRun run)
     {
         run.Status = QueueStatus.Queued;
+        run.CodexSessionId = null;
+        run.CommandPreview = null;
+        run.Output = "";
+        run.CommitMessage = null;
+        run.CommitSha = null;
         run.Error = null;
         run.RetryAfter = null;
         run.RetryReason = null;
@@ -328,6 +361,23 @@ public static class DbInitializer
         request.Status = QueueStatus.Queued;
         request.Error = null;
         request.FinishedAt = null;
+    }
+
+    private static void MarkRequestCancelled(CodexRequest request, string reason)
+    {
+        var finishedAt = DateTimeOffset.UtcNow;
+        ClearRequestRetryState(request);
+        request.Status = QueueStatus.Cancelled;
+        request.Error = reason;
+        request.FinishedAt = finishedAt;
+
+        foreach (var run in request.Runs.Where(x =>
+                     x.Status is QueueStatus.Queued or QueueStatus.Running or QueueStatus.CancelRequested or QueueStatus.UsageLimited))
+        {
+            run.Status = QueueStatus.Cancelled;
+            run.FinishedAt = finishedAt;
+            run.Error = reason;
+        }
     }
 
     private static void MarkRequestSucceeded(CodexRequest request, CodexRun run)

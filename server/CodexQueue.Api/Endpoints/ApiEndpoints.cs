@@ -255,6 +255,163 @@ public static class ApiEndpoints
             }
         });
 
+        api.MapGet("/projects/{id:guid}/git/status", async (Guid id, AppDbContext db, ITargetCommandRunner runner, CancellationToken cancellationToken) =>
+        {
+            var project = await LoadProjectWithMachineAsync(id, db, cancellationToken);
+            if (project is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (project.Machine is null)
+            {
+                return Results.BadRequest(new { error = "Project machine is missing." });
+            }
+
+            try
+            {
+                var statusResult = await runner.RunShellAsync(
+                    project.Machine,
+                    project.Path,
+                    "git status --porcelain=v1 -b --untracked-files=all -- .",
+                    _ => Task.CompletedTask,
+                    cancellationToken);
+
+                if (!statusResult.Success)
+                {
+                    return Results.BadRequest(new { error = StripCommandPreview(statusResult.Output).Trim() });
+                }
+
+                var diffStatResult = await runner.RunShellAsync(
+                    project.Machine,
+                    project.Path,
+                    "git diff --stat --no-ext-diff -- .; git diff --cached --stat --no-ext-diff -- .",
+                    _ => Task.CompletedTask,
+                    cancellationToken);
+
+                var statusOutput = StripCommandPreview(statusResult.Output);
+                var changes = ParseGitChanges(statusOutput, out var branch);
+                var diffStat = diffStatResult.Success ? StripCommandPreview(diffStatResult.Output).Trim() : "";
+                return Results.Ok(new GitStatusDto(branch, changes.Count == 0, changes, diffStat, statusOutput.Trim()));
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
+
+        api.MapPost("/projects/{id:guid}/git/commit", async (Guid id, GitCommitRequest input, AppDbContext db, ITargetCommandRunner runner, CancellationToken cancellationToken) =>
+        {
+            var project = await LoadProjectWithMachineAsync(id, db, cancellationToken);
+            if (project is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (project.Machine is null)
+            {
+                return Results.BadRequest(new { error = "Project machine is missing." });
+            }
+
+            var message = SanitizeGitCommitMessage(input.Message);
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return Results.BadRequest(new { error = "Commit message is required." });
+            }
+
+            try
+            {
+                var result = await runner.RunShellAsync(
+                    project.Machine,
+                    project.Path,
+                    BuildGitCommitShellCommand(project.Machine, message),
+                    _ => Task.CompletedTask,
+                    cancellationToken);
+                var output = StripCommandPreview(result.Output).Trim();
+                if (!result.Success)
+                {
+                    return Results.BadRequest(new { error = string.IsNullOrWhiteSpace(output) ? "Git commit failed." : output });
+                }
+
+                return Results.Ok(new GitCommitDto(result.Success, output, result.ExitCode, result.CommandPreview, ExtractCommitSha(output)));
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
+
+        api.MapPost("/projects/{id:guid}/git/suggest-message", async (Guid id, SuggestGitCommitMessageRequest input, AppDbContext db, ITargetCommandRunner runner, CancellationToken cancellationToken) =>
+        {
+            var project = await LoadProjectWithMachineAsync(id, db, cancellationToken);
+            if (project is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (project.Machine is null)
+            {
+                return Results.BadRequest(new { error = "Project machine is missing." });
+            }
+
+            if (string.IsNullOrWhiteSpace(input.Model))
+            {
+                return Results.BadRequest(new { error = "Model is required." });
+            }
+
+            try
+            {
+                var statusResult = await runner.RunShellAsync(
+                    project.Machine,
+                    project.Path,
+                    "git status --porcelain=v1 --untracked-files=all -- .",
+                    _ => Task.CompletedTask,
+                    cancellationToken);
+                if (!statusResult.Success)
+                {
+                    return Results.BadRequest(new { error = StripCommandPreview(statusResult.Output).Trim() });
+                }
+
+                var statusOutput = StripCommandPreview(statusResult.Output).Trim();
+                if (string.IsNullOrWhiteSpace(statusOutput))
+                {
+                    return Results.BadRequest(new { error = "No git changes to describe." });
+                }
+
+                var diffStatResult = await runner.RunShellAsync(
+                    project.Machine,
+                    project.Path,
+                    "git diff --stat --no-ext-diff -- .; git diff --cached --stat --no-ext-diff -- .",
+                    _ => Task.CompletedTask,
+                    cancellationToken);
+
+                var prompt = BuildGitCommitMessagePrompt(statusOutput, StripCommandPreview(diffStatResult.Output).Trim());
+                var result = await runner.RunCodexAsync(
+                    project.Machine,
+                    project.Path,
+                    input.Model.Trim(),
+                    NormalizeEffort(input.ModelEffort),
+                    NormalizeOptionalSpeed(input.ModelSpeed),
+                    null,
+                    null,
+                    prompt,
+                    _ => Task.CompletedTask,
+                    cancellationToken);
+
+                var message = ExtractCommitMessageFromOutput(result.Output);
+                if (string.IsNullOrWhiteSpace(message))
+                {
+                    return Results.BadRequest(new { error = "Codex did not return a commit message." });
+                }
+
+                return Results.Ok(new SuggestGitCommitMessageDto(message, StripCommandPreview(result.Output).Trim()));
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or IOException or TimeoutException or System.ComponentModel.Win32Exception)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
+
         api.MapPost("/projects/{id:guid}/terminal", async (Guid id, TerminalCommandRequest input, AppDbContext db, ITargetCommandRunner runner, CancellationToken cancellationToken) =>
         {
             var project = await db.Projects.Include(x => x.Machine).AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
@@ -872,6 +1029,257 @@ public static class ApiEndpoints
 
     private static string BuildInteractiveUnixShellCommand(string projectPath) =>
         "cd " + QuoteShell(projectPath) + " && exec ${SHELL:-/bin/bash} -li";
+
+    private static Task<Project?> LoadProjectWithMachineAsync(Guid id, AppDbContext db, CancellationToken cancellationToken) =>
+        db.Projects.Include(x => x.Machine).AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+
+    private static IReadOnlyList<GitFileChangeDto> ParseGitChanges(string output, out string branch)
+    {
+        branch = "unknown";
+        var changes = new List<GitFileChangeDto>();
+        foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (line.StartsWith("## ", StringComparison.Ordinal))
+            {
+                branch = ParseGitBranch(line[3..]);
+                continue;
+            }
+
+            if (line.Length < 4)
+            {
+                continue;
+            }
+
+            var code = line[..2];
+            var path = line[3..].Trim();
+            var renameSeparator = path.IndexOf(" -> ", StringComparison.Ordinal);
+            if (renameSeparator >= 0)
+            {
+                path = path[(renameSeparator + 4)..].Trim();
+            }
+
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                continue;
+            }
+
+            changes.Add(new GitFileChangeDto(path, GitStatusLabel(code), IsGitStatusStaged(code), IsGitStatusUnstaged(code)));
+        }
+
+        return changes
+            .OrderBy(x => x.Path, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static string ParseGitBranch(string line)
+    {
+        var trimmed = line.Trim();
+        var upstreamIndex = trimmed.IndexOf("...", StringComparison.Ordinal);
+        if (upstreamIndex >= 0)
+        {
+            trimmed = trimmed[..upstreamIndex];
+        }
+
+        return string.IsNullOrWhiteSpace(trimmed) ? "unknown" : trimmed;
+    }
+
+    private static string GitStatusLabel(string status)
+    {
+        if (status == "??") return "untracked";
+        if (status.Contains('D')) return "deleted";
+        if (status.Contains('R')) return "renamed";
+        if (status.Contains('A')) return "added";
+        if (status.Contains('M')) return "modified";
+        return "changed";
+    }
+
+    private static bool IsGitStatusStaged(string status) =>
+        status.Length > 0 && status[0] is not ' ' and not '?';
+
+    private static bool IsGitStatusUnstaged(string status) =>
+        status == "??" || status.Length > 1 && status[1] != ' ';
+
+    private static string StripCommandPreview(string output)
+    {
+        if (!output.StartsWith("$ ", StringComparison.Ordinal))
+        {
+            return output;
+        }
+
+        var newline = output.IndexOf('\n', StringComparison.Ordinal);
+        return newline < 0 ? "" : output[(newline + 1)..];
+    }
+
+    private static string BuildGitCommitShellCommand(TargetMachine machine, string message) =>
+        machine.TargetsWindows() ? BuildWindowsGitCommitShellCommand(message) : BuildUnixGitCommitShellCommand(message);
+
+    private static string BuildUnixGitCommitShellCommand(string message)
+    {
+        var quotedMessage = TargetCommandRunner.Quote(message);
+        return "before_head=$(git rev-parse HEAD 2>/dev/null || true); "
+            + "before=$(git status --porcelain -- .); "
+            + "if [ -z \"$before\" ]; then printf 'No changes to commit.\\n'; exit 0; fi; "
+            + "printf 'Changed files before commit:\\n%s\\n' \"$before\"; "
+            + "git add -A -- .; "
+            + "diff_exit=0; git diff --cached --quiet -- . || diff_exit=$?; "
+            + "if [ \"$diff_exit\" -eq 0 ]; then printf 'No changes staged after git add.\\n'; exit 0; fi; "
+            + "if [ \"$diff_exit\" -ne 1 ]; then exit \"$diff_exit\"; fi; "
+            + "git commit -m " + quotedMessage + " -- .; "
+            + "commit_exit=$?; if [ \"$commit_exit\" -ne 0 ]; then exit \"$commit_exit\"; fi; "
+            + "after_head=$(git rev-parse HEAD); "
+            + "if [ \"$before_head\" = \"$after_head\" ]; then printf 'No changes were committed; HEAD did not change.\\n'; exit 12; fi; "
+            + "printf '\\nCommit created:\\n'; echo \"$after_head\"";
+    }
+
+    private static string BuildWindowsGitCommitShellCommand(string message)
+    {
+        var quotedMessage = TargetCommandRunner.QuotePowerShellValue(message);
+        return "$beforeHead = git rev-parse HEAD 2>$null; "
+            + "$before = git status --porcelain -- .; "
+            + "if (-not $before) { Write-Output 'No changes to commit.'; exit 0 }; "
+            + "Write-Output 'Changed files before commit:'; $before; "
+            + "git add -A -- .; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; "
+            + "git diff --cached --quiet -- .; $diffExit = $LASTEXITCODE; "
+            + "if ($diffExit -eq 0) { Write-Output 'No changes staged after git add.'; exit 0 }; "
+            + "if ($diffExit -ne 1) { exit $diffExit }; "
+            + "git commit -m " + quotedMessage + " -- .; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; "
+            + "$afterHead = git rev-parse HEAD; "
+            + "if ($afterHead -eq $beforeHead) { Write-Output 'No changes were committed; HEAD did not change.'; exit 12 }; "
+            + "Write-Output ''; Write-Output 'Commit created:'; Write-Output $afterHead";
+    }
+
+    private static string? ExtractCommitSha(string output)
+    {
+        var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        for (var index = lines.Length - 1; index >= 0; index--)
+        {
+            var line = lines[index];
+            if (line.Length is >= 7 and <= 40 && line.All(IsHex))
+            {
+                return line;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsHex(char value) =>
+        value is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F';
+
+    private static string SanitizeGitCommitMessage(string message)
+    {
+        var normalized = string.Join(" ", message.Replace('\r', ' ').Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        if (normalized.StartsWith("\"", StringComparison.Ordinal) && normalized.EndsWith("\"", StringComparison.Ordinal) && normalized.Length > 1)
+        {
+            normalized = normalized.Trim('"');
+        }
+
+        if (normalized.StartsWith("`", StringComparison.Ordinal) && normalized.EndsWith("`", StringComparison.Ordinal) && normalized.Length > 1)
+        {
+            normalized = normalized.Trim('`');
+        }
+
+        return normalized.Length <= 180 ? normalized : normalized[..180];
+    }
+
+    private static string BuildGitCommitMessagePrompt(string gitStatus, string diffStat)
+    {
+        var statusText = string.IsNullOrWhiteSpace(gitStatus) ? "No status output." : gitStatus.Trim();
+        var diffText = string.IsNullOrWhiteSpace(diffStat) ? "No diff stat output." : diffStat.Trim();
+        return $"""
+        Inspect the current git changes and write a commit message.
+
+        Do not modify files.
+        Do not stage files.
+        Do not run git commit.
+        Return only one concise imperative commit message line.
+
+        git status --porcelain:
+        ```
+        {statusText}
+        ```
+
+        git diff --stat --no-ext-diff, including staged changes:
+        ```
+        {diffText}
+        ```
+        """;
+    }
+
+    private static string? ExtractCommitMessageFromOutput(string output)
+    {
+        var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        for (var index = lines.Length - 1; index >= 0; index--)
+        {
+            var line = lines[index];
+            if (string.IsNullOrWhiteSpace(line) || line.StartsWith("$ ", StringComparison.Ordinal) || line.StartsWith("```", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (TryReadCommitMessageFromJsonLine(line, out var jsonMessage) && jsonMessage is not null)
+            {
+                return SanitizeGitCommitMessage(jsonMessage);
+            }
+
+            var labelPrefix = line.IndexOf(':', StringComparison.Ordinal);
+            if (labelPrefix > 0 && line[..labelPrefix].Contains("message", StringComparison.OrdinalIgnoreCase))
+            {
+                return SanitizeGitCommitMessage(line[(labelPrefix + 1)..]);
+            }
+        }
+
+        for (var index = lines.Length - 1; index >= 0; index--)
+        {
+            var line = lines[index];
+            if (string.IsNullOrWhiteSpace(line) || line.StartsWith("$ ", StringComparison.Ordinal) || line.StartsWith("```", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            return SanitizeGitCommitMessage(line);
+        }
+
+        return null;
+    }
+
+    private static bool TryReadCommitMessageFromJsonLine(string line, out string? message)
+    {
+        message = null;
+        if (!line.TrimStart().StartsWith("{", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("commitMessage", out var commitMessage))
+            {
+                message = commitMessage.GetString();
+                return !string.IsNullOrWhiteSpace(message);
+            }
+
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("text", out var textMessage))
+            {
+                message = textMessage.GetString();
+                return !string.IsNullOrWhiteSpace(message);
+            }
+
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("message", out var genericMessage))
+            {
+                message = genericMessage.GetString();
+                return !string.IsNullOrWhiteSpace(message);
+            }
+        }
+        catch (JsonException)
+        {
+            // Ignore non-JSON output from Codex.
+        }
+
+        return false;
+    }
 
     private static string? ResolveScriptBinary()
     {

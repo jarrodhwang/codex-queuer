@@ -32,6 +32,8 @@ public sealed class QueueWorker(
 {
     private const int MaxStoredOutput = 512_000;
     private static readonly TimeSpan CommitRunTimeout = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan CommitMessageGenerationTimeout = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan StaleRunningRecoveryDelay = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan DefaultUsageLimitBackoff = TimeSpan.FromMinutes(1);
     private const string UsageLimitUnknownReason = "Usage limit reached.";
     private static readonly Regex RetryAfterHeaderRegex = new(@"(?i)retry[-_\s]*after\s*[:=]\s*([^\s,;]+)", RegexOptions.Compiled);
@@ -240,7 +242,8 @@ public sealed class QueueWorker(
                 ? request.Runs.First(x => x.Id == nextRunId.Value)
                 : GetLatestRunOfKind(request.Runs, RunKind.Request) ?? throw new InvalidOperationException("Request run was not found.");
             run.Status = QueueStatus.Running;
-            run.StartedAt = DateTimeOffset.UtcNow;
+            run.StartedAt ??= DateTimeOffset.UtcNow;
+            run.Output = TrimOutput(run.Output + "Dispatching " + run.Kind.ToString().ToLowerInvariant() + " run on " + (request.Machine?.Name ?? request.Project?.Machine?.Name ?? "target machine") + "..." + Environment.NewLine);
             _lastDispatch = DateTimeOffset.UtcNow;
             _lastError = null;
             if (!await TrySaveChangesAsync(db, "mark request running", stoppingToken))
@@ -389,6 +392,7 @@ public sealed class QueueWorker(
         {
             if (kind == RunKind.Commit)
             {
+                await AppendOutputAsync(run.Id, "Preparing commit run..." + Environment.NewLine, CancellationToken.None);
                 var commitResult = request.SeparateCommitSession
                     ? await RunSeparateCommitSessionAsync(request, run, machine, projectPath, cancellationToken)
                     : await runner.RunShellAsync(
@@ -402,20 +406,20 @@ public sealed class QueueWorker(
                 return commitResult.Success;
             }
 
+            await AppendOutputAsync(run.Id, "Preparing Codex request..." + Environment.NewLine, CancellationToken.None);
             var prompt = BuildProjectScopedPrompt(projectPath, BuildRequestPrompt(request));
             var attachments = await MaterializeAttachmentsAsync(request, project, machine, cancellationToken);
             if (!string.IsNullOrWhiteSpace(attachments.PromptSection))
             {
                 prompt += Environment.NewLine + Environment.NewLine + attachments.PromptSection;
             }
-            var codexSessionId = project.CodexSessionId;
             var result = await runner.RunCodexAsync(
                 machine,
                 projectPath,
                 run.Model,
                 run.ModelEffort,
                 run.ModelSpeed,
-                codexSessionId,
+                null,
                 attachments.ImagePaths,
                 prompt,
                 chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
@@ -504,29 +508,210 @@ public sealed class QueueWorker(
             Environment.NewLine + reason + Environment.NewLine,
             CancellationToken.None);
 
+        var commitMessage = await GenerateCommitMessageAsync(
+            request,
+            run,
+            machine,
+            projectPath,
+            cancellationToken);
+
+        await AppendOutputAsync(run.Id, Environment.NewLine + "Generated commit message: " + commitMessage + Environment.NewLine, CancellationToken.None);
+
         var fallbackResult = await runner.RunShellAsync(
             machine,
             projectPath,
-            BuildCommitShellCommand(machine, BuildCommitMessage(request)),
+            BuildCommitShellCommand(machine, commitMessage),
             chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
             cancellationToken);
 
+        var fallbackOutput = "Generated commit message: " + commitMessage + Environment.NewLine + fallbackResult.Output;
         return new CommandResult(
             fallbackResult.ExitCode,
-            priorResult.Output.TrimEnd() + Environment.NewLine + fallbackResult.Output,
+            priorResult.Output.TrimEnd() + Environment.NewLine + fallbackOutput,
             priorResult.CommandPreview + " -> " + fallbackResult.CommandPreview,
             priorResult.CodexSessionId);
+    }
+
+    private async Task<string> GenerateCommitMessageAsync(
+        CodexRequest request,
+        CodexRun run,
+        TargetMachine machine,
+        string projectPath,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(run.Model))
+        {
+            return BuildCommitMessage(request);
+        }
+
+        var statusResult = await runner.RunShellAsync(
+            machine,
+            projectPath,
+            "git status --porcelain",
+            _ => Task.CompletedTask,
+            cancellationToken);
+
+        if (string.IsNullOrWhiteSpace(statusResult.Output))
+        {
+            return "No changes to commit.";
+        }
+
+        var diffStatResult = await runner.RunShellAsync(
+            machine,
+            projectPath,
+            "git diff --stat --no-ext-diff",
+            _ => Task.CompletedTask,
+            cancellationToken);
+
+        var prompt = BuildProjectScopedPrompt(projectPath, BuildCommitMessagePrompt(request, statusResult.Output, diffStatResult.Output));
+        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutSource.CancelAfter(CommitMessageGenerationTimeout);
+
+        try
+        {
+            var result = await runner.RunCodexAsync(
+                machine,
+                projectPath,
+                run.Model,
+                run.ModelEffort,
+                run.ModelSpeed,
+                null,
+                null,
+                prompt,
+                chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
+                timeoutSource.Token);
+
+            var generatedMessage = ExtractCommitMessageFromOutput(result.Output);
+            if (!string.IsNullOrWhiteSpace(generatedMessage))
+            {
+                return generatedMessage;
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return BuildCommitMessage(request);
+        }
+
+        return BuildCommitMessage(request);
+    }
+
+    private static string? ExtractCommitMessageFromOutput(string output)
+    {
+        var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        for (var index = lines.Length - 1; index >= 0; index--)
+        {
+            var line = lines[index];
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            if (TryReadCommitMessageFromJsonLine(line, out var jsonCommitMessage) && jsonCommitMessage is not null)
+            {
+                return SanitizeCommitMessage(jsonCommitMessage);
+            }
+
+            if (line.StartsWith("```", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var labelMatch = Regex.Match(line, @"^(?:commit\s*message|message)\s*:\s*(.+)$", RegexOptions.IgnoreCase);
+            if (labelMatch.Success)
+            {
+                return SanitizeCommitMessage(labelMatch.Groups[1].Value);
+            }
+        }
+
+        for (var index = lines.Length - 1; index >= 0; index--)
+        {
+            var line = lines[index];
+            if (string.IsNullOrWhiteSpace(line) || line.StartsWith("```", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            return SanitizeCommitMessage(line);
+        }
+
+        return null;
+    }
+
+    private static bool TryReadCommitMessageFromJsonLine(string line, out string? message)
+    {
+        message = null;
+        if (!line.TrimStart().StartsWith("{", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("commitMessage", out var commitMessage))
+            {
+                message = commitMessage.GetString();
+                return !string.IsNullOrWhiteSpace(message);
+            }
+
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("text", out var textMessage))
+            {
+                message = textMessage.GetString();
+                return !string.IsNullOrWhiteSpace(message);
+            }
+
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("message", out var genericMessage))
+            {
+                message = genericMessage.GetString();
+                return !string.IsNullOrWhiteSpace(message);
+            }
+        }
+        catch (JsonException)
+        {
+            // Ignore non-JSON lines.
+        }
+
+        return false;
+    }
+
+    private static string SanitizeCommitMessage(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return "";
+        }
+
+        var normalized = string.Join(" ", message.Replace('\r', ' ').Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return "";
+        }
+
+        if (normalized.StartsWith("\"") && normalized.EndsWith("\"") && normalized.Length > 1)
+        {
+            normalized = normalized.Trim('"');
+        }
+
+        if (normalized.StartsWith("`") && normalized.EndsWith("`") && normalized.Length > 1)
+        {
+            normalized = normalized.Trim('`');
+        }
+
+        return normalized.Length <= 120 ? normalized : normalized[..117] + "...";
     }
 
     private async Task<bool> IsRunSucceededAsync(Guid requestId, RunKind kind, CancellationToken cancellationToken)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        var latest = await db.Runs
+        var runs = await db.Runs
             .Where(x => x.RequestId == requestId && x.Kind == kind)
+            .ToArrayAsync(cancellationToken);
+        var latest = runs
             .OrderByDescending(x => x.CreatedAt)
             .ThenByDescending(x => x.Id)
-            .FirstOrDefaultAsync(cancellationToken);
+            .FirstOrDefault();
         return latest?.Status == QueueStatus.Succeeded;
     }
 
@@ -537,6 +722,7 @@ public sealed class QueueWorker(
             .Where(x => x.DeletedAt == null
                 && (x.Status == QueueStatus.Queued
                 || x.Status == QueueStatus.Running
+                || x.Status == QueueStatus.CancelRequested
                 || x.Status == QueueStatus.Failed
                 || x.Status == QueueStatus.UsageLimited))
             .ToArrayAsync(cancellationToken);
@@ -566,6 +752,29 @@ public sealed class QueueWorker(
         if (RepairFalseUsageLimit(requestRun))
         {
             changed = true;
+        }
+
+        if (request.Status == QueueStatus.CancelRequested && !isActive)
+        {
+            MarkRequestCancelled(request, "Cancelled by user.");
+            return true;
+        }
+
+        if (requestRun.Status == QueueStatus.Running && !isActive && IsStaleRunningRun(requestRun))
+        {
+            ResetRunForResume(requestRun);
+            request.Error = null;
+            request.StartedAt = null;
+            MarkRequestQueued(request);
+            return true;
+        }
+
+        if (requestRun.Status == QueueStatus.Running && request.Status != QueueStatus.Running)
+        {
+            request.Status = QueueStatus.Running;
+            request.Error = null;
+            request.FinishedAt = null;
+            return true;
         }
 
         if (commitRun is not null && RepairFalseUsageLimit(commitRun))
@@ -606,7 +815,7 @@ public sealed class QueueWorker(
                 return true;
             }
 
-            if ((commitRun.Status is QueueStatus.Running or QueueStatus.CancelRequested) && !isActive)
+            if ((commitRun.Status is QueueStatus.Running or QueueStatus.CancelRequested) && !isActive && IsStaleRunningRun(commitRun))
             {
                 ResetRunForResume(commitRun);
                 MarkRequestQueued(request);
@@ -639,6 +848,12 @@ public sealed class QueueWorker(
         run.AvailableModel = null;
         run.FinishedAt ??= DateTimeOffset.UtcNow;
         return true;
+    }
+
+    private static bool IsStaleRunningRun(CodexRun run)
+    {
+        var startedAt = run.StartedAt ?? run.CreatedAt;
+        return DateTimeOffset.UtcNow - startedAt >= StaleRunningRecoveryDelay;
     }
 
     private static bool CancelUnusedCommitRun(CodexRun? commitRun)
@@ -765,6 +980,11 @@ public sealed class QueueWorker(
     private static void ResetRunForResume(CodexRun run)
     {
         run.Status = QueueStatus.Queued;
+        run.CodexSessionId = null;
+        run.CommandPreview = null;
+        run.Output = "";
+        run.CommitMessage = null;
+        run.CommitSha = null;
         run.Error = null;
         run.RetryAfter = null;
         run.RetryReason = null;
@@ -780,6 +1000,23 @@ public sealed class QueueWorker(
         request.Status = QueueStatus.Queued;
         request.Error = null;
         request.FinishedAt = null;
+    }
+
+    private static void MarkRequestCancelled(CodexRequest request, string reason)
+    {
+        var finishedAt = DateTimeOffset.UtcNow;
+        ClearRequestRetryState(request);
+        request.Status = QueueStatus.Cancelled;
+        request.Error = reason;
+        request.FinishedAt = finishedAt;
+
+        foreach (var run in request.Runs.Where(x =>
+                     x.Status is QueueStatus.Queued or QueueStatus.Running or QueueStatus.CancelRequested or QueueStatus.UsageLimited))
+        {
+            run.Status = QueueStatus.Cancelled;
+            run.FinishedAt = finishedAt;
+            run.Error = reason;
+        }
     }
 
     private static void MarkRequestSucceeded(CodexRequest request, CodexRun run)
@@ -813,9 +1050,7 @@ public sealed class QueueWorker(
         {
             return;
         }
-        var sessionId = kind == RunKind.Request
-            ? result.CodexSessionId ?? request.Project?.CodexSessionId
-            : result.CodexSessionId ?? run.CodexSessionId;
+        var sessionId = result.CodexSessionId ?? run.CodexSessionId;
 
         run.CommandPreview = result.CommandPreview;
         run.CodexSessionId = sessionId;
@@ -823,12 +1058,6 @@ public sealed class QueueWorker(
         run.FinishedAt = DateTimeOffset.UtcNow;
         run.Status = result.Success ? QueueStatus.Succeeded : QueueStatus.Failed;
         run.Error = result.Success ? null : LastUsefulLine(result.Output);
-
-        if (kind == RunKind.Request && !string.IsNullOrWhiteSpace(sessionId) && request.Project is not null)
-        {
-            request.Project.CodexSessionId = sessionId;
-            request.Project.UpdatedAt = DateTimeOffset.UtcNow;
-        }
 
         if (kind == RunKind.Commit)
         {
@@ -1202,6 +1431,7 @@ public sealed class QueueWorker(
         run.Status = QueueStatus.Failed;
         run.FinishedAt = DateTimeOffset.UtcNow;
         run.Error = exception.Message;
+        run.Output = TrimOutput(run.Output + Environment.NewLine + "Run failed: " + exception.Message + Environment.NewLine);
         request.Status = QueueStatus.Failed;
         request.FinishedAt = run.FinishedAt;
         request.Error = kind == RunKind.Commit ? "Commit run failed: " + exception.Message : exception.Message;
@@ -1478,6 +1708,7 @@ public sealed class QueueWorker(
         You are running after a separate Codex implementation session.
 
         Inspect all current git changes, create a concise commit message from those changes, and commit all changes in the current repository only if there are actual changes.
+        Look at the diff and status first, then derive the message from what changed.
         Do not use any user-facing request sentence as the commit message; derive it from the file changes.
         Do not ask for clarification and do not wait for further input.
         Requirements:
@@ -1489,6 +1720,36 @@ public sealed class QueueWorker(
 
         If there are no changes, do not create an empty commit. Say that there were no changes and exit.
         """;
+
+    private static string BuildCommitMessagePrompt(CodexRequest request, string gitStatus, string diffStat)
+    {
+        var projectLabel = request.Project?.Name?.Trim();
+        var target = string.IsNullOrWhiteSpace(projectLabel) ? "repository" : "project " + projectLabel;
+        var statusText = string.IsNullOrWhiteSpace(gitStatus) ? "No status output." : gitStatus.Trim();
+        var diffText = string.IsNullOrWhiteSpace(diffStat) ? "No diff stat output." : diffStat.Trim();
+
+        return $"""
+        You are generating a git commit message for this {target}.
+
+        Use this current git status and diff summary.
+
+        git status --porcelain:
+        ```
+        {statusText}
+        ```
+
+        git diff --stat --no-ext-diff:
+        ```
+        {diffText}
+        ```
+
+        If there are no changes, return exactly: No changes to commit.
+        Otherwise return exactly one concise imperative line describing what changed.
+        Do not include numbering, bullets, markdown, or quotes.
+        Do not mention that you inspected files.
+        Output only the commit message text, no extra commentary.
+        """;
+    }
 
     private static string BuildProjectScopedPrompt(string projectPath, string userPrompt) =>
         $"""

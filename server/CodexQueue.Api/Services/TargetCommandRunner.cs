@@ -35,6 +35,7 @@ public interface ITargetCommandRunner
 public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : ITargetCommandRunner
 {
     private const string UnixRemotePathPrefix = "export PATH=\"$HOME/.local/bin:$HOME/bin:$PATH\";";
+    private static readonly TimeSpan CodexFirstOutputTimeout = TimeSpan.FromSeconds(75);
 
     public Task<CommandResult> RunCodexAsync(
         TargetMachine machine,
@@ -51,7 +52,14 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         if (machine.Kind == MachineKind.Local)
         {
             var arguments = BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt);
-            return RunProcessAsync("codex", arguments, projectPath, BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId), onOutput, cancellationToken);
+            return RunProcessAsync(
+                "codex",
+                arguments,
+                projectPath,
+                BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId),
+                onOutput,
+                cancellationToken,
+                firstProcessOutputTimeout: CodexFirstOutputTimeout);
         }
 
         if (machine.TargetsWindows())
@@ -59,7 +67,13 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             var windowsCommand = "Set-Location -LiteralPath " + QuotePowerShellValue(projectPath) + "; "
                 + "codex " + string.Join(" ", BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt).Select(QuotePowerShellValue));
 
-            return RunSshAsync(machine, BuildPowerShellRemoteCommand(windowsCommand), "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId), onOutput, cancellationToken);
+            return RunSshAsync(
+                machine,
+                BuildPowerShellRemoteCommand(windowsCommand),
+                "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId),
+                onOutput,
+                cancellationToken,
+                firstProcessOutputTimeout: CodexFirstOutputTimeout);
         }
 
         var remoteCommand = string.Join(" ", new[]
@@ -72,7 +86,13 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             string.Join(" ", BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt).Select(Quote))
         });
 
-        return RunSshAsync(machine, remoteCommand, "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId), onOutput, cancellationToken);
+        return RunSshAsync(
+            machine,
+            remoteCommand,
+            "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId),
+            onOutput,
+            cancellationToken,
+            firstProcessOutputTimeout: CodexFirstOutputTimeout);
     }
 
     public Task<CommandResult> RunShellAsync(
@@ -143,7 +163,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         string remoteCommand,
         string preview,
         Func<string, Task> onOutput,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? firstProcessOutputTimeout = null)
     {
         if (string.IsNullOrWhiteSpace(machine.Host))
         {
@@ -178,7 +199,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
         arguments.Add(destination);
         arguments.Add(remoteCommand);
-        return RunProcessAsync("ssh", arguments, null, preview, onOutput, cancellationToken);
+        return RunProcessAsync("ssh", arguments, null, preview, onOutput, cancellationToken, firstProcessOutputTimeout);
     }
 
     private async Task<CommandResult> RunProcessAsync(
@@ -187,12 +208,14 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         string? workingDirectory,
         string preview,
         Func<string, Task> onOutput,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? firstProcessOutputTimeout = null)
     {
         var startInfo = new ProcessStartInfo
         {
             FileName = fileName,
             RedirectStandardError = true,
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
             UseShellExecute = false,
         };
@@ -209,6 +232,9 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         var output = new StringBuilder();
+        var previewLine = "$ " + preview + Environment.NewLine;
+        output.Append(previewLine);
+        await onOutput(previewLine);
 
         try
         {
@@ -223,7 +249,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             throw;
         }
 
-        await onOutput("$ " + preview + Environment.NewLine);
+        process.StandardInput.Close();
+        var firstProcessOutput = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         async Task ReadStreamAsync(StreamReader reader)
         {
@@ -238,16 +265,36 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
                 var chunk = new string(buffer, 0, read);
                 output.Append(chunk);
+                if (HasUsefulProcessOutput(chunk))
+                {
+                    firstProcessOutput.TrySetResult();
+                }
                 await onOutput(chunk);
             }
         }
 
         var stdout = ReadStreamAsync(process.StandardOutput);
         var stderr = ReadStreamAsync(process.StandardError);
+        var waitForExit = process.WaitForExitAsync(cancellationToken);
 
         try
         {
-            await process.WaitForExitAsync(cancellationToken);
+            if (firstProcessOutputTimeout is { } timeout)
+            {
+                var timeoutTask = Task.Delay(timeout, cancellationToken);
+                var firstSignal = await Task.WhenAny(firstProcessOutput.Task, waitForExit, timeoutTask);
+                if (firstSignal == timeoutTask)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var message = "Process produced no useful stdout/stderr for " + Math.Round(timeout.TotalSeconds) + " seconds after launch. Check target machine SSH, Codex auth, model availability, project path, and whether Codex is waiting for stdin." + Environment.NewLine;
+                    output.Append(message);
+                    await onOutput(message);
+                    TryKill(process);
+                    throw new TimeoutException(message.Trim());
+                }
+            }
+
+            await waitForExit;
             await Task.WhenAll(stdout, stderr);
         }
         catch (OperationCanceledException)
@@ -258,6 +305,21 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
         var outputText = output.ToString();
         return new CommandResult(process.ExitCode, outputText, preview, ExtractCodexSessionId(outputText));
+    }
+
+    private static bool HasUsefulProcessOutput(string chunk)
+    {
+        foreach (var line in chunk.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (line.Equals("Reading additional input from stdin...", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
     }
 
     private static void TryKill(Process process)

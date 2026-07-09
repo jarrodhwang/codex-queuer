@@ -160,6 +160,18 @@ public sealed record TerminalCommandRequest(string Command);
 
 public sealed record TerminalCommandDto(bool Success, string Output, int ExitCode, string CommandPreview);
 
+public sealed record GitFileChangeDto(string Path, string Status, bool Staged, bool Unstaged);
+
+public sealed record GitStatusDto(string Branch, bool IsClean, IReadOnlyList<GitFileChangeDto> Changes, string DiffStat, string Output);
+
+public sealed record GitCommitRequest(string Message);
+
+public sealed record GitCommitDto(bool Success, string Output, int ExitCode, string CommandPreview, string? CommitSha);
+
+public sealed record SuggestGitCommitMessageRequest(string Model, string? ModelEffort, string? ModelSpeed);
+
+public sealed record SuggestGitCommitMessageDto(string Message, string Output);
+
 public sealed record ModelOptionDto(string Label, string Model, bool SupportsPriority);
 
 public sealed record ApiConfigDto(bool RequiresToken, IReadOnlyList<ModelOptionDto> Models);

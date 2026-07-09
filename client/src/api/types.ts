@@ -98,7 +98,6 @@ export type CodexRun = {
   model: string
   modelEffort?: string | null
   modelSpeed?: string | null
-  queueOrder: number
   status: QueueStatus
   retryAfter?: string | null
   retryReason?: string | null
@@ -180,6 +179,44 @@ export type TerminalCommandResult = {
   output: string
   exitCode: number
   commandPreview: string
+}
+
+export type GitFileChange = {
+  path: string
+  status: string
+  staged: boolean
+  unstaged: boolean
+}
+
+export type GitStatus = {
+  branch: string
+  isClean: boolean
+  changes: GitFileChange[]
+  diffStat: string
+  output: string
+}
+
+export type GitCommitRequest = {
+  message: string
+}
+
+export type GitCommitResult = {
+  success: boolean
+  output: string
+  exitCode: number
+  commandPreview: string
+  commitSha?: string | null
+}
+
+export type SuggestGitCommitMessageRequest = {
+  model: string
+  modelEffort?: string | null
+  modelSpeed?: string | null
+}
+
+export type SuggestGitCommitMessageResult = {
+  message: string
+  output: string
 }
 
 export type ModelOption = {

@@ -11,6 +11,8 @@ import {
   FolderOpen,
   FolderPlus,
   Gauge,
+  GitBranch,
+  GitCommit,
   GripVertical,
   History,
   Menu,
@@ -34,6 +36,7 @@ import type {
   RunKind,
   FileContent,
   FileTreeEntry,
+  GitStatus,
   Machine,
   MachineKind,
   MachinePlatform,
@@ -68,6 +71,8 @@ type ProjectModelDefaults = {
   generateCommit: boolean
   separateCommitSession: boolean
 }
+
+type RightRailView = 'files' | 'git'
 
 const defaultModels: ModelOption[] = [
   { label: 'GPT-5.5', model: 'gpt-5.5', supportsPriority: true },
@@ -221,6 +226,7 @@ function App() {
   const [queueDiagnostics, setQueueDiagnostics] = useState<QueueDiagnostics | null>(null)
   const [selectedProjectId, setSelectedProjectId] = useState('')
   const [rightOpen, setRightOpen] = useState(true)
+  const [rightRailView, setRightRailView] = useState<RightRailView>('files')
   const [authBlocked, setAuthBlocked] = useState(false)
   const [error, setError] = useState('')
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([])
@@ -428,6 +434,11 @@ function App() {
     } catch (cause) {
       handleApiError(cause)
     }
+  }
+
+  const toggleRightRail = (view: RightRailView) => {
+    setRightRailView(view)
+    setRightOpen((open) => (rightRailView === view ? !open : true))
   }
 
   const archiveRequest = async (id: string) => {
@@ -644,7 +655,8 @@ function App() {
             onError={handleApiError}
             error={error}
             onRefresh={refreshAll}
-            onToggleFiles={() => setRightOpen((open) => !open)}
+            onToggleFiles={() => toggleRightRail('files')}
+            onOpenGit={() => toggleRightRail('git')}
           />
         )}
       </main>
@@ -661,6 +673,8 @@ function App() {
 
       {rightOpen && (
         <RightRail
+          config={config}
+          view={rightRailView}
           selectedProject={selectedProject}
           onOpenFile={openFile}
           onClose={() => setRightOpen(false)}
@@ -1594,6 +1608,7 @@ function QueueWorkspace({
   error,
   onRefresh,
   onToggleFiles,
+  onOpenGit,
 }: {
   config: ApiConfig
   selectedProject?: Project
@@ -1615,6 +1630,7 @@ function QueueWorkspace({
   error: string
   onRefresh: () => Promise<void>
   onToggleFiles: () => void
+  onOpenGit: () => void
 }) {
   const [activeTab, setActiveTab] = useState<'queue' | 'history' | 'terminal'>('queue')
   const [editingRequest, setEditingRequest] = useState<CodexRequest | null>(null)
@@ -1661,6 +1677,7 @@ function QueueWorkspace({
             onTabChange={setActiveTab}
             onRefresh={onRefresh}
             onToggleFiles={onToggleFiles}
+            onOpenGit={onOpenGit}
             onCreated={onCreated}
             onDiscardRequestPreview={onDiscardRequestPreview}
             onUpdateRequest={onUpdateRequest}
@@ -1796,6 +1813,7 @@ function QueueComposer({
   onTabChange,
   onRefresh,
   onToggleFiles,
+  onOpenGit,
   onCreated,
   onDiscardRequestPreview,
   onUpdateRequest,
@@ -1812,6 +1830,7 @@ function QueueComposer({
   onTabChange: (tab: 'queue' | 'history' | 'terminal') => void
   onRefresh: () => Promise<void>
   onToggleFiles: () => void
+  onOpenGit: () => void
   onCreated: (request: CodexRequest, replaceId?: string) => void
   onDiscardRequestPreview: (id: string) => void
   onUpdateRequest: (id: string, request: UpdateQueueRequest) => Promise<void>
@@ -1829,6 +1848,7 @@ function QueueComposer({
   const [attachmentError, setAttachmentError] = useState('')
   const [draggingFiles, setDraggingFiles] = useState(false)
   const [savingDefaults, setSavingDefaults] = useState(false)
+  const [isQueueing, setIsQueueing] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -1872,6 +1892,7 @@ function QueueComposer({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
+    setIsQueueing(true)
     let previewId: string | null = null
     try {
       const payload: UpdateQueueRequest = {
@@ -1944,6 +1965,8 @@ function QueueComposer({
         onDiscardRequestPreview(previewId)
       }
       onError(cause)
+    } finally {
+      setIsQueueing(false)
     }
   }
 
@@ -2018,6 +2041,9 @@ function QueueComposer({
           {error && <span className="error-text truncate">{error}</span>}
           <GlassButton variant="ghost" size="icon" onClick={onRefresh} title="Refresh">
             <RefreshCcw size={17} />
+          </GlassButton>
+          <GlassButton variant="secondary" size="icon" onClick={onOpenGit} title="Open git panel">
+            <GitBranch size={17} />
           </GlassButton>
           <GlassButton variant="secondary" size="icon" onClick={onToggleFiles} title="Toggle project files">
             <Menu size={18} />
@@ -2117,8 +2143,9 @@ function QueueComposer({
             <GlassButton variant="secondary" size="sm" type="button" onClick={saveDefaults} disabled={!defaultsChanged || savingDefaults}>
               <Check size={13} /> {savingDefaults ? 'Saving' : 'Save defaults'}
             </GlassButton>
-            <GlassButton variant="primary" type="submit" disabled={!prompt.trim() || !requestModel.model.trim()}>
-              <Play size={16} /> {editingRequest ? 'Update' : 'Queue'}
+            <GlassButton variant="primary" type="submit" disabled={!prompt.trim() || !requestModel.model.trim() || isQueueing}>
+              {isQueueing ? <RefreshCcw size={16} className="action-spinner" /> : <Play size={16} />}
+              {isQueueing ? (editingRequest ? 'Updating...' : 'Queueing...') : (editingRequest ? 'Update' : 'Queue')}
             </GlassButton>
           </div>
         </div>
@@ -2411,6 +2438,9 @@ function RequestCard({
   const deletable = !optimistic && request.status !== 'Running' && request.status !== 'CancelRequested'
   const percent = progressFor(request)
   const requestUsageDelay = request.retryAfter ? formatRemainingTime(request.retryAfter, now) : null
+  const isCanceling = request.status === 'CancelRequested'
+  const activeRun = activeRunFor(request)
+  const duration = activeRun ? runDurationLabel(activeRun, now) : null
 
   return (
     <article
@@ -2445,7 +2475,13 @@ function RequestCard({
             </div>
           </div>
           <p className="prompt-preview">{request.prompt}</p>
-          <div className="meta truncate">{request.machineName} · created {formatDate(request.createdAt)}</div>
+          <div className="request-card-meta-row">
+            <span className="request-stage-chip">{stageLabel(request)}</span>
+            <span>{commitModeLabel(request)}</span>
+            {duration && <span>{duration}</span>}
+            <span className="truncate">{request.machineName}</span>
+            <span>created {formatDate(request.createdAt)}</span>
+          </div>
         </div>
         <div className="request-actions">
           {resumable && (
@@ -2464,12 +2500,14 @@ function RequestCard({
             <GlassButton
               variant="danger"
               size="sm"
+              disabled={isCanceling}
               onClick={(event) => {
                 event.stopPropagation()
                 void onCancel(request.id)
               }}
             >
-              <Square size={13} /> Cancel
+              {isCanceling ? <RefreshCcw size={13} className="action-spinner" /> : <Square size={13} />}
+              {isCanceling ? 'Cancelling...' : 'Cancel'}
             </GlassButton>
           )}
           {archivable && (
@@ -2536,6 +2574,7 @@ function QueueKickButton({
     : diagnostics?.isProcessing
       ? 'Worker is already processing'
       : 'Kick worker'
+  const isProcessing = diagnostics?.isProcessing ?? false
   return (
     <GlassButton
       className={diagnostics?.lastError ? 'kick-worker-button kick-worker-button--bad' : 'kick-worker-button'}
@@ -2543,10 +2582,11 @@ function QueueKickButton({
       size="sm"
       type="button"
       onClick={onKickQueue}
-      disabled={diagnostics?.isProcessing}
+      disabled={isProcessing}
       title={title}
     >
-      <Play size={13} /> Kick worker
+      {isProcessing ? <RefreshCcw size={13} className="action-spinner" /> : <Play size={13} />}
+      {isProcessing ? 'Kicking worker...' : 'Kick worker'}
     </GlassButton>
   )
 }
@@ -2578,20 +2618,27 @@ function StructuredBodyView({
   hideJson?: boolean
 }) {
   const parsed = useMemo(() => parseBody(content ?? ''), [content])
-  if (hideJson && parsed.kind === 'json') {
-    return null
-  }
-
   const [expanded, setExpanded] = useState(false)
   const expandable = isBodyExpandable(parsed)
   const compact = expandable && !expanded && !forceExpanded
 
   useEffect(() => {
-    setExpanded(false)
-  }, [content])
+    if (forceExpanded) {
+      setExpanded(true)
+    }
+  }, [forceExpanded])
 
   if (parsed.kind === 'empty') {
     return <div className="body-empty">{emptyText}</div>
+  }
+
+  if (hideJson && parsed.kind === 'json' && !isDetailedCodexJson(parsed.value)) {
+    const jsonText = textFromUnknownJson(parsed.value)
+    if (jsonText) {
+      return <pre className="log-block body-json">{jsonText}</pre>
+    }
+
+    return <pre className="log-block body-json">{JSON.stringify(parsed.value, null, 2)}</pre>
   }
 
   const body = renderStructuredBody(parsed, compact)
@@ -2632,6 +2679,16 @@ function renderStructuredBody(parsed: Exclude<ParsedBody, { kind: 'empty' }>, co
   return <pre className={`log-block ${compact ? 'body-compact-block' : ''}`}>{parsed.text}</pre>
 }
 
+function isDetailedCodexJson(value: unknown) {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  const type = stringValue(value.type)
+  const item = isRecord(value.item) ? value.item : undefined
+  return Boolean(type || item || value.output || value.text || value.message)
+}
+
 function BodyEventRow({ event, compact }: { event: BodyEvent, compact: boolean }) {
   return (
     <article className={`body-event ${compact ? 'body-event--compact' : ''}`}>
@@ -2666,6 +2723,10 @@ function parseBody(content: string): ParsedBody {
   const json = tryParseJson(text)
   if (typeof json === 'string') {
     return parseBody(json)
+  }
+
+  if (isDetailedCodexJson(json)) {
+    return { kind: 'events', events: [toBodyEvent(json as Record<string, unknown>)] }
   }
 
   if (json !== undefined) {
@@ -2791,137 +2852,6 @@ function formatEventType(value: string) {
     .replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
-type CompletionFileChange = {
-  path: string
-  kind: string
-}
-
-function CompletionSummary({ request }: { request: CodexRequest }) {
-  const separateCommitRun = latestRunOfKind(request.runs, 'Commit')
-  const commitMetadataRun = latestRunWithCommitMetadata(request.runs)
-  const resultRun = separateCommitRun ?? latestRunOfKind(request.runs, 'Request')
-  const fileChanges = extractFileChanges(request)
-  const resultText = request.summary || completionResultText(resultRun?.output) || 'Completed successfully.'
-
-  return (
-    <section className="completion-summary" aria-label="Completion summary">
-      <div className="completion-result-box">{resultText}</div>
-      {commitMetadataRun?.commitMessage && <div className="completion-message">{commitMetadataRun.commitMessage}</div>}
-      {fileChanges.length > 0 && (
-        <div className="completion-changes">
-          <div className="section-kicker">View changes</div>
-          <div className="completion-files">
-            {fileChanges.slice(0, 8).map((change, index) => (
-              <div key={`${change.path}:${index}`} className="completion-file">
-                <Code2 size={13} />
-                <span className="truncate">{change.path}</span>
-                <span>{change.kind}</span>
-              </div>
-            ))}
-            {fileChanges.length > 8 && <div className="meta">+{fileChanges.length - 8} more files</div>}
-          </div>
-        </div>
-      )}
-    </section>
-  )
-}
-
-function extractFileChanges(request: CodexRequest): CompletionFileChange[] {
-  const changes = new Map<string, CompletionFileChange>()
-  for (const run of request.runs) {
-    for (const change of extractJsonFileChanges(run.output)) {
-      changes.set(change.path, change)
-    }
-
-    for (const change of extractGitStatusChanges(run.output)) {
-      changes.set(change.path, change)
-    }
-  }
-
-  return Array.from(changes.values()).toSorted((left, right) => left.path.localeCompare(right.path))
-}
-
-function extractJsonFileChanges(output: string): CompletionFileChange[] {
-  const changes: CompletionFileChange[] = []
-  for (const line of output.split(/\r?\n/)) {
-    const parsed = tryParseJson(line.trim())
-    if (!isRecord(parsed)) continue
-    const item = isRecord(parsed.item) ? parsed.item : parsed
-    const source = Array.isArray(item.changes) ? item.changes : []
-    for (const change of source.filter(isRecord)) {
-      const path = stringValue(change.path)
-      if (path) {
-        changes.push({ path, kind: stringValue(change.kind) ?? stringValue(change.status) ?? 'changed' })
-      }
-    }
-  }
-
-  return changes
-}
-
-function extractGitStatusChanges(output: string): CompletionFileChange[] {
-  const changes: CompletionFileChange[] = []
-  for (const line of output.split(/\r?\n/)) {
-    const match = line.match(/^\s*([MADRCU?]{1,2})\s+(.+)$/)
-    if (!match) continue
-    changes.push({ path: match[2].trim(), kind: gitStatusLabel(match[1].trim()) })
-  }
-
-  return changes
-}
-
-function gitStatusLabel(status: string) {
-  if (status.includes('?')) return 'added'
-  if (status.includes('D')) return 'deleted'
-  if (status.includes('R')) return 'renamed'
-  if (status.includes('A')) return 'added'
-  if (status.includes('M')) return 'modified'
-  return 'changed'
-}
-
-function lastUsefulText(output: string) {
-  return output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).at(-1)
-}
-
-function completionResultText(output?: string) {
-  if (!output) {
-    return undefined
-  }
-
-  const trimmedOutput = output.trim()
-  if (!trimmedOutput) {
-    return undefined
-  }
-
-  const parsed = parseBody(trimmedOutput)
-  if (parsed.kind === 'json') {
-    const topLevelText = textFromUnknownJson(parsed.value)
-    if (topLevelText) {
-      return topLevelText
-    }
-
-    return undefined
-  }
-
-  if (parsed.kind === 'events') {
-    const textFromEvents = [...parsed.events].reverse().find((event) => event.text && event.text.trim())
-    if (textFromEvents?.text) {
-      return textFromEvents.text
-    }
-    const outputFromEvents = [...parsed.events].reverse().find((event) => event.output && event.output.trim())
-    if (outputFromEvents?.output) {
-      return lastUsefulText(outputFromEvents.output)
-    }
-    return undefined
-  }
-
-  if (parsed.kind === 'text') {
-    return lastUsefulText(parsed.text)
-  }
-
-  return undefined
-}
-
 function textFromUnknownJson(value: unknown): string | undefined {
   if (!isRecord(value)) {
     if (typeof value === 'string' && value.trim()) {
@@ -2949,89 +2879,98 @@ function textFromUnknownJson(value: unknown): string | undefined {
 
 function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: number }) {
   const separateCommitRun = request ? latestRunOfKind(request.runs, 'Commit') : undefined
-  const [showDetails, setShowDetails] = useState(false)
 
   if (!request) {
     return (
-      <aside className="queue-detail-panel">
-        <div className="empty-state">Select a queued request to inspect runs.</div>
+      <aside className="queue-detail-panel queue-detail-empty-panel" aria-label="Selected request details">
+        <div className="empty-state">Select a queued request to inspect its body, status, and result.</div>
       </aside>
     )
   }
 
   return (
-    <aside className="queue-detail-panel" aria-label="Selected request details">
-      <div className="queue-detail-header">
+    <aside className="queue-detail-panel queue-detail-panel-compact" aria-label="Selected request details">
+      <div className="queue-detail-header queue-detail-header-compact">
+        <div className="queue-detail-heading">
+          <div className="queue-detail-compact-label">Selected request</div>
+        </div>
         <StatusBadge status={request.status} busy={request.status === 'Running'} />
       </div>
-      {request.status === 'Succeeded' && <CompletionSummary request={request} />}
 
-      <GlassButton
-        className="detail-toggle"
-        variant="ghost"
-        size="sm"
-        type="button"
-        onClick={() => setShowDetails((current) => !current)}
-      >
-        {showDetails ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-        {showDetails ? 'Show less' : 'Show more'}
-      </GlassButton>
-
-      {showDetails && (
-        <>
-          <div className="queue-detail-body">
-            <div className="section-kicker">Request body</div>
-            {request.attachments.length > 0 && (
-              <div className="request-attachments">
-                {request.attachments.map((attachment, index) => (
-                  <span key={`${attachment.name}:${index}`} className="model-chip">
-                    {attachment.name} · {formatBytes(attachment.size)}
-                  </span>
-                ))}
-              </div>
-            )}
-            <div className="request-body-scroll">
-              <StructuredBodyView content={request.prompt} />
-            </div>
-          </div>
-          {request.runs.map((run) => (
-            <div key={run.id} className="run-detail-card">
-              <div className="row-between">
-                <div className="run-title-stack">
-                  <strong>{run.kind}</strong>
-                  <ModelChips model={run.model} effort={run.modelEffort} speed={run.modelSpeed} />
-                </div>
-                <StatusBadge status={run.status} busy={run.status === 'Running'} />
-              </div>
-              {run.status === 'UsageLimited' && (
-                <UsageLimitBanner
-                  reason={run.retryReason}
-                  retryAfter={run.retryAfter}
-                  availableModel={run.availableModel}
-                  remaining={run.retryAfter ? formatRemainingTime(run.retryAfter, now) : null}
-                />
-              )}
-              {run.commitSha && (
-                <div className="commit-box">
-                  <div><strong>{run.commitSha.slice(0, 12)}</strong></div>
-                  <div>{run.commitMessage}</div>
-                </div>
-              )}
-              {run.error && <div className="error-text">{run.error}</div>}
-              <StructuredBodyView content={run.output} emptyText="No output yet." hideJson />
-            </div>
-          ))}
-          {request.generateCommit && request.separateCommitSession && !separateCommitRun && (
-            <div className="pending-run-row">
-              <div className="run-title-stack">
-                <strong>Commit</strong>
-                <ModelChips model={request.commitModel || request.model} effort={request.commitModelEffort || request.modelEffort} speed={request.commitModelSpeed || request.modelSpeed} />
-              </div>
-              <StatusBadge status="Queued" />
+      <div className="detail-expanded-region">
+        <div className="queue-detail-body">
+          <div className="section-kicker">Request body</div>
+          {request.attachments.length > 0 && (
+            <div className="request-attachments">
+              {request.attachments.map((attachment, index) => (
+                <span key={`${attachment.name}:${index}`} className="model-chip">
+                  {attachment.name} · {formatBytes(attachment.size)}
+                </span>
+              ))}
             </div>
           )}
-        </>
-      )}
+          <div className="request-body-scroll">
+            <StructuredBodyView content={request.prompt} />
+          </div>
+        </div>
+
+        {request.runs.map((run) => (
+          <div key={run.id} className="run-detail-card">
+            <div className="run-detail-head">
+              <div className="run-title-stack">
+                <strong>{run.kind}</strong>
+                <ModelChips model={run.model} effort={run.modelEffort} speed={run.modelSpeed} />
+              </div>
+              <StatusBadge status={run.status} busy={run.status === 'Running'} />
+            </div>
+            {run.commandPreview && <div className="command-preview">$ {run.commandPreview}</div>}
+            {run.status === 'UsageLimited' && (
+              <UsageLimitBanner
+                reason={run.retryReason}
+                retryAfter={run.retryAfter}
+                availableModel={run.availableModel}
+                remaining={run.retryAfter ? formatRemainingTime(run.retryAfter, now) : null}
+              />
+            )}
+            {run.commitSha && (
+              <div className="commit-box">
+                <div><strong>{run.commitSha.slice(0, 12)}</strong></div>
+                <div>{run.commitMessage}</div>
+              </div>
+            )}
+            {run.error && <div className="error-text">{run.error}</div>}
+            <div className="run-output-head">
+              <span>Output</span>
+              <span>{run.output.trim() ? `${run.output.length.toLocaleString()} chars` : 'empty'}</span>
+            </div>
+            <StructuredBodyView
+              content={run.output}
+              emptyText={runEmptyText(run, now)}
+              hideJson
+            />
+          </div>
+        ))}
+
+        {request.runs.length === 0 && (
+          <div className="pending-run-row">
+            <div className="run-title-stack">
+              <strong>Request</strong>
+              <ModelChips model={request.model} effort={request.modelEffort} speed={request.modelSpeed} />
+            </div>
+            <StatusBadge status="Queued" />
+          </div>
+        )}
+
+        {request.generateCommit && request.separateCommitSession && !separateCommitRun && (
+          <div className="pending-run-row">
+            <div className="run-title-stack">
+              <strong>Commit</strong>
+              <ModelChips model={request.commitModel || request.model} effort={request.commitModelEffort || request.modelEffort} speed={request.commitModelSpeed || request.modelSpeed} />
+            </div>
+            <StatusBadge status="Queued" />
+          </div>
+        )}
+      </div>
     </aside>
   )
 }
@@ -3311,6 +3250,52 @@ function progressFor(request: CodexRequest) {
   return 42
 }
 
+function activeRunFor(request: CodexRequest) {
+  const requestRun = latestRunOfKind(request.runs, 'Request')
+  const commitRun = latestRunOfKind(request.runs, 'Commit')
+  if (request.generateCommit && request.separateCommitSession && requestRun?.status === 'Succeeded' && commitRun) {
+    return commitRun
+  }
+
+  return requestRun ?? commitRun
+}
+
+function commitModeLabel(request: CodexRequest) {
+  if (!request.generateCommit) return 'No commit'
+  return request.separateCommitSession ? 'Separate commit' : 'Inline commit'
+}
+
+function stageLabel(request: CodexRequest) {
+  const run = activeRunFor(request)
+  if (!run) return request.status
+  return `${run.kind} ${run.status.toLowerCase()}`
+}
+
+function runDurationLabel(run: CodexRun, now: number) {
+  if (run.startedAt && run.finishedAt) {
+    return formatDurationBetween(run.startedAt, run.finishedAt)
+  }
+
+  if (run.startedAt && run.status === 'Running') {
+    return formatDurationBetween(run.startedAt, new Date(now).toISOString())
+  }
+
+  return null
+}
+
+function runEmptyText(run: CodexRun, now: number) {
+  if (run.status === 'Queued') return 'Waiting for worker dispatch.'
+  if (run.status === 'CancelRequested') return 'Cancelling this run.'
+  if (run.status === 'Cancelled') return 'Cancelled before producing output.'
+  if (run.status === 'Failed') return 'No output was captured for this failed run.'
+  if (run.status === 'Running') {
+    const duration = runDurationLabel(run, now)
+    return duration ? `Running for ${duration}. Waiting for output...` : 'Running. Waiting for output...'
+  }
+
+  return 'No output captured.'
+}
+
 function UsageLimitBanner({
   reason,
   retryAfter,
@@ -3467,30 +3452,177 @@ function RequestHistory({
 }
 
 function RightRail({
+  config,
+  view,
   selectedProject,
   onOpenFile,
   onClose,
   onError,
 }: {
+  config: ApiConfig
+  view: RightRailView
   selectedProject?: Project
   onOpenFile: (project: Project, path: string) => Promise<void>
   onClose: () => void
   onError: (cause: unknown) => void
 }) {
+  const title = view === 'git' ? 'Git' : 'Files'
   return (
     <aside className="right-rail">
       <div className="section-header">
-        <h2>Files</h2>
-        <GlassButton variant="ghost" size="icon" onClick={onClose} title="Close files">
+        <h2>{title}</h2>
+        <GlassButton variant="ghost" size="icon" onClick={onClose} title={`Close ${title.toLowerCase()}`}>
           <X size={16} />
         </GlassButton>
       </div>
-      {selectedProject ? (
+      {selectedProject && view === 'files' ? (
         <DirectoryTree project={selectedProject} onOpenFile={onOpenFile} onError={onError} />
+      ) : selectedProject && view === 'git' ? (
+        <GitPanel project={selectedProject} config={config} onError={onError} />
       ) : (
-        <span className="muted">Select a project to browse files.</span>
+        <span className="muted">Select a project to use this panel.</span>
       )}
     </aside>
+  )
+}
+
+function GitPanel({
+  project,
+  config,
+  onError,
+}: {
+  project: Project
+  config: ApiConfig
+  onError: (cause: unknown) => void
+}) {
+  const defaults = useMemo(() => projectModelDefaults(project, config.models), [config.models, project])
+  const [status, setStatus] = useState<GitStatus | null>(null)
+  const [commitMessage, setCommitMessage] = useState('')
+  const [suggestionModel, setSuggestionModel] = useState<ModelValue>(defaults.commitModel)
+  const [loading, setLoading] = useState(false)
+  const [committing, setCommitting] = useState(false)
+  const [generating, setGenerating] = useState(false)
+  const [actionOutput, setActionOutput] = useState('')
+
+  const loadStatus = useCallback(async () => {
+    setLoading(true)
+    try {
+      const nextStatus = await api.gitStatus(project.id)
+      setStatus(nextStatus)
+    } catch (cause) {
+      onError(cause)
+    } finally {
+      setLoading(false)
+    }
+  }, [onError, project.id])
+
+  useEffect(() => {
+    setStatus(null)
+    setCommitMessage('')
+    setActionOutput('')
+    setSuggestionModel(defaults.commitModel)
+    void loadStatus()
+  }, [defaults.commitModel, loadStatus, project.id])
+
+  const suggestMessage = async () => {
+    setGenerating(true)
+    setActionOutput('')
+    try {
+      const result = await api.suggestGitCommitMessage(project.id, {
+        model: suggestionModel.model,
+        modelEffort: suggestionModel.effort,
+        modelSpeed: suggestionModel.speed,
+      })
+      setCommitMessage(result.message)
+      setActionOutput(result.output || `Suggested: ${result.message}`)
+    } catch (cause) {
+      onError(cause)
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  const commit = async (event: FormEvent) => {
+    event.preventDefault()
+    const message = commitMessage.trim()
+    if (!message) return
+
+    setCommitting(true)
+    setActionOutput('')
+    try {
+      const result = await api.gitCommit(project.id, { message })
+      setActionOutput(result.output || (result.commitSha ? `Commit created: ${result.commitSha}` : 'Git commit finished.'))
+      setCommitMessage('')
+      await loadStatus()
+    } catch (cause) {
+      onError(cause)
+    } finally {
+      setCommitting(false)
+    }
+  }
+
+  const changeCount = status?.changes.length ?? 0
+  const clean = status?.isClean ?? false
+
+  return (
+    <div className="git-panel">
+      <div className="git-panel-head">
+        <div className="truncate">
+          <div className="meta truncate">{project.path}</div>
+          <div className="git-branch-row">
+            <GitBranch size={14} />
+            <span className="truncate">{status?.branch ?? 'loading'}</span>
+          </div>
+        </div>
+        <GlassButton variant="ghost" size="icon" type="button" onClick={loadStatus} disabled={loading} title="Refresh git changes">
+          <RefreshCcw size={15} className={loading ? 'action-spinner' : ''} />
+        </GlassButton>
+      </div>
+
+      <section className="git-changes-section" aria-label="Git changes">
+        <div className="run-output-head">
+          <span>Git changes</span>
+          <span>{loading ? 'refreshing' : `${changeCount} files`}</span>
+        </div>
+        <div className="git-change-list">
+          {status?.changes.map((change) => (
+            <div key={`${change.status}:${change.path}`} className="git-change-row">
+              <span className={`git-status-chip git-status-chip--${change.status}`}>{change.status}</span>
+              <span className="truncate" title={change.path}>{change.path}</span>
+              <span className="git-stage-state">{change.staged ? 'staged' : change.unstaged ? 'unstaged' : 'tracked'}</span>
+            </div>
+          ))}
+          {!loading && status && status.changes.length === 0 && <div className="empty-state">No git changes.</div>}
+          {loading && !status && <div className="empty-state">Loading git changes...</div>}
+        </div>
+        {status?.diffStat && <pre className="git-diff-stat">{status.diffStat}</pre>}
+      </section>
+
+      <form className="git-commit-form" onSubmit={commit}>
+        <FieldLabel label="Commit message">
+          <GlassTextarea
+            value={commitMessage}
+            onChange={(event) => setCommitMessage(event.target.value)}
+            placeholder="Summarize the current git changes."
+            rows={3}
+          />
+        </FieldLabel>
+        <GlassButton variant="primary" type="submit" disabled={!commitMessage.trim() || committing || clean}>
+          {committing ? <RefreshCcw size={15} className="action-spinner" /> : <GitCommit size={15} />}
+          {committing ? 'Committing...' : 'Commit'}
+        </GlassButton>
+      </form>
+
+      {actionOutput && <pre className="git-action-output">{actionOutput}</pre>}
+
+      <div className="git-ai-box">
+        <ModelPicker label="AI message" options={config.models} value={suggestionModel} onChange={setSuggestionModel} disabled={clean || generating} />
+        <GlassButton variant="secondary" type="button" onClick={suggestMessage} disabled={clean || generating || !suggestionModel.model.trim()}>
+          {generating ? <RefreshCcw size={15} className="action-spinner" /> : <Pencil size={15} />}
+          {generating ? 'Generating...' : 'Create with Codex'}
+        </GlassButton>
+      </div>
+    </div>
   )
 }
 
