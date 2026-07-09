@@ -44,9 +44,11 @@ internal static class GitCommitMessageHelper
     {
         var targetText = string.IsNullOrWhiteSpace(target) ? "repository" : target.Trim();
         return $"""
-        Inspect the current git changes for this {targetText} and create exactly one git commit yourself.
+        Create exactly one git commit for the current changes in this {targetText}.
 
+        This is a commit-only follow-up session for changes already made by a previous Codex run.
         Run git status and git diff as needed.
+        Do not edit files or perform a general code review.
         Stage only changes under the current project path. Prefer pathspec-limited commands such as `git add -A -- .`.
         Choose one concise imperative commit message.
         If there are no changes, do not create a commit and return exactly: No changes to commit.
