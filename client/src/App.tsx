@@ -641,9 +641,12 @@ function App() {
 
   const updateRequest = async (id: string, request: UpdateQueueRequest) => {
     setError('')
+    const { attachments, ...requestFields } = request
     const optimisticUpdate: Partial<CodexRequest> = {
-      ...request,
-      attachments: request.attachments?.map(({ name, contentType, size }) => ({ name, contentType, size })),
+      ...requestFields,
+    }
+    if (attachments) {
+      optimisticUpdate.attachments = attachments.map(({ name, contentType, size }) => ({ name, contentType, size }))
     }
     pendingRequestOverridesRef.current.set(id, optimisticUpdate)
     applyRequestsImmediately((current) => current.map((item) => (item.id === id
@@ -2257,7 +2260,10 @@ function QueueComposer({
               <span className="meta">Drag, attach, or paste files/images. Images pass to Codex CLI; text/code/CSV include previews.</span>
             </div>
             {editingRequest && editingRequest.attachments.length > 0 && attachments.length === 0 && (
-              <span className="meta">Existing attachments are kept unless you attach replacement files.</span>
+              <div className="existing-attachment-summary">
+                <span className="meta">Existing attachments are kept unless you attach replacement files.</span>
+                <AttachmentMetadataChips attachments={editingRequest.attachments} />
+              </div>
             )}
             {attachments.length > 0 && (
               <AttachmentPreviewList
