@@ -1,5 +1,6 @@
 import type {
   ApiConfig,
+  CodexGitCommitRequest,
   CodexRequest,
   CreateQueueRequest,
   FileContent,
@@ -138,6 +139,11 @@ export const api = {
   gitStatus: (projectId: string) => apiFetch<GitStatus>(`/projects/${projectId}/git/status`),
   gitCommit: (projectId: string, request: GitCommitRequest) =>
     apiFetch<GitCommitResult>(`/projects/${projectId}/git/commit`, {
+      method: 'POST',
+      body: JSON.stringify(request),
+    }),
+  codexGitCommit: (projectId: string, request: CodexGitCommitRequest) =>
+    apiFetch<GitCommitResult>(`/projects/${projectId}/git/codex-commit`, {
       method: 'POST',
       body: JSON.stringify(request),
     }),

@@ -341,6 +341,80 @@ public static class ApiEndpoints
             }
         });
 
+        api.MapPost("/projects/{id:guid}/git/codex-commit", async (Guid id, CodexGitCommitRequest input, AppDbContext db, ITargetCommandRunner runner, CancellationToken cancellationToken) =>
+        {
+            var project = await LoadProjectWithMachineAsync(id, db, cancellationToken);
+            if (project is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (project.Machine is null)
+            {
+                return Results.BadRequest(new { error = "Project machine is missing." });
+            }
+
+            if (string.IsNullOrWhiteSpace(input.Model))
+            {
+                return Results.BadRequest(new { error = "Model is required." });
+            }
+
+            try
+            {
+                var statusResult = await ReadGitStatusPorcelainAsync(runner, project.Machine, project.Path, cancellationToken);
+                if (!statusResult.Success)
+                {
+                    return Results.BadRequest(new { error = StripCommandPreview(statusResult.Output).Trim() });
+                }
+
+                var statusOutput = StripCommandPreview(statusResult.Output).Trim();
+                if (string.IsNullOrWhiteSpace(statusOutput))
+                {
+                    return Results.BadRequest(new { error = "No git changes to commit." });
+                }
+
+                var beforeHead = await ReadGitHeadAsync(runner, project.Machine, project.Path, cancellationToken);
+                var prompt = BuildProjectScopedPrompt(project.Path, GitCommitMessageHelper.BuildCommitPrompt());
+                var result = await runner.RunCodexAsync(
+                    project.Machine,
+                    project.Path,
+                    input.Model.Trim(),
+                    NormalizeEffort(input.ModelEffort),
+                    NormalizeOptionalSpeed(input.ModelSpeed),
+                    null,
+                    null,
+                    prompt,
+                    true,
+                    _ => Task.CompletedTask,
+                    cancellationToken);
+
+                var output = StripCommandPreview(result.Output).Trim();
+                if (!result.Success)
+                {
+                    return Results.BadRequest(new { error = string.IsNullOrWhiteSpace(output) ? "Codex commit failed." : output });
+                }
+
+                var afterHead = await ReadGitHeadAsync(runner, project.Machine, project.Path, cancellationToken);
+                if (!string.IsNullOrWhiteSpace(afterHead) && !string.Equals(beforeHead, afterHead, StringComparison.OrdinalIgnoreCase))
+                {
+                    var outputWithMarker = output.TrimEnd() + Environment.NewLine + "Commit created:" + Environment.NewLine + afterHead;
+                    return Results.Ok(new GitCommitDto(true, outputWithMarker.Trim(), result.ExitCode, result.CommandPreview, afterHead));
+                }
+
+                var afterStatusResult = await ReadGitStatusPorcelainAsync(runner, project.Machine, project.Path, cancellationToken);
+                var afterStatusOutput = afterStatusResult.Success ? StripCommandPreview(afterStatusResult.Output).Trim() : statusOutput;
+                var error = string.IsNullOrWhiteSpace(afterStatusOutput)
+                    ? "Codex finished without creating a git commit."
+                    : "Codex finished without creating a git commit; project changes remain.";
+                var errorOutput = string.IsNullOrWhiteSpace(output) ? error : output + Environment.NewLine + error;
+                return Results.BadRequest(new { error = errorOutput });
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or IOException or TimeoutException or System.ComponentModel.Win32Exception)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
+
         api.MapPost("/projects/{id:guid}/git/suggest-message", async (Guid id, SuggestGitCommitMessageRequest input, AppDbContext db, ITargetCommandRunner runner, CancellationToken cancellationToken) =>
         {
             var project = await LoadProjectWithMachineAsync(id, db, cancellationToken);
@@ -405,6 +479,7 @@ public static class ApiEndpoints
                     null,
                     null,
                     prompt,
+                    false,
                     _ => Task.CompletedTask,
                     cancellationToken);
 
@@ -1119,6 +1194,54 @@ public static class ApiEndpoints
         var newline = output.IndexOf('\n', StringComparison.Ordinal);
         return newline < 0 ? "" : output[(newline + 1)..];
     }
+
+    private static Task<CommandResult> ReadGitStatusPorcelainAsync(
+        ITargetCommandRunner runner,
+        TargetMachine machine,
+        string projectPath,
+        CancellationToken cancellationToken) =>
+        runner.RunShellAsync(
+            machine,
+            projectPath,
+            "git status --porcelain -- .",
+            _ => Task.CompletedTask,
+            cancellationToken);
+
+    private static async Task<string?> ReadGitHeadAsync(
+        ITargetCommandRunner runner,
+        TargetMachine machine,
+        string projectPath,
+        CancellationToken cancellationToken)
+    {
+        var result = await runner.RunShellAsync(
+            machine,
+            projectPath,
+            "git rev-parse HEAD",
+            _ => Task.CompletedTask,
+            cancellationToken);
+
+        if (!result.Success)
+        {
+            return null;
+        }
+
+        return StripCommandPreview(result.Output)
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .LastOrDefault(line => line.Length == 40 && line.All(IsHex));
+    }
+
+    private static string BuildProjectScopedPrompt(string projectPath, string userPrompt) =>
+        $"""
+        Project root: {projectPath}
+
+        Run all commands from this project root.
+        Treat this project root as the workspace boundary.
+        Do not create, edit, delete, move, or commit files outside this project root.
+        If the requested task appears to require changes outside this project root, stop and explain what is needed instead of modifying outside the project.
+
+        User request:
+        {userPrompt}
+        """;
 
     private static string BuildGitCommitShellCommand(TargetMachine machine, string message) =>
         machine.TargetsWindows() ? BuildWindowsGitCommitShellCommand(message) : BuildUnixGitCommitShellCommand(message);

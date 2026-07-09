@@ -208,6 +208,12 @@ export type GitCommitResult = {
   commitSha?: string | null
 }
 
+export type CodexGitCommitRequest = {
+  model: string
+  modelEffort?: string | null
+  modelSpeed?: string | null
+}
+
 export type SuggestGitCommitMessageRequest = {
   model: string
   modelEffort?: string | null

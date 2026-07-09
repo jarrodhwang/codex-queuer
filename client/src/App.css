@@ -1075,6 +1075,36 @@
   box-shadow: inset 0 1px 0 var(--glass-edge), 0 3px 10px rgba(37, 99, 235, 0.12);
 }
 
+.segmented-radio label.segmented-radio-option--low.active {
+  background: linear-gradient(145deg, rgba(240, 253, 250, 0.88), rgba(255, 255, 255, 0.5));
+  color: #0f766e;
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 3px 10px rgba(15, 118, 110, 0.1);
+}
+
+.segmented-radio label.segmented-radio-option--medium.active {
+  background: linear-gradient(145deg, rgba(219, 234, 254, 0.82), rgba(255, 255, 255, 0.5));
+  color: #1d4ed8;
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 3px 10px rgba(29, 78, 216, 0.1);
+}
+
+.segmented-radio label.segmented-radio-option--high.active {
+  background: linear-gradient(145deg, rgba(237, 233, 254, 0.8), rgba(255, 255, 255, 0.5));
+  color: #6d28d9;
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 3px 10px rgba(109, 40, 217, 0.1);
+}
+
+.segmented-radio label.segmented-radio-option--xhigh.active {
+  background: linear-gradient(145deg, rgba(255, 237, 213, 0.8), rgba(255, 255, 255, 0.5));
+  color: #9a3412;
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 3px 10px rgba(154, 52, 18, 0.1);
+}
+
+.segmented-radio label.segmented-radio-option--priority.active {
+  background: linear-gradient(145deg, rgba(254, 249, 195, 0.92), rgba(255, 255, 255, 0.5));
+  color: #a16207;
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 3px 10px rgba(161, 98, 7, 0.12);
+}
+
 .segmented-radio input {
   position: absolute;
   opacity: 0;
@@ -1465,6 +1495,30 @@
   max-width: min(240px, 100%);
   background: linear-gradient(145deg, rgba(219, 234, 254, 0.82), rgba(255, 255, 255, 0.46));
   color: #1d4ed8;
+}
+
+.model-chip--effort-low {
+  border-color: rgba(15, 118, 110, 0.18);
+  background: linear-gradient(145deg, rgba(240, 253, 250, 0.84), rgba(255, 255, 255, 0.48));
+  color: #0f766e;
+}
+
+.model-chip--effort-medium {
+  border-color: rgba(29, 78, 216, 0.18);
+  background: linear-gradient(145deg, rgba(219, 234, 254, 0.78), rgba(255, 255, 255, 0.48));
+  color: #1d4ed8;
+}
+
+.model-chip--effort-high {
+  border-color: rgba(109, 40, 217, 0.18);
+  background: linear-gradient(145deg, rgba(237, 233, 254, 0.74), rgba(255, 255, 255, 0.48));
+  color: #6d28d9;
+}
+
+.model-chip--effort-xhigh {
+  border-color: rgba(154, 52, 18, 0.18);
+  background: linear-gradient(145deg, rgba(255, 237, 213, 0.76), rgba(255, 255, 255, 0.48));
+  color: #9a3412;
 }
 
 .model-chip--speed-priority {

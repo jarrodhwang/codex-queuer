@@ -32,7 +32,6 @@ public sealed class QueueWorker(
 {
     private const int MaxStoredOutput = 512_000;
     private static readonly TimeSpan CommitRunTimeout = TimeSpan.FromMinutes(3);
-    private static readonly TimeSpan CommitMessageGenerationTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan StaleRunningRecoveryDelay = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan DefaultUsageLimitBackoff = TimeSpan.FromMinutes(1);
     private const string UsageLimitUnknownReason = "Usage limit reached.";
@@ -394,14 +393,12 @@ public sealed class QueueWorker(
             if (kind == RunKind.Commit)
             {
                 await AppendOutputAsync(run.Id, "Preparing commit run..." + Environment.NewLine, CancellationToken.None);
-                var commitResult = request.SeparateCommitSession
-                    ? await RunSeparateCommitSessionAsync(request, run, machine, projectPath, cancellationToken)
-                    : await runner.RunShellAsync(
-                        machine,
-                        projectPath,
-                        BuildCommitShellCommand(machine, BuildCommitMessage(request)),
-                        chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
-                        cancellationToken);
+                var commitResult = await RunCodexCommitSessionAsync(request, run, machine, projectPath, cancellationToken);
+                if (TryParseUsageLimit(commitResult, out var commitUsageLimit))
+                {
+                    await MarkUsageLimitedAsync(request, run, kind, commitResult, commitUsageLimit, cancellationToken);
+                    return false;
+                }
 
                 await CompleteRunAsync(requestId, run.Id, kind, commitResult, cancellationToken);
                 return commitResult.Success;
@@ -428,6 +425,7 @@ public sealed class QueueWorker(
                 null,
                 attachments.ImagePaths,
                 prompt,
+                request.GenerateCommit && !request.SeparateCommitSession,
                 chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
                 cancellationToken);
 
@@ -437,32 +435,16 @@ public sealed class QueueWorker(
                 return false;
             }
 
-            if (!result.Success && request.GenerateCommit && !request.SeparateCommitSession && IsGitCommitWriteFailure(result.Output))
+            if (result.Success && request.GenerateCommit && !request.SeparateCommitSession)
             {
-                result = await RunDeterministicCommitFallbackAsync(
-                    request,
+                result = await ValidateCodexCommitAsync(
                     run,
                     machine,
                     projectPath,
                     result,
-                    "Codex could not write to .git from its sandbox; running queue-managed git commit fallback.",
+                    beforeCommitHead,
+                    commitRequired: false,
                     cancellationToken);
-            }
-
-            if (result.Success && request.GenerateCommit && !request.SeparateCommitSession)
-            {
-                result = await MarkCommitCreatedIfHeadChangedAsync(run, machine, projectPath, result, beforeCommitHead, cancellationToken);
-                if (!CommitOutputClaimsCreated(result.Output))
-                {
-                    result = await RunDeterministicCommitFallbackAsync(
-                        request,
-                        run,
-                        machine,
-                        projectPath,
-                        result,
-                        "Request run did not report a created commit; running deterministic git commit fallback.",
-                        cancellationToken);
-                }
             }
 
             await CompleteRunAsync(requestId, run.Id, kind, result, cancellationToken);
@@ -480,158 +462,81 @@ public sealed class QueueWorker(
         }
     }
 
-    private async Task<CommandResult> RunSeparateCommitSessionAsync(
+    private async Task<CommandResult> RunCodexCommitSessionAsync(
         CodexRequest request,
         CodexRun run,
         TargetMachine machine,
         string projectPath,
         CancellationToken cancellationToken)
     {
-        return await RunDeterministicCommitFallbackAsync(
-            request,
-            run,
+        var beforeCommitHead = await ReadGitHeadAsync(machine, projectPath, cancellationToken);
+        var beforeStatus = await ReadGitStatusPorcelainAsync(machine, projectPath, cancellationToken);
+        var projectLabel = request.Project?.Name?.Trim();
+        var target = string.IsNullOrWhiteSpace(projectLabel) ? "repository" : "project " + projectLabel;
+        var prompt = BuildProjectScopedPrompt(projectPath, GitCommitMessageHelper.BuildCommitPrompt(target));
+
+        var result = await runner.RunCodexAsync(
             machine,
             projectPath,
-            new CommandResult(0, "Preparing deterministic git commit." + Environment.NewLine, "deterministic git commit", null),
-            "Creating git commit from current changes.",
-            cancellationToken);
-    }
-
-    private async Task<CommandResult> RunDeterministicCommitFallbackAsync(
-        CodexRequest request,
-        CodexRun run,
-        TargetMachine machine,
-        string projectPath,
-        CommandResult priorResult,
-        string reason,
-        CancellationToken cancellationToken)
-    {
-        await AppendOutputAsync(
-            run.Id,
-            Environment.NewLine + reason + Environment.NewLine,
-            CancellationToken.None);
-
-        var commitMessage = await GenerateCommitMessageAsync(
-            request,
-            run,
-            machine,
-            projectPath,
-            cancellationToken);
-
-        await AppendOutputAsync(run.Id, Environment.NewLine + "Generated commit message: " + commitMessage + Environment.NewLine, CancellationToken.None);
-
-        var fallbackResult = await runner.RunShellAsync(
-            machine,
-            projectPath,
-            BuildCommitShellCommand(machine, commitMessage),
+            run.Model,
+            run.ModelEffort,
+            run.ModelSpeed,
+            null,
+            null,
+            prompt,
+            true,
             chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
             cancellationToken);
 
-        var fallbackOutput = "Generated commit message: " + commitMessage + Environment.NewLine + fallbackResult.Output;
-        return new CommandResult(
-            fallbackResult.ExitCode,
-            priorResult.Output.TrimEnd() + Environment.NewLine + fallbackOutput,
-            priorResult.CommandPreview + " -> " + fallbackResult.CommandPreview,
-            priorResult.CodexSessionId);
+        return await ValidateCodexCommitAsync(
+            run,
+            machine,
+            projectPath,
+            result,
+            beforeCommitHead,
+            commitRequired: !string.IsNullOrWhiteSpace(beforeStatus),
+            cancellationToken);
     }
 
-    private async Task<string> GenerateCommitMessageAsync(
-        CodexRequest request,
-        CodexRun run,
-        TargetMachine machine,
-        string projectPath,
-        CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(run.Model))
-        {
-            return BuildCommitMessage(request);
-        }
-
-        var statusResult = await runner.RunShellAsync(
-            machine,
-            projectPath,
-            "git status --porcelain -- .",
-            _ => Task.CompletedTask,
-            cancellationToken);
-
-        var statusOutput = StripShellCommandPreview(statusResult.Output).Trim();
-        if (string.IsNullOrWhiteSpace(statusOutput))
-        {
-            return "No changes to commit.";
-        }
-
-        var diffStatResult = await runner.RunShellAsync(
-            machine,
-            projectPath,
-            "git diff --stat --no-ext-diff -- .; git diff --cached --stat --no-ext-diff -- .",
-            _ => Task.CompletedTask,
-            cancellationToken);
-
-        var diffResult = await runner.RunShellAsync(
-            machine,
-            projectPath,
-            "git diff --no-ext-diff -- .; git diff --cached --no-ext-diff -- .",
-            _ => Task.CompletedTask,
-            cancellationToken);
-
-        var diffStatOutput = StripShellCommandPreview(diffStatResult.Output).Trim();
-        var diffOutput = diffResult.Success ? StripShellCommandPreview(diffResult.Output).Trim() : "";
-        var projectLabel = request.Project?.Name?.Trim();
-        var target = string.IsNullOrWhiteSpace(projectLabel) ? "repository" : "project " + projectLabel;
-        var prompt = BuildProjectScopedPrompt(projectPath, GitCommitMessageHelper.BuildPrompt(statusOutput, diffStatOutput, diffOutput, target));
-        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutSource.CancelAfter(CommitMessageGenerationTimeout);
-
-        try
-        {
-            var result = await runner.RunCodexAsync(
-                machine,
-                projectPath,
-                run.Model,
-                run.ModelEffort,
-                run.ModelSpeed,
-                null,
-                null,
-                prompt,
-                chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
-                timeoutSource.Token);
-
-            var generatedMessage = GitCommitMessageHelper.ExtractFromOutput(result.Output);
-            if (!string.IsNullOrWhiteSpace(generatedMessage))
-            {
-                return generatedMessage;
-            }
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            return BuildCommitMessage(request);
-        }
-
-        return BuildCommitMessage(request);
-    }
-
-    private async Task<CommandResult> MarkCommitCreatedIfHeadChangedAsync(
+    private async Task<CommandResult> ValidateCodexCommitAsync(
         CodexRun run,
         TargetMachine machine,
         string projectPath,
         CommandResult result,
         string? beforeHead,
+        bool commitRequired,
         CancellationToken cancellationToken)
     {
-        if (!result.Success || string.IsNullOrWhiteSpace(beforeHead) || CommitOutputClaimsCreated(result.Output))
+        if (!result.Success)
         {
             return result;
         }
 
         var afterHead = await ReadGitHeadAsync(machine, projectPath, cancellationToken);
-        if (string.IsNullOrWhiteSpace(afterHead) || string.Equals(beforeHead, afterHead, StringComparison.OrdinalIgnoreCase))
+        if (!string.IsNullOrWhiteSpace(afterHead) && !string.Equals(beforeHead, afterHead, StringComparison.OrdinalIgnoreCase))
+        {
+            if (CommitOutputClaimsCreated(result.Output))
+            {
+                return result;
+            }
+
+            var marker = Environment.NewLine + "Commit created:" + Environment.NewLine + afterHead + Environment.NewLine;
+            await AppendOutputAsync(run.Id, marker, CancellationToken.None);
+            return result with { Output = result.Output.TrimEnd() + marker };
+        }
+
+        var currentStatus = await ReadGitStatusPorcelainAsync(machine, projectPath, cancellationToken);
+        if (!commitRequired && string.IsNullOrWhiteSpace(currentStatus))
         {
             return result;
         }
 
-        var marker = Environment.NewLine + "Commit created:" + Environment.NewLine + afterHead + Environment.NewLine;
-        await AppendOutputAsync(run.Id, marker, CancellationToken.None);
-        return result with { Output = result.Output.TrimEnd() + marker };
+        var message = string.IsNullOrWhiteSpace(currentStatus)
+            ? "Codex finished without creating a git commit."
+            : "Codex finished without creating a git commit; project changes remain.";
+        var output = Environment.NewLine + message + Environment.NewLine;
+        await AppendOutputAsync(run.Id, output, CancellationToken.None);
+        return result with { ExitCode = 12, Output = result.Output.TrimEnd() + output };
     }
 
     private async Task<string?> ReadGitHeadAsync(TargetMachine machine, string projectPath, CancellationToken cancellationToken)
@@ -651,6 +556,18 @@ public sealed class QueueWorker(
         return StripShellCommandPreview(result.Output)
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .LastOrDefault(line => line.Length == 40 && line.All(IsHex));
+    }
+
+    private async Task<string> ReadGitStatusPorcelainAsync(TargetMachine machine, string projectPath, CancellationToken cancellationToken)
+    {
+        var result = await runner.RunShellAsync(
+            machine,
+            projectPath,
+            "git status --porcelain -- .",
+            _ => Task.CompletedTask,
+            cancellationToken);
+
+        return result.Success ? StripShellCommandPreview(result.Output).Trim() : "";
     }
 
     private async Task<bool> IsRunSucceededAsync(Guid requestId, RunKind kind, CancellationToken cancellationToken)
@@ -1596,70 +1513,8 @@ public sealed class QueueWorker(
             || name.EndsWith(".txt");
     }
 
-    private static string BuildCommitShellCommand(TargetMachine machine, string message) =>
-        machine.TargetsWindows() ? BuildWindowsCommitShellCommand(message) : BuildUnixCommitShellCommand(message);
-
-    private static string BuildUnixCommitShellCommand(string message)
-    {
-        var quotedMessage = TargetCommandRunner.Quote(message);
-        return "before_head=$(git rev-parse HEAD); "
-            + "before=$(git status --porcelain -- .); "
-            + "if [ -z \"$before\" ]; then printf 'No changes to commit.\\n'; exit 0; fi; "
-            + "printf 'Changed files before commit:\\n%s\\n' \"$before\"; "
-            + "git add -A -- .; "
-            + "diff_exit=0; git diff --cached --quiet -- . || diff_exit=$?; "
-            + "if [ \"$diff_exit\" -eq 0 ]; then printf 'No changes staged after git add.\\n'; exit 0; fi; "
-            + "if [ \"$diff_exit\" -ne 1 ]; then exit \"$diff_exit\"; fi; "
-            + "git commit -m " + quotedMessage + " -- .; "
-            + "commit_exit=$?; if [ \"$commit_exit\" -ne 0 ]; then exit \"$commit_exit\"; fi; "
-            + "after_head=$(git rev-parse HEAD); "
-            + "if [ \"$before_head\" = \"$after_head\" ]; then current=$(git status --porcelain -- .); "
-            + "if [ -z \"$current\" ]; then printf 'No changes to commit.\\n'; exit 0; fi; "
-            + "printf 'No changes were committed; HEAD did not change.\\n'; exit 12; fi; "
-            + "printf '\\nCommit created:\\n'; echo \"$after_head\"";
-    }
-
-    private static string BuildWindowsCommitShellCommand(string message)
-    {
-        var quotedMessage = TargetCommandRunner.QuotePowerShellValue(message);
-        return "$beforeHead = (git rev-parse HEAD); "
-            + "$before = git status --porcelain -- .; "
-            + "if (-not $before) { Write-Output 'No changes to commit.'; exit 0 }; "
-            + "Write-Output 'Changed files before commit:'; $before; "
-            + "git add -A -- .; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; "
-            + "git diff --cached --quiet -- .; $diffExit = $LASTEXITCODE; "
-            + "if ($diffExit -eq 0) { Write-Output 'No changes staged after git add.'; exit 0 }; "
-            + "if ($diffExit -ne 1) { exit $diffExit }; "
-            + "git commit -m " + quotedMessage + " -- .; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; "
-            + "$afterHead = (git rev-parse HEAD); "
-            + "if ($afterHead -eq $beforeHead) { "
-            + "$current = git status --porcelain -- .; "
-            + "if (-not $current) { Write-Output 'No changes to commit.'; exit 0 }; "
-            + "Write-Output 'No changes were committed; HEAD did not change.'; exit 12 }; "
-            + "Write-Output ''; Write-Output 'Commit created:'; Write-Output $afterHead";
-    }
-
-    private static string BuildCommitMessage(CodexRequest request)
-    {
-        var projectLabel = request.Project?.Name?.Trim();
-        if (string.IsNullOrWhiteSpace(projectLabel))
-        {
-            return "Update repository files";
-        }
-
-        return $"Update {projectLabel} files";
-    }
-
     private static bool CommitOutputClaimsCreated(string output) =>
         CommitCreatedOutputRegex.IsMatch(output);
-
-    private static bool IsGitCommitWriteFailure(string output)
-    {
-        return output.Contains(".git/index.lock", StringComparison.OrdinalIgnoreCase)
-            || output.Contains("Read-only file system", StringComparison.OrdinalIgnoreCase)
-            || output.Contains("Unable to create", StringComparison.OrdinalIgnoreCase)
-               && output.Contains(".git", StringComparison.OrdinalIgnoreCase);
-    }
 
     private static bool IsHex(char value) =>
         value is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F';
@@ -1677,16 +1532,18 @@ public sealed class QueueWorker(
                 + """
 
                 Do not run git commit in this run.
-                Leave file changes for the queue-managed commit step.
+                Leave file changes for the follow-up Codex commit step.
                 """;
         }
 
         return request.Prompt.TrimEnd()
             + """
 
-            Do not run git commit in this run.
-            Make the requested file changes only.
-            Leave commit creation to the queue-managed commit step after this run succeeds.
+            After making the requested file changes, inspect the git changes and create exactly one git commit yourself.
+            Stage only changes under this project root. Prefer pathspec-limited commands such as `git add -A -- .`.
+            Choose one concise imperative commit message.
+            Do not amend existing commits.
+            Do not push.
             """;
     }
 

@@ -40,6 +40,22 @@ internal static class GitCommitMessageHelper
         """;
     }
 
+    public static string BuildCommitPrompt(string? target = null)
+    {
+        var targetText = string.IsNullOrWhiteSpace(target) ? "repository" : target.Trim();
+        return $"""
+        Inspect the current git changes for this {targetText} and create exactly one git commit yourself.
+
+        Run git status and git diff as needed.
+        Stage only changes under the current project path. Prefer pathspec-limited commands such as `git add -A -- .`.
+        Choose one concise imperative commit message.
+        If there are no changes, do not create a commit and return exactly: No changes to commit.
+        Do not amend existing commits.
+        Do not push.
+        After committing, report the commit SHA and commit message.
+        """;
+    }
+
     public static string? ExtractFromOutput(string output)
     {
         var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -116,7 +132,8 @@ internal static class GitCommitMessageHelper
     private static bool SkipLine(string line) =>
         string.IsNullOrWhiteSpace(line)
         || line.StartsWith("$ ", StringComparison.Ordinal)
-        || line.StartsWith("```", StringComparison.Ordinal);
+        || line.StartsWith("```", StringComparison.Ordinal)
+        || CompletionTextCleaner.IsNoiseLine(line);
 
     private static string NormalizeEventLine(string line) =>
         line.StartsWith("data:", StringComparison.OrdinalIgnoreCase)

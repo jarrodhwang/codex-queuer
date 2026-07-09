@@ -2247,7 +2247,7 @@ function SegmentedRadio({
       <span>{label}</span>
       <div className="segmented-radio">
         {options.map((option) => (
-          <label key={option.value} className={option.value === value ? 'active' : ''}>
+          <label key={option.value} className={`segmented-radio-option--${option.value} ${option.value === value ? 'active' : ''}`}>
             <input
               type="radio"
               name={name}
@@ -3689,17 +3689,18 @@ function GitPanel({
     void loadStatus()
   }, [defaults.commitModel, loadStatus, project.id])
 
-  const suggestMessage = async () => {
+  const commitWithCodex = async () => {
     setGenerating(true)
     setActionOutput('')
     try {
-      const result = await api.suggestGitCommitMessage(project.id, {
+      const result = await api.codexGitCommit(project.id, {
         model: suggestionModel.model,
         modelEffort: suggestionModel.effort,
         modelSpeed: suggestionModel.speed,
       })
-      setCommitMessage(result.message)
-      setActionOutput(result.output || `Suggested: ${result.message}`)
+      setCommitMessage('')
+      setActionOutput(result.output || (result.commitSha ? `Commit created: ${result.commitSha}` : 'Codex commit finished.'))
+      await loadStatus()
     } catch (cause) {
       onError(cause)
     } finally {
@@ -3781,10 +3782,10 @@ function GitPanel({
       {actionOutput && <pre className="git-action-output">{actionOutput}</pre>}
 
       <div className="git-ai-box">
-        <ModelPicker label="AI message" options={config.models} value={suggestionModel} onChange={setSuggestionModel} disabled={clean || generating} />
-        <GlassButton variant="secondary" type="button" onClick={suggestMessage} disabled={clean || generating || !suggestionModel.model.trim()}>
-          {generating ? <RefreshCcw size={15} className="action-spinner" /> : <Pencil size={15} />}
-          {generating ? 'Generating...' : 'Create with Codex'}
+        <ModelPicker label="Codex commit" options={config.models} value={suggestionModel} onChange={setSuggestionModel} disabled={clean || generating} />
+        <GlassButton variant="secondary" type="button" onClick={commitWithCodex} disabled={clean || generating || !suggestionModel.model.trim()}>
+          {generating ? <RefreshCcw size={15} className="action-spinner" /> : <GitCommit size={15} />}
+          {generating ? 'Committing...' : 'Commit with Codex'}
         </GlassButton>
       </div>
     </div>
@@ -4374,7 +4375,7 @@ function ModelChips({ model, effort, speed }: { model: string, effort?: string |
   return (
     <div className="model-chip-row" aria-label="Selected model settings">
       <span className="model-chip model-chip--model">{model}</span>
-      {effort && <span className="model-chip">{effortLabels[effort] ?? effort}</span>}
+      {effort && <span className={`model-chip model-chip--effort model-chip--effort-${effort}`}>{effortLabels[effort] ?? effort}</span>}
       <span className={`model-chip model-chip--speed ${speed === 'priority' ? 'model-chip--speed-priority' : ''}`}>{normalizedSpeed}</span>
     </div>
   )

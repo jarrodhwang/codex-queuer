@@ -16,6 +16,7 @@ public interface ITargetCommandRunner
         string? codexSessionId,
         IReadOnlyList<string>? imagePaths,
         string prompt,
+        bool allowGitWrites,
         Func<string, Task> onOutput,
         CancellationToken cancellationToken);
 
@@ -46,12 +47,13 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         string? codexSessionId,
         IReadOnlyList<string>? imagePaths,
         string prompt,
+        bool allowGitWrites,
         Func<string, Task> onOutput,
         CancellationToken cancellationToken)
     {
         if (machine.Kind == MachineKind.Local)
         {
-            var arguments = BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt);
+            var arguments = BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt, allowGitWrites);
             return RunProcessAsync(
                 "codex",
                 arguments,
@@ -65,7 +67,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         if (machine.TargetsWindows())
         {
             var windowsCommand = "Set-Location -LiteralPath " + QuotePowerShellValue(projectPath) + "; "
-                + "codex " + string.Join(" ", BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt).Select(QuotePowerShellValue));
+                + "codex " + string.Join(" ", BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt, allowGitWrites).Select(QuotePowerShellValue));
 
             return RunSshAsync(
                 machine,
@@ -83,7 +85,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             Quote(projectPath),
             "&&",
             "codex",
-            string.Join(" ", BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt).Select(Quote))
+            string.Join(" ", BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt, allowGitWrites).Select(Quote))
         });
 
         return RunSshAsync(
@@ -164,7 +166,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         string preview,
         Func<string, Task> onOutput,
         CancellationToken cancellationToken,
-        TimeSpan? firstProcessOutputTimeout = null)
+        TimeSpan? firstProcessOutputTimeout = null,
+        string? standardInput = null)
     {
         if (string.IsNullOrWhiteSpace(machine.Host))
         {
@@ -199,7 +202,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
         arguments.Add(destination);
         arguments.Add(remoteCommand);
-        return RunProcessAsync("ssh", arguments, null, preview, onOutput, cancellationToken, firstProcessOutputTimeout);
+        return RunProcessAsync("ssh", arguments, null, preview, onOutput, cancellationToken, firstProcessOutputTimeout, standardInput);
     }
 
     private async Task<CommandResult> RunProcessAsync(
@@ -209,7 +212,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         string preview,
         Func<string, Task> onOutput,
         CancellationToken cancellationToken,
-        TimeSpan? firstProcessOutputTimeout = null)
+        TimeSpan? firstProcessOutputTimeout = null,
+        string? standardInput = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -249,7 +253,6 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             throw;
         }
 
-        process.StandardInput.Close();
         var firstProcessOutput = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         async Task ReadStreamAsync(StreamReader reader)
@@ -279,6 +282,37 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
         try
         {
+            try
+            {
+                if (standardInput is not null)
+                {
+                    await process.StandardInput.WriteAsync(standardInput.AsMemory(), cancellationToken);
+                }
+            }
+            catch (IOException) when (process.HasExited)
+            {
+                // The child process exited before consuming stdin; collect its output below.
+            }
+            catch (ObjectDisposedException) when (process.HasExited)
+            {
+                // The child process exited before consuming stdin; collect its output below.
+            }
+            finally
+            {
+                try
+                {
+                    process.StandardInput.Close();
+                }
+                catch (IOException) when (process.HasExited)
+                {
+                    // The child process exited before stdin could be closed.
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Standard input may already be disposed after an early process exit.
+                }
+            }
+
             if (firstProcessOutputTimeout is { } timeout)
             {
                 var timeoutTask = Task.Delay(timeout, cancellationToken);
@@ -395,7 +429,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         string? modelSpeed,
         string? codexSessionId,
         IReadOnlyList<string>? imagePaths,
-        string prompt)
+        string prompt,
+        bool allowGitWrites)
     {
         var arguments = new List<string> { "exec" };
 
@@ -429,14 +464,14 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             arguments.Add("-c");
             arguments.Add("approval_policy=\"never\"");
             arguments.Add("-s");
-            arguments.Add("workspace-write");
+            arguments.Add(allowGitWrites ? "danger-full-access" : "workspace-write");
         }
         else
         {
             arguments.Add("-c");
             arguments.Add("approval_policy=\"never\"");
             arguments.Add("-c");
-            arguments.Add("sandbox_mode=\"workspace-write\"");
+            arguments.Add(allowGitWrites ? "sandbox_mode=\"danger-full-access\"" : "sandbox_mode=\"workspace-write\"");
             arguments.Add(codexSessionId);
         }
 

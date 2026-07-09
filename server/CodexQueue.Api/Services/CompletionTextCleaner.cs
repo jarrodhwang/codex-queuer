@@ -30,6 +30,7 @@ public static partial class CompletionTextCleaner
 
         var trimmed = line.Trim();
         return trimmed.StartsWith("$ ", StringComparison.Ordinal)
+               || trimmed.Equals("Reading additional input from stdin...", StringComparison.OrdinalIgnoreCase)
                || StandaloneHexIdentifierRegex().IsMatch(trimmed);
     }
 

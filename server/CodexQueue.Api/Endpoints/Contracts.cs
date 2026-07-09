@@ -168,6 +168,8 @@ public sealed record GitCommitRequest(string Message);
 
 public sealed record GitCommitDto(bool Success, string Output, int ExitCode, string CommandPreview, string? CommitSha);
 
+public sealed record CodexGitCommitRequest(string Model, string? ModelEffort, string? ModelSpeed);
+
 public sealed record SuggestGitCommitMessageRequest(string Model, string? ModelEffort, string? ModelSpeed);
 
 public sealed record SuggestGitCommitMessageDto(string Message, string Output);
