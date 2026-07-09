@@ -100,7 +100,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
     {
         if (machine.Kind == MachineKind.Local)
         {
-            var arguments = BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt, allowGitWrites);
+            var arguments = BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, allowGitWrites);
             if (machine.TargetsWindows())
             {
                 var command = BuildPowerShellCodexCommandSetup() + "; & $codexCommand " + string.Join(" ", arguments.Select(QuotePowerShellValue));
@@ -111,7 +111,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                     BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId),
                     onOutput,
                     cancellationToken,
-                    firstProcessOutputTimeout: CodexFirstOutputTimeout);
+                    firstProcessOutputTimeout: CodexFirstOutputTimeout,
+                    standardInput: prompt);
             }
 
             return RunProcessAsync(
@@ -121,14 +122,15 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId),
                 onOutput,
                 cancellationToken,
-                firstProcessOutputTimeout: CodexFirstOutputTimeout);
+                firstProcessOutputTimeout: CodexFirstOutputTimeout,
+                standardInput: prompt);
         }
 
         if (machine.TargetsWindows())
         {
             var windowsCommand = BuildPowerShellSetLocationCommand(projectPath) + "; "
                 + BuildPowerShellCodexCommandSetup() + "; & $codexCommand "
-                + string.Join(" ", BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt, allowGitWrites).Select(QuotePowerShellValue));
+                + string.Join(" ", BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, allowGitWrites).Select(QuotePowerShellValue));
 
             return RunSshAsync(
                 machine,
@@ -136,7 +138,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId),
                 onOutput,
                 cancellationToken,
-                firstProcessOutputTimeout: CodexFirstOutputTimeout);
+                firstProcessOutputTimeout: CodexFirstOutputTimeout,
+                standardInput: prompt);
         }
 
         var remoteCommand = string.Join(" ", new[]
@@ -146,7 +149,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             Quote(projectPath),
             "&&",
             "codex",
-            string.Join(" ", BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt, allowGitWrites).Select(Quote))
+            string.Join(" ", BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, allowGitWrites).Select(Quote))
         });
 
         return RunSshAsync(
@@ -155,7 +158,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId),
             onOutput,
             cancellationToken,
-            firstProcessOutputTimeout: CodexFirstOutputTimeout);
+            firstProcessOutputTimeout: CodexFirstOutputTimeout,
+            standardInput: prompt);
     }
 
     public Task<CommandResult> RunShellAsync(
@@ -451,18 +455,16 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         "Set-Location -LiteralPath " + QuotePowerShellValue(path) + " -ErrorAction Stop";
 
     private static string BuildPowerShellCodexCommandSetup() =>
-        "$persistedPath = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User')) | Where-Object { $_ }; "
-        + "if ($persistedPath) { $env:Path = ($persistedPath -join ';') + ';' + $env:Path }; "
+        "$persistedPath = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User')) -join ';'; "
+        + "if ($persistedPath) { $env:Path = $persistedPath + ';' + $env:Path }; "
         + "$env:PATHEXT = if ($env:PATHEXT) { $env:PATHEXT } else { '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL;.PS1' }; "
-        + "$codexPathCandidates = @($env:APPDATA + '\\npm', $env:USERPROFILE + '\\AppData\\Roaming\\npm', $env:LOCALAPPDATA + '\\npm', $env:USERPROFILE + '\\.local\\bin', $env:USERPROFILE + '\\.volta\\bin', $env:LOCALAPPDATA + '\\Volta\\bin', $env:USERPROFILE + '\\scoop\\shims', $env:LOCALAPPDATA + '\\Microsoft\\WinGet\\Links', $env:LOCALAPPDATA + '\\Programs\\nodejs', $env:ProgramData + '\\chocolatey\\bin', $env:ProgramFiles + '\\nodejs', $env:BUN_INSTALL + '\\bin', $env:USERPROFILE + '\\.bun\\bin', $env:LOCALAPPDATA + '\\pnpm', $env:APPDATA + '\\pnpm', $env:LOCALAPPDATA + '\\Yarn\\bin', $env:APPDATA + '\\Yarn\\bin', $env:USERPROFILE + '\\.yarn\\bin', $env:USERPROFILE + '\\.cargo\\bin', $env:NPM_CONFIG_PREFIX, $env:npm_config_prefix) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique; "
+        + "$codexPathCandidates = @($env:APPDATA + '\\npm', $env:LOCALAPPDATA + '\\Programs\\OpenAI\\Codex\\bin', $env:LOCALAPPDATA + '\\Microsoft\\WinGet\\Links', $env:USERPROFILE + '\\.volta\\bin', $env:USERPROFILE + '\\scoop\\shims', $env:ProgramData + '\\chocolatey\\bin', $env:ProgramFiles + '\\nodejs') | Where-Object { $_ -and (Test-Path -LiteralPath $_) }; "
         + "$npmCommand = Get-Command npm.cmd,npm.exe,npm -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1; "
         + "if ($npmCommand) { try { $npmPrefix = & $npmCommand.Path prefix -g 2>$null | Select-Object -First 1; if ($npmPrefix) { $npmPrefix = $npmPrefix.Trim(); $codexPathCandidates += @($npmPrefix, (Join-Path $npmPrefix 'bin')) } } catch {} }; "
-        + "$codexPathCandidates = $codexPathCandidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique; "
         + "foreach ($codexPath in $codexPathCandidates) { $env:Path = $env:Path + ';' + $codexPath }; "
         + "$codexCommand = Get-Command codex.exe,codex.cmd,codex.bat,codex.ps1,codex -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1; "
         + "if ($codexCommand) { $codexCommand = $codexCommand.Path }; "
-        + "if (-not $codexCommand) { foreach ($codexPath in $codexPathCandidates) { foreach ($codexName in 'codex.exe','codex.cmd','codex.bat','codex.ps1') { $candidate = Join-Path $codexPath $codexName; if (Test-Path -LiteralPath $candidate -PathType Leaf) { $codexCommand = $candidate; break } }; if ($codexCommand) { break } } }; "
-        + "if (-not $codexCommand) { throw 'Codex CLI was not found. Install it for this Windows user or add its directory to the user or system PATH.' }";
+        + "if (-not $codexCommand) { throw 'Codex CLI was not found for this Windows SSH user. Install it for this user with: npm.cmd install -g @openai/codex. Then reconnect and run: codex --version.' }";
 
     private static string ResolveSshKeyPath(string configuredPath)
     {
@@ -489,8 +491,13 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
     private static string BuildPowerShellRemoteCommand(string command)
     {
-        var encodedCommand = Convert.ToBase64String(Encoding.Unicode.GetBytes(command));
-        return "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + encodedCommand;
+        var sshSafeCommand = "$ProgressPreference = 'SilentlyContinue'; try { " + command
+            + "; if ($LASTEXITCODE -is [int] -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
+            + "; } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }";
+        var encodedCommand = Convert.ToBase64String(Encoding.Unicode.GetBytes(sshSafeCommand));
+        // Suppressing progress records and writing caught errors directly prevents Windows
+        // PowerShell from serializing its non-success streams as CLIXML through OpenSSH.
+        return "powershell -NoLogo -NoProfile -NonInteractive -OutputFormat Text -ExecutionPolicy Bypass -EncodedCommand " + encodedCommand;
     }
 
     private static IEnumerable<string> BuildModelConfigArguments(string? modelEffort, string? modelSpeed)
@@ -518,7 +525,6 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         string? modelSpeed,
         string? codexSessionId,
         IReadOnlyList<string>? imagePaths,
-        string prompt,
         bool allowGitWrites)
     {
         var arguments = new List<string> { "exec" };
@@ -564,7 +570,9 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             arguments.Add(codexSessionId);
         }
 
-        arguments.Add(prompt);
+        // Keep prompts off process command lines. This avoids the Windows cmd.exe command-length
+        // limit and prevents prompt contents from appearing in process listings.
+        arguments.Add("-");
         return arguments;
     }
 

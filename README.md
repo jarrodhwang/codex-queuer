@@ -53,12 +53,13 @@ For a Windows SSH machine such as `192.168.0.50`, configure the machine as:
 - SSH key: `/home/app/.ssh/zbook_fury`
 - Working root: `C:\Users\jarrod`
 
-Install Codex for the same Windows account configured as the SSH user. Windows OpenSSH starts a non-interactive session, so Codex Queue restores the user and machine `PATH` and also checks the standard npm, Volta, Scoop, WinGet, Chocolatey, and Node locations. It supports the normal `codex.cmd` npm shim even when the SSH session does not provide `PATHEXT`. If the machine test still reports that Codex is missing, sign in as that SSH user and install the CLI (for example, `npm install -g @openai/codex`), then retry the machine test before queuing work.
+Install Codex for the same Windows account configured as the SSH user. The Codex desktop app and Codex CLI are separate launch surfaces; verify the CLI from a fresh SSH connection with `ssh user@host codex --version`. Windows OpenSSH starts a non-interactive session, so Codex Queue restores the user and machine `PATH` and also checks the desktop app CLI directory plus the standard npm, Volta, Scoop, WinGet, Chocolatey, and Node locations. It supports the normal `codex.cmd` npm shim even when the SSH session does not provide `PATHEXT`. If the machine test reports that Codex is missing, sign in as that SSH user and run `npm.cmd install -g @openai/codex`, reconnect, and retry the machine test before queuing work. Windows PowerShell is forced to text output so SSH errors remain readable instead of appearing as CLIXML.
 
 ## Queue Behavior
 
 1. A request is queued against a project and model.
 2. The worker runs `codex exec --json` on the project machine.
+   Prompts are streamed over stdin instead of placed in process arguments, which supports long requests on Windows and avoids exposing prompt text in process listings.
 3. If commit generation is enabled and the request succeeds, a second Codex session runs with the commit model.
 4. Request and commit output are stored as separate runs and displayed together under the request details.
 
