@@ -100,7 +100,15 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
     {
         if (machine.Kind == MachineKind.Local)
         {
-            var arguments = BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, allowGitWrites);
+            var arguments = BuildCodexArguments(
+                projectPath,
+                model,
+                modelEffort,
+                modelSpeed,
+                codexSessionId,
+                imagePaths,
+                allowGitWrites,
+                useUnelevatedWindowsSandbox: false);
             if (machine.TargetsWindows())
             {
                 var command = BuildPowerShellCodexCommandSetup() + "; & $codexCommand " + string.Join(" ", arguments.Select(QuotePowerShellValue));
@@ -130,7 +138,15 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         {
             var windowsCommand = BuildPowerShellSetLocationCommand(projectPath) + "; "
                 + BuildPowerShellCodexCommandSetup() + "; & $codexCommand "
-                + string.Join(" ", BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, allowGitWrites).Select(QuotePowerShellValue));
+                + string.Join(" ", BuildCodexArguments(
+                    projectPath,
+                    model,
+                    modelEffort,
+                    modelSpeed,
+                    codexSessionId,
+                    imagePaths,
+                    allowGitWrites,
+                    useUnelevatedWindowsSandbox: true).Select(QuotePowerShellValue));
 
             return RunSshAsync(
                 machine,
@@ -149,7 +165,15 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             Quote(projectPath),
             "&&",
             "codex",
-            string.Join(" ", BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, allowGitWrites).Select(Quote))
+            string.Join(" ", BuildCodexArguments(
+                projectPath,
+                model,
+                modelEffort,
+                modelSpeed,
+                codexSessionId,
+                imagePaths,
+                allowGitWrites,
+                useUnelevatedWindowsSandbox: false).Select(Quote))
         });
 
         return RunSshAsync(
@@ -525,7 +549,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         string? modelSpeed,
         string? codexSessionId,
         IReadOnlyList<string>? imagePaths,
-        bool allowGitWrites)
+        bool allowGitWrites,
+        bool useUnelevatedWindowsSandbox)
     {
         var arguments = new List<string> { "exec" };
 
@@ -545,6 +570,14 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         arguments.Add("-m");
         arguments.Add(model);
         arguments.Add("--skip-git-repo-check");
+
+        if (useUnelevatedWindowsSandbox && !allowGitWrites)
+        {
+            // Windows SSH sessions cannot service the setup or logon requirements of the
+            // elevated native sandbox reliably. Keep workspace isolation with its ACL fallback.
+            arguments.Add("-c");
+            arguments.Add("windows.sandbox=\"unelevated\"");
+        }
 
         foreach (var imagePath in imagePaths ?? Array.Empty<string>())
         {
