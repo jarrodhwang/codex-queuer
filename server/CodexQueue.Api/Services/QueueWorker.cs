@@ -686,7 +686,11 @@ public sealed class QueueWorker(
                 || x.Status == QueueStatus.Running
                 || x.Status == QueueStatus.CancelRequested
                 || x.Status == QueueStatus.Failed
-                || x.Status == QueueStatus.UsageLimited))
+                || x.Status == QueueStatus.UsageLimited
+                || (x.Status == QueueStatus.Succeeded
+                    && x.GenerateCommit
+                    && x.SeparateCommitSession
+                    && x.Runs.Any(run => run.Kind == RunKind.Commit && run.Status != QueueStatus.Succeeded))))
             .ToArrayAsync(cancellationToken);
 
         var changed = false;
@@ -774,6 +778,35 @@ public sealed class QueueWorker(
             if (commitRun.Status == QueueStatus.Queued && request.Status != QueueStatus.Queued)
             {
                 MarkRequestQueued(request);
+                return true;
+            }
+
+            if (commitRun.Status == QueueStatus.Failed && request.Status != QueueStatus.Failed)
+            {
+                request.Status = QueueStatus.Failed;
+                request.FinishedAt = commitRun.FinishedAt ?? DateTimeOffset.UtcNow;
+                request.Error = commitRun.Error ?? LastUsefulLine(commitRun.Output);
+                request.Summary = LastUsefulLine(commitRun.Output);
+                return true;
+            }
+
+            if (commitRun.Status == QueueStatus.Cancelled && request.Status != QueueStatus.Cancelled)
+            {
+                request.Status = QueueStatus.Cancelled;
+                request.FinishedAt = commitRun.FinishedAt ?? DateTimeOffset.UtcNow;
+                request.Error = commitRun.Error ?? "Commit run cancelled.";
+                request.Summary = LastUsefulLine(commitRun.Output);
+                return true;
+            }
+
+            if (commitRun.Status == QueueStatus.UsageLimited && request.Status != QueueStatus.UsageLimited)
+            {
+                request.Status = QueueStatus.UsageLimited;
+                request.FinishedAt = commitRun.FinishedAt ?? DateTimeOffset.UtcNow;
+                request.Error = commitRun.Error;
+                request.RetryAfter = commitRun.RetryAfter;
+                request.RetryReason = commitRun.RetryReason;
+                request.AvailableModel = commitRun.AvailableModel;
                 return true;
             }
 
