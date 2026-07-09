@@ -1029,6 +1029,10 @@
   gap: 7px;
 }
 
+.model-options-row--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .segmented-field {
   display: grid;
   gap: 4px;

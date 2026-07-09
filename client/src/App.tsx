@@ -2197,7 +2197,7 @@ function ModelPicker({
       {!selectedOption && (
         <GlassInput value={value.model} disabled={disabled} onChange={(event) => onChange({ ...value, model: event.target.value })} placeholder="model id" />
       )}
-      <div className="model-options-row">
+      <div className={`model-options-row ${supportsPriority ? '' : 'model-options-row--single'}`}>
         <SegmentedRadio
           label="Intensity"
           name={`${label}-effort`}
@@ -2211,17 +2211,19 @@ function ModelPicker({
           ]}
           onChange={(effort) => onChange({ ...value, effort })}
         />
-        <SegmentedRadio
-          label="Speed"
-          name={`${label}-speed`}
-          value={supportsPriority ? value.speed : 'normal'}
-          disabled={disabled || !supportsPriority}
-          options={[
-            { label: 'Normal', value: 'normal' },
-            { label: 'x1.5', value: 'priority' },
-          ]}
-          onChange={(speed) => onChange({ ...value, speed })}
-        />
+        {supportsPriority && (
+          <SegmentedRadio
+            label="Speed"
+            name={`${label}-speed`}
+            value={value.speed}
+            disabled={disabled}
+            options={[
+              { label: 'Normal', value: 'normal' },
+              { label: 'x1.5', value: 'priority' },
+            ]}
+            onChange={(speed) => onChange({ ...value, speed })}
+          />
+        )}
       </div>
     </div>
   )
