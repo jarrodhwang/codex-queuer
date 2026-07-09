@@ -48,6 +48,7 @@ import type {
   Project,
   QueueAttachment,
   QueueDiagnostics,
+  QueueStatus,
   SaveMachineRequest,
   SaveProjectRequest,
   UpdateQueueRequest,
@@ -367,6 +368,42 @@ function parseCsvLine(line: string) {
 
 function isOptimisticRequest(id: string) {
   return id.startsWith('optimistic:')
+}
+
+function queueDisplayRank(status: QueueStatus) {
+  if (status === 'Succeeded') return 0
+  if (status === 'Running' || status === 'CancelRequested') return 1
+  if (status === 'Queued') return 2
+  if (status === 'UsageLimited') return 3
+  if (status === 'Failed' || status === 'Cancelled') return 4
+  return 5
+}
+
+function compareQueueRequests(left: CodexRequest, right: CodexRequest) {
+  const rankComparison = queueDisplayRank(left.status) - queueDisplayRank(right.status)
+  if (rankComparison !== 0) return rankComparison
+
+  if (left.status === 'Succeeded' || left.status === 'Failed' || left.status === 'Cancelled' || left.status === 'UsageLimited') {
+    return Date.parse(right.finishedAt ?? right.createdAt) - Date.parse(left.finishedAt ?? left.createdAt)
+      || Date.parse(right.createdAt) - Date.parse(left.createdAt)
+  }
+
+  return (left.queueOrder - right.queueOrder) || Date.parse(left.createdAt) - Date.parse(right.createdAt)
+}
+
+function prioritizedQueueOrder(requests: CodexRequest[], queuedPriorityIds: string[] = []) {
+  const requestsById = new Map(requests.map((request) => [request.id, request]))
+  const priorityQueued = queuedPriorityIds
+    .map((id) => requestsById.get(id))
+    .filter((request): request is CodexRequest => request !== undefined && request.status === 'Queued')
+  const priorityIdSet = new Set(priorityQueued.map((request) => request.id))
+  const active = requests
+    .filter((request) => request.status === 'Running' || request.status === 'CancelRequested')
+    .toSorted((left, right) => (left.queueOrder - right.queueOrder) || Date.parse(left.startedAt ?? left.createdAt) - Date.parse(right.startedAt ?? right.createdAt))
+  const queued = requests
+    .filter((request) => request.status === 'Queued' && !priorityIdSet.has(request.id))
+    .toSorted((left, right) => (left.queueOrder - right.queueOrder) || Date.parse(left.createdAt) - Date.parse(right.createdAt))
+  return [...active, ...priorityQueued, ...queued]
 }
 
 function requestOverrideConfirmed(request: CodexRequest, override: Partial<CodexRequest>) {
@@ -691,7 +728,13 @@ function App() {
 
   const reorderRequests = async (projectId: string, requestIds: string[]) => {
     setError('')
-    const orderById = new Map(requestIds.map((id, index) => [id, index + 1]))
+    const priorityRequests = requests.filter((request) =>
+      request.projectId === projectId &&
+      !request.deletedAt &&
+      !request.archivedAt &&
+      (request.status === 'Queued' || request.status === 'Running' || request.status === 'CancelRequested'),
+    )
+    const orderById = new Map(prioritizedQueueOrder(priorityRequests, requestIds).map((request, index) => [request.id, index + 1]))
     requestIds.forEach((id) => pendingRequestOverridesRef.current.set(id, { queueOrder: orderById.get(id) }))
     applyRequestsImmediately((current) => current.map((request) => (
       request.projectId === projectId && orderById.has(request.id)
@@ -760,18 +803,39 @@ function App() {
       startedAt: null,
       finishedAt: null,
     }
-    pendingRequestOverridesRef.current.set(id, optimisticUpdate)
-    applyRequestsImmediately((current) => current.map((request) => (request.id === id
-      ? {
-          ...request,
-          ...optimisticUpdate,
-        }
-      : request)))
+    const target = requests.find((request) => request.id === id)
+    const priorityRequests = target
+      ? requests
+          .map((request) => (request.id === id ? { ...request, ...optimisticUpdate } : request))
+          .filter((request) =>
+            request.projectId === target.projectId &&
+            !request.deletedAt &&
+            !request.archivedAt &&
+            (request.status === 'Queued' || request.status === 'Running' || request.status === 'CancelRequested'),
+          )
+      : []
+    const orderById = new Map(prioritizedQueueOrder(priorityRequests, [id]).map((request, index) => [request.id, index + 1]))
+    const optimisticIds = new Set(orderById.keys())
+    if (!optimisticIds.has(id)) {
+      optimisticIds.add(id)
+    }
+    optimisticIds.forEach((requestId) => {
+      const queueOrder = orderById.get(requestId)
+      pendingRequestOverridesRef.current.set(requestId, requestId === id ? { ...optimisticUpdate, queueOrder } : { queueOrder })
+    })
+    applyRequestsImmediately((current) => current.map((request) => {
+      const queueOrder = orderById.get(request.id)
+      if (request.id === id) {
+        return { ...request, ...optimisticUpdate, queueOrder: queueOrder ?? request.queueOrder }
+      }
+
+      return queueOrder === undefined ? request : { ...request, queueOrder }
+    }))
     try {
       await api.resumeRequest(id)
       refreshLiveInBackground()
     } catch (cause) {
-      pendingRequestOverridesRef.current.delete(id)
+      optimisticIds.forEach((requestId) => pendingRequestOverridesRef.current.delete(requestId))
       handleApiError(cause)
       refreshLiveInBackground()
     }
@@ -1841,7 +1905,7 @@ function QueueWorkspace({
   [scopedRequests])
   const queueRequests = useMemo(() => scopedRequests
     .filter((request) => !request.deletedAt && !request.archivedAt)
-    .toSorted((left, right) => (left.queueOrder - right.queueOrder) || Date.parse(left.createdAt) - Date.parse(right.createdAt)),
+    .toSorted(compareQueueRequests),
   [scopedRequests])
   const deletedRequests = useMemo(() => scopedRequests
     .filter((request) => request.deletedAt)

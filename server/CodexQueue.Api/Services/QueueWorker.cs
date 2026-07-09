@@ -103,6 +103,20 @@ public sealed class QueueWorker(
         }
 
         ResumeRequest(request);
+        if (request.Status == QueueStatus.Queued)
+        {
+            var projectPriorityRequests = await db.Requests
+                .Where(x => x.ProjectId == request.ProjectId
+                    && (x.Id == request.Id
+                        || (x.DeletedAt == null
+                            && x.ArchivedAt == null
+                            && (x.Status == QueueStatus.Queued
+                                || x.Status == QueueStatus.Running
+                                || x.Status == QueueStatus.CancelRequested))))
+                .ToArrayAsync(cancellationToken);
+            QueuePriority.MoveQueuedRequestAfterActive(projectPriorityRequests, request);
+        }
+
         if (await TrySaveChangesAsync(db, "resume request", cancellationToken))
         {
             await KickQueueAsync(cancellationToken);

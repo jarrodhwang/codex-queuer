@@ -589,7 +589,7 @@ public static class ApiEndpoints
 
             var requests = await query.ToArrayAsync(cancellationToken);
             return requests
-                .OrderByDescending(x => x.CreatedAt)
+                .Order(Comparer<CodexRequest>.Create(QueuePriority.CompareForDisplay))
                 .Take(200)
                 .Select(x => x.ToDto())
                 .ToArray();
@@ -749,24 +749,28 @@ public static class ApiEndpoints
                 return Results.BadRequest(new { error = "Request order contains duplicates." });
             }
 
-            var requests = await db.Requests
-                .Where(x => x.ProjectId == input.ProjectId && requestIds.Contains(x.Id))
+            var submittedRequests = await db.Requests
+                .Where(x => requestIds.Contains(x.Id))
                 .ToArrayAsync(cancellationToken);
-            if (requests.Length != requestIds.Length)
+            if (submittedRequests.Length != requestIds.Length || submittedRequests.Any(x => x.ProjectId != input.ProjectId))
             {
                 return Results.BadRequest(new { error = "Request order contains unknown requests." });
             }
 
-            if (requests.Any(x => x.Status != QueueStatus.Queued || x.DeletedAt is not null || x.ArchivedAt is not null))
+            if (submittedRequests.Any(x => x.Status != QueueStatus.Queued || x.DeletedAt is not null || x.ArchivedAt is not null))
             {
                 return Results.BadRequest(new { error = "Only queued requests can be reordered." });
             }
 
-            var requestsById = requests.ToDictionary(x => x.Id);
-            for (var index = 0; index < requestIds.Length; index++)
-            {
-                requestsById[requestIds[index]].QueueOrder = index + 1;
-            }
+            var projectPriorityRequests = await db.Requests
+                .Where(x => x.ProjectId == input.ProjectId
+                    && x.DeletedAt == null
+                    && x.ArchivedAt == null
+                    && (x.Status == QueueStatus.Queued
+                        || x.Status == QueueStatus.Running
+                        || x.Status == QueueStatus.CancelRequested))
+                .ToArrayAsync(cancellationToken);
+            QueuePriority.ReorderQueuedAfterActive(projectPriorityRequests, requestIds);
 
             await db.SaveChangesAsync(cancellationToken);
             return Results.Ok(new { ok = true });
