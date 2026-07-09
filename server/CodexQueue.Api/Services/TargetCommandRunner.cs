@@ -453,11 +453,13 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
     private static string BuildPowerShellCodexCommandSetup() =>
         "$persistedPath = @([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User')) | Where-Object { $_ }; "
         + "if ($persistedPath) { $env:Path = ($persistedPath -join ';') + ';' + $env:Path }; "
-        + "$codexPathCandidates = @($env:APPDATA + '\\npm', $env:USERPROFILE + '\\AppData\\Roaming\\npm', $env:USERPROFILE + '\\.local\\bin', $env:USERPROFILE + '\\scoop\\shims', $env:LOCALAPPDATA + '\\Microsoft\\WinGet\\Links', $env:LOCALAPPDATA + '\\Programs\\nodejs', $env:ProgramData + '\\chocolatey\\bin', $env:ProgramFiles + '\\nodejs'); "
-        + "foreach ($codexPath in $codexPathCandidates) { if ($codexPath -and (Test-Path -LiteralPath $codexPath)) { $env:Path = $env:Path + ';' + $codexPath } }; "
-        + "$codexCommand = Get-Command codex -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1; "
-        + "if (-not $codexCommand) { throw 'Codex CLI was not found. Install it for this Windows user or add its directory to the user or system PATH.' }; "
-        + "$codexCommand = $codexCommand.Path";
+        + "$env:PATHEXT = if ($env:PATHEXT) { $env:PATHEXT } else { '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL;.PS1' }; "
+        + "$codexPathCandidates = @($env:APPDATA + '\\npm', $env:USERPROFILE + '\\AppData\\Roaming\\npm', $env:LOCALAPPDATA + '\\npm', $env:USERPROFILE + '\\.local\\bin', $env:USERPROFILE + '\\.volta\\bin', $env:LOCALAPPDATA + '\\Volta\\bin', $env:USERPROFILE + '\\scoop\\shims', $env:LOCALAPPDATA + '\\Microsoft\\WinGet\\Links', $env:LOCALAPPDATA + '\\Programs\\nodejs', $env:ProgramData + '\\chocolatey\\bin', $env:ProgramFiles + '\\nodejs') | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique; "
+        + "foreach ($codexPath in $codexPathCandidates) { $env:Path = $env:Path + ';' + $codexPath }; "
+        + "$codexCommand = Get-Command codex.exe,codex.cmd,codex.bat,codex.ps1,codex -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1; "
+        + "if ($codexCommand) { $codexCommand = $codexCommand.Path }; "
+        + "if (-not $codexCommand) { foreach ($codexPath in $codexPathCandidates) { foreach ($codexName in 'codex.exe','codex.cmd','codex.bat','codex.ps1') { $candidate = Join-Path $codexPath $codexName; if (Test-Path -LiteralPath $candidate -PathType Leaf) { $codexCommand = $candidate; break } }; if ($codexCommand) { break } } }; "
+        + "if (-not $codexCommand) { throw 'Codex CLI was not found. Install it for this Windows user or add its directory to the user or system PATH.' }";
 
     private static string ResolveSshKeyPath(string configuredPath)
     {

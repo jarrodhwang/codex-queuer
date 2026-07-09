@@ -53,6 +53,8 @@ For a Windows SSH machine such as `192.168.0.50`, configure the machine as:
 - SSH key: `/home/app/.ssh/zbook_fury`
 - Working root: `C:\Users\jarrod`
 
+Install Codex for the same Windows account configured as the SSH user. Windows OpenSSH starts a non-interactive session, so Codex Queue restores the user and machine `PATH` and also checks the standard npm, Volta, Scoop, WinGet, Chocolatey, and Node locations. It supports the normal `codex.cmd` npm shim even when the SSH session does not provide `PATHEXT`. If the machine test still reports that Codex is missing, sign in as that SSH user and install the CLI (for example, `npm install -g @openai/codex`), then retry the machine test before queuing work.
+
 ## Queue Behavior
 
 1. A request is queued against a project and model.
