@@ -3279,9 +3279,14 @@ function textFromUnknownJson(value: unknown): string | undefined {
 }
 
 function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: number }) {
+  const [showCompletedRunDetails, setShowCompletedRunDetails] = useState(false)
   const separateCommitRun = request ? latestRunOfKind(request.runs, 'Commit') : undefined
   const completionMessage = request?.status === 'Succeeded' ? completionMessageForRequest(request) : null
-  const showRunDetails = !completionMessage
+  const showRunDetails = !completionMessage || showCompletedRunDetails
+
+  useEffect(() => {
+    setShowCompletedRunDetails(false)
+  }, [request?.id])
 
   if (!request) {
     return (
@@ -3312,7 +3317,18 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
                 <div className="completion-title">Completed</div>
                 <div className="meta">{request.finishedAt ? formatDate(request.finishedAt) : 'Succeeded'}</div>
               </div>
-              <StatusBadge status="Succeeded" />
+              <div className="completion-summary-actions">
+                <GlassButton
+                  variant="secondary"
+                  size="sm"
+                  type="button"
+                  onClick={() => setShowCompletedRunDetails((current) => !current)}
+                  aria-expanded={showCompletedRunDetails}
+                >
+                  <FileText size={13} /> {showCompletedRunDetails ? 'Hide details' : 'Details'}
+                </GlassButton>
+                <StatusBadge status="Succeeded" />
+              </div>
             </div>
             <div className="completion-result-box">
               <CompletionMarkdown content={completionMessage} />

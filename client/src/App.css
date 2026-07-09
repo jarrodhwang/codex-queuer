@@ -3511,6 +3511,14 @@
   border-top: 0;
 }
 
+.completion-summary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.45rem;
+}
+
 .request-result-head {
   text-transform: uppercase;
   letter-spacing: 0.08em;
