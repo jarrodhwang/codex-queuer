@@ -4,8 +4,9 @@
   display: grid;
   grid-template-columns: 288px minmax(0, 1fr) var(--right-width);
   background:
-    linear-gradient(120deg, rgba(37, 99, 235, 0.12), transparent 34%),
-    linear-gradient(240deg, rgba(14, 165, 233, 0.1), transparent 38%),
+    linear-gradient(120deg, rgba(15, 118, 110, 0.1), transparent 34%),
+    linear-gradient(240deg, rgba(180, 83, 9, 0.08), transparent 38%),
+    linear-gradient(20deg, rgba(124, 58, 237, 0.055), transparent 42%),
     linear-gradient(135deg, var(--app-bg), var(--app-bg-2));
   color: var(--text);
 }
@@ -217,15 +218,15 @@
   border: 1px solid rgba(255, 255, 255, 0.62);
   border-radius: 7px;
   background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.84), rgba(255, 255, 255, 0.46) 52%, rgba(37, 99, 235, 0.12));
+    linear-gradient(145deg, rgba(255, 255, 255, 0.86), rgba(255, 255, 255, 0.48) 54%, rgba(15, 118, 110, 0.09));
   color: var(--text-strong);
   font: inherit;
   min-width: 0;
   box-shadow:
     inset 0 1px 0 var(--glass-edge),
-    inset 0 -1px 0 rgba(37, 99, 235, 0.12),
+    inset 0 -1px 0 rgba(15, 118, 110, 0.1),
     0 8px 22px rgba(15, 23, 42, 0.08),
-    0 0 22px rgba(37, 99, 235, 0.08);
+    0 0 22px rgba(15, 118, 110, 0.07);
   backdrop-filter: blur(20px) saturate(1.22);
   -webkit-backdrop-filter: blur(20px) saturate(1.22);
 }
@@ -251,7 +252,7 @@
   inset: 0;
   pointer-events: none;
   content: "";
-  background: linear-gradient(120deg, transparent 12%, rgba(255, 255, 255, 0.5) 36%, rgba(14, 165, 233, 0.2) 48%, transparent 64%);
+  background: linear-gradient(120deg, transparent 12%, rgba(255, 255, 255, 0.5) 36%, rgba(15, 118, 110, 0.18) 48%, transparent 64%);
   opacity: 0;
   transform: translateX(-36%);
   transition: opacity 0.18s ease, transform 0.28s ease;
@@ -269,13 +270,13 @@
 
 .glass-button:not(:disabled):hover {
   transform: translateY(-1px);
-  border-color: rgba(37, 99, 235, 0.54);
+  border-color: var(--accent-line);
   background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.9), rgba(219, 234, 254, 0.72) 58%, rgba(255, 255, 255, 0.52));
+    linear-gradient(145deg, rgba(255, 255, 255, 0.9), rgba(204, 251, 241, 0.58) 58%, rgba(255, 255, 255, 0.52));
   box-shadow:
     inset 0 1px 0 var(--glass-edge),
     0 10px 26px rgba(15, 23, 42, 0.1),
-    0 0 30px rgba(37, 99, 235, 0.18);
+    0 0 30px rgba(15, 118, 110, 0.14);
   color: var(--text-strong);
 }
 
@@ -298,19 +299,19 @@
 
 .glass-button--primary {
   background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.7), rgba(59, 130, 246, 0.96) 42%, rgba(14, 165, 233, 0.92));
+    linear-gradient(145deg, rgba(255, 255, 255, 0.72), rgba(15, 118, 110, 0.96) 42%, rgba(180, 83, 9, 0.78));
   color: white;
-  border-color: rgba(37, 99, 235, 0.56);
+  border-color: rgba(15, 118, 110, 0.48);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.74),
-    inset 0 -1px 0 rgba(29, 78, 216, 0.24),
-    0 12px 30px rgba(37, 99, 235, 0.22),
-    0 0 34px rgba(14, 165, 233, 0.24);
+    inset 0 -1px 0 rgba(17, 94, 89, 0.24),
+    0 12px 30px rgba(15, 118, 110, 0.2),
+    0 0 34px rgba(180, 83, 9, 0.16);
 }
 
 .glass-button--primary:not(:disabled):hover {
   background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.82), rgba(37, 99, 235, 0.98) 44%, rgba(2, 132, 199, 0.94));
+    linear-gradient(145deg, rgba(255, 255, 255, 0.82), rgba(17, 94, 89, 0.98) 44%, rgba(146, 64, 14, 0.88));
   border-color: rgba(255, 255, 255, 0.72);
   color: white;
 }
@@ -318,14 +319,14 @@
 .glass-button--secondary {
   box-shadow:
     inset 0 1px 0 var(--glass-edge),
-    inset 0 -1px 0 rgba(37, 99, 235, 0.1),
+    inset 0 -1px 0 rgba(15, 118, 110, 0.09),
     0 8px 22px rgba(15, 23, 42, 0.07),
-    0 0 24px rgba(37, 99, 235, 0.09);
+    0 0 24px rgba(15, 118, 110, 0.08);
 }
 
 .glass-button--secondary:not(:disabled):hover {
   background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.82), rgba(219, 234, 254, 0.68) 58%, rgba(255, 255, 255, 0.5));
+    linear-gradient(145deg, rgba(255, 255, 255, 0.82), rgba(204, 251, 241, 0.54) 58%, rgba(255, 255, 255, 0.5));
   color: var(--text-strong);
 }
 
@@ -333,8 +334,8 @@
 .done-all-button:not(:disabled) {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.74),
-    0 12px 30px rgba(37, 99, 235, 0.22),
-    0 0 36px rgba(14, 165, 233, 0.24);
+    0 12px 30px rgba(15, 118, 110, 0.2),
+    0 0 36px rgba(180, 83, 9, 0.16);
 }
 
 .glass-button--danger {
@@ -355,7 +356,7 @@
 
 .glass-button--ghost:not(:disabled):hover {
   background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.76), rgba(219, 234, 254, 0.56) 58%, rgba(255, 255, 255, 0.38));
+    linear-gradient(145deg, rgba(255, 255, 255, 0.76), rgba(204, 251, 241, 0.48) 58%, rgba(255, 255, 255, 0.38));
   color: var(--text-strong);
 }
 
@@ -390,13 +391,13 @@
 
 .glass-field:focus,
 .glass-button:focus-visible {
-  outline: 2px solid rgba(37, 99, 235, 0.24);
+  outline: 2px solid rgba(15, 118, 110, 0.22);
   outline-offset: 2px;
-  border-color: rgba(37, 99, 235, 0.42);
+  border-color: var(--accent-line);
   box-shadow:
     inset 0 1px 0 var(--glass-edge),
-    0 0 0 3px rgba(37, 99, 235, 0.08),
-    0 0 24px rgba(37, 99, 235, 0.14);
+    0 0 0 3px rgba(15, 118, 110, 0.08),
+    0 0 24px rgba(15, 118, 110, 0.13);
 }
 
 .sidebar,
@@ -411,7 +412,7 @@
 .modal,
 .modal-list {
   scrollbar-width: thin;
-  scrollbar-color: rgba(37, 99, 235, 0.34) rgba(255, 255, 255, 0.22);
+  scrollbar-color: rgba(15, 118, 110, 0.34) rgba(255, 255, 255, 0.22);
 }
 
 .sidebar::-webkit-scrollbar,
@@ -442,7 +443,7 @@
 .modal-list::-webkit-scrollbar-thumb {
   border: 2px solid rgba(255, 255, 255, 0.38);
   border-radius: 999px;
-  background: linear-gradient(180deg, rgba(37, 99, 235, 0.46), rgba(20, 184, 166, 0.38));
+  background: linear-gradient(180deg, rgba(15, 118, 110, 0.44), rgba(180, 83, 9, 0.24));
 }
 
 .project-item,
@@ -686,8 +687,27 @@
 }
 
 .project-item.active {
-  border-color: rgba(37, 99, 235, 0.42);
-  background: rgba(219, 234, 254, 0.68);
+  border-color: rgba(15, 118, 110, 0.54);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.9), rgba(204, 251, 241, 0.64) 58%, rgba(255, 251, 235, 0.5));
+  box-shadow:
+    inset 3px 0 0 var(--accent),
+    inset 0 1px 0 var(--glass-edge),
+    0 10px 24px rgba(15, 118, 110, 0.14),
+    0 2px 8px rgba(15, 23, 42, 0.08);
+}
+
+.project-item.active .project-name {
+  color: var(--accent-strong);
+  font-weight: 850;
+}
+
+.project-item.active .meta {
+  color: var(--muted-strong);
+}
+
+.project-item.active .project-detail-button {
+  color: var(--accent-strong);
 }
 
 .project-item--running {
@@ -838,8 +858,8 @@
 }
 
 .prompt-dropzone.dragging {
-  border-color: rgba(37, 99, 235, 0.42);
-  background: rgba(219, 234, 254, 0.34);
+  border-color: var(--accent-line);
+  background: rgba(204, 251, 241, 0.34);
   padding: 8px;
 }
 
@@ -848,9 +868,9 @@
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  border: 1px solid rgba(37, 99, 235, 0.2);
+  border: 1px solid rgba(15, 118, 110, 0.2);
   border-radius: 8px;
-  background: rgba(219, 234, 254, 0.56);
+  background: rgba(204, 251, 241, 0.5);
   color: var(--text-strong);
   padding: 8px 10px;
   font-size: 12px;
@@ -1090,8 +1110,8 @@
 }
 
 .selected-folder--active {
-  border-color: rgba(37, 99, 235, 0.32);
-  background: rgba(219, 234, 254, 0.58);
+  border-color: var(--accent-line);
+  background: rgba(204, 251, 241, 0.52);
 }
 
 .selected-folder-label {
@@ -1379,9 +1399,9 @@
 }
 
 .workspace-tabs button.active {
-  background: linear-gradient(145deg, rgba(219, 234, 254, 0.84), rgba(255, 255, 255, 0.54));
+  background: linear-gradient(145deg, rgba(204, 251, 241, 0.72), rgba(255, 255, 255, 0.54));
   color: var(--text-strong);
-  box-shadow: inset 0 1px 0 var(--glass-edge), 0 3px 10px rgba(37, 99, 235, 0.12);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 3px 10px rgba(15, 118, 110, 0.1);
 }
 
 .queue-workbench {
@@ -1458,7 +1478,7 @@
 }
 
 .done-all-button {
-  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.22);
+  box-shadow: 0 8px 18px rgba(15, 118, 110, 0.18);
 }
 
 .request-group {
