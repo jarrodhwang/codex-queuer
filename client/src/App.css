@@ -37,8 +37,19 @@
 }
 
 .right-rail {
+  height: 100vh;
+  height: 100svh;
+  min-height: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
   border-left: 1px solid var(--line);
+  overflow: hidden;
   padding: 16px;
+}
+
+.right-rail > .section-header {
+  flex: 0 0 auto;
 }
 
 .main-surface {
@@ -120,6 +131,19 @@
 .history-list,
 .tree-list {
   gap: 10px;
+}
+
+.directory-tree {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.directory-tree > .tree-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .form-grid.two {
@@ -1651,6 +1675,17 @@
   gap: 7px;
 }
 
+.request-body-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.request-body-header .model-chip-row {
+  justify-content: flex-end;
+}
+
 .request-body-scroll,
 .completion-result-box {
   overflow: auto;
@@ -1957,10 +1992,12 @@
 }
 
 .git-panel {
-  min-height: calc(100vh - 74px);
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  overflow: auto;
 }
 
 .git-panel-head,
@@ -2870,12 +2907,13 @@
 }
 
 @media (max-width: 760px) {
-  .queue-detail-header-compact {
+  .request-body-header {
     grid-template-columns: 1fr;
+    align-items: start;
   }
 
-  .queue-detail-header-compact .status-badge {
-    justify-self: start;
+  .request-body-header .model-chip-row {
+    justify-content: flex-start;
   }
 }
 

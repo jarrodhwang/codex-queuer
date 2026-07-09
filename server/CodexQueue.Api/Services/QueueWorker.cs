@@ -41,6 +41,7 @@ public sealed class QueueWorker(
     private static readonly Regex RetryAfterDateRegex = new(@"(?i)(?:retry[-_\s]*after\s*[:=]\s*)([^;\n\r]+)", RegexOptions.Compiled);
     private static readonly Regex UsageLimitKeywordRegex = new(@"(?i)(rate\s*-?\s*limit|quota|throttle|too\s+many\s+requests|429|rate\s*limit|usage\s+limit)", RegexOptions.Compiled);
     private static readonly Regex ModelRegex = new(@"(?i)(gpt-[a-z0-9._-]+)", RegexOptions.Compiled);
+    private static readonly Regex CommitCreatedOutputRegex = new(@"(?im)(Commit created:|Created commit\b|commit created\b|\[[^\]\r\n]+\s+[0-9a-f]{7,40}\])", RegexOptions.Compiled);
     private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _activeRequests = new();
     private readonly SemaphoreSlim _processLock = new(1, 1);
     private DateTimeOffset? _lastHeartbeat;
@@ -413,6 +414,11 @@ public sealed class QueueWorker(
             {
                 prompt += Environment.NewLine + Environment.NewLine + attachments.PromptSection;
             }
+
+            var beforeCommitHead = request.GenerateCommit && !request.SeparateCommitSession
+                ? await ReadGitHeadAsync(machine, projectPath, cancellationToken)
+                : null;
+
             var result = await runner.RunCodexAsync(
                 machine,
                 projectPath,
@@ -431,16 +437,20 @@ public sealed class QueueWorker(
                 return false;
             }
 
-            if (result.Success && request.GenerateCommit && !request.SeparateCommitSession && !CommitOutputClaimsCreated(result.Output))
+            if (result.Success && request.GenerateCommit && !request.SeparateCommitSession)
             {
-                result = await RunDeterministicCommitFallbackAsync(
-                    request,
-                    run,
-                    machine,
-                    projectPath,
-                    result,
-                    "Request run did not report a created commit; running deterministic git commit fallback.",
-                    cancellationToken);
+                result = await MarkCommitCreatedIfHeadChangedAsync(run, machine, projectPath, result, beforeCommitHead, cancellationToken);
+                if (!CommitOutputClaimsCreated(result.Output))
+                {
+                    result = await RunDeterministicCommitFallbackAsync(
+                        request,
+                        run,
+                        machine,
+                        projectPath,
+                        result,
+                        "Request run did not report a created commit; running deterministic git commit fallback.",
+                        cancellationToken);
+                }
             }
 
             await CompleteRunAsync(requestId, run.Id, kind, result, cancellationToken);
@@ -465,6 +475,7 @@ public sealed class QueueWorker(
         string projectPath,
         CancellationToken cancellationToken)
     {
+        var beforeCommitHead = await ReadGitHeadAsync(machine, projectPath, cancellationToken);
         var codexResult = await runner.RunCodexAsync(
             machine,
             projectPath,
@@ -477,6 +488,7 @@ public sealed class QueueWorker(
             chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
             cancellationToken);
 
+        codexResult = await MarkCommitCreatedIfHeadChangedAsync(run, machine, projectPath, codexResult, beforeCommitHead, cancellationToken);
         if (CommitOutputClaimsCreated(codexResult.Output))
         {
             return codexResult;
@@ -593,6 +605,49 @@ public sealed class QueueWorker(
         }
 
         return BuildCommitMessage(request);
+    }
+
+    private async Task<CommandResult> MarkCommitCreatedIfHeadChangedAsync(
+        CodexRun run,
+        TargetMachine machine,
+        string projectPath,
+        CommandResult result,
+        string? beforeHead,
+        CancellationToken cancellationToken)
+    {
+        if (!result.Success || string.IsNullOrWhiteSpace(beforeHead) || CommitOutputClaimsCreated(result.Output))
+        {
+            return result;
+        }
+
+        var afterHead = await ReadGitHeadAsync(machine, projectPath, cancellationToken);
+        if (string.IsNullOrWhiteSpace(afterHead) || string.Equals(beforeHead, afterHead, StringComparison.OrdinalIgnoreCase))
+        {
+            return result;
+        }
+
+        var marker = Environment.NewLine + "Commit created:" + Environment.NewLine + afterHead + Environment.NewLine;
+        await AppendOutputAsync(run.Id, marker, CancellationToken.None);
+        return result with { Output = result.Output.TrimEnd() + marker };
+    }
+
+    private async Task<string?> ReadGitHeadAsync(TargetMachine machine, string projectPath, CancellationToken cancellationToken)
+    {
+        var result = await runner.RunShellAsync(
+            machine,
+            projectPath,
+            "git rev-parse HEAD",
+            _ => Task.CompletedTask,
+            cancellationToken);
+
+        if (!result.Success)
+        {
+            return null;
+        }
+
+        return result.Output
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .LastOrDefault(line => line.Length == 40 && line.All(IsHex));
     }
 
     private static string? ExtractCommitMessageFromOutput(string output)
@@ -1065,7 +1120,7 @@ public sealed class QueueWorker(
             request.Status = result.Success ? QueueStatus.Succeeded : QueueStatus.Failed;
             request.Error = result.Success ? null : run.Error;
             request.Summary = LastUsefulLine(result.Output);
-            if (result.Output.Contains("Commit created:", StringComparison.OrdinalIgnoreCase))
+            if (CommitOutputClaimsCreated(result.Output))
             {
                 await PopulateCommitMetadataAsync(db, request, run, cancellationToken);
             }
@@ -1076,7 +1131,7 @@ public sealed class QueueWorker(
             request.Status = result.Success ? QueueStatus.Succeeded : QueueStatus.Failed;
             request.Error = result.Success ? null : run.Error;
             request.Summary = LastUsefulLine(result.Output);
-            if (result.Success && request.GenerateCommit && result.Output.Contains("Commit created:", StringComparison.OrdinalIgnoreCase))
+            if (result.Success && request.GenerateCommit && CommitOutputClaimsCreated(result.Output))
             {
                 await PopulateCommitMetadataAsync(db, request, run, cancellationToken);
             }
@@ -1677,7 +1732,10 @@ public sealed class QueueWorker(
     }
 
     private static bool CommitOutputClaimsCreated(string output) =>
-        output.Contains("Commit created:", StringComparison.OrdinalIgnoreCase);
+        CommitCreatedOutputRegex.IsMatch(output);
+
+    private static bool IsHex(char value) =>
+        value is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F';
 
     private static string BuildRequestPrompt(CodexRequest request)
     {
@@ -1699,7 +1757,8 @@ public sealed class QueueWorker(
         return request.Prompt.TrimEnd()
             + """
 
-            Create a git commit after completing the requested changes if there are actual changes.
+            Create commit after completing the requested changes if there are actual changes.
+            Use git to include all relevant changed files in that commit.
             """;
     }
 
@@ -1707,7 +1766,7 @@ public sealed class QueueWorker(
         """
         You are running after a separate Codex implementation session.
 
-        Inspect all current git changes, create a concise commit message from those changes, and commit all changes in the current repository only if there are actual changes.
+        Review all current git changes, create a concise commit message from those changes, and create commit for all changes in the current repository only if there are actual changes.
         Look at the diff and status first, then derive the message from what changed.
         Do not use any user-facing request sentence as the commit message; derive it from the file changes.
         Do not ask for clarification and do not wait for further input.
@@ -1767,7 +1826,155 @@ public sealed class QueueWorker(
     private static string TrimOutput(string value) =>
         value.Length <= MaxStoredOutput ? value : value[^MaxStoredOutput..];
 
-    private static string? LastUsefulLine(string output) =>
-        output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .LastOrDefault();
+    private static string? LastUsefulLine(string output)
+    {
+        string? lastPlainText = null;
+        string? lastAssistantText = null;
+
+        foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var eventText = line.StartsWith("data:", StringComparison.OrdinalIgnoreCase)
+                ? line["data:".Length..].Trim()
+                : line;
+
+            if (TryReadCodexEvent(eventText, out var eventJson))
+            {
+                using (eventJson)
+                {
+                    if (TryExtractAssistantText(eventJson.RootElement, out var assistantText))
+                    {
+                        lastAssistantText = assistantText;
+                    }
+
+                    if (!IsTelemetryCompletionEvent(eventJson.RootElement))
+                    {
+                        lastPlainText = line;
+                    }
+                }
+
+                continue;
+            }
+
+            if (!line.StartsWith("$ ", StringComparison.Ordinal))
+            {
+                lastPlainText = line;
+            }
+        }
+
+        return lastAssistantText ?? lastPlainText;
+    }
+
+    private static bool TryReadCodexEvent(string line, out JsonDocument document)
+    {
+        document = null!;
+        try
+        {
+            document = JsonDocument.Parse(line);
+            if (document.RootElement.ValueKind == JsonValueKind.Object)
+            {
+                return true;
+            }
+
+            document.Dispose();
+            document = null!;
+            return false;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryExtractAssistantText(JsonElement root, out string? text)
+    {
+        text = null;
+        var item = root.TryGetProperty("item", out var itemElement) && itemElement.ValueKind == JsonValueKind.Object
+            ? itemElement
+            : root;
+
+        var role = ReadString(item, "role");
+        var eventType = ReadString(root, "type");
+        var itemType = ReadString(item, "type");
+        var looksLikeCompletedMessage = IsCompletedType(eventType) && string.Equals(itemType, "message", StringComparison.OrdinalIgnoreCase);
+        if (!string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase) && !looksLikeCompletedMessage)
+        {
+            return false;
+        }
+
+        text = ReadContentText(item)
+            ?? ReadString(item, "message")
+            ?? ReadString(item, "text")
+            ?? ReadString(root, "message")
+            ?? ReadString(root, "text");
+
+        text = string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+        return text is not null;
+    }
+
+    private static string? ReadContentText(JsonElement item)
+    {
+        if (!item.TryGetProperty("content", out var content))
+        {
+            return null;
+        }
+
+        if (content.ValueKind == JsonValueKind.String)
+        {
+            return content.GetString();
+        }
+
+        if (content.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var parts = content.EnumerateArray()
+            .Select(ReadContentPartText)
+            .Where(part => !string.IsNullOrWhiteSpace(part))
+            .Select(part => part!.Trim())
+            .ToArray();
+
+        return parts.Length > 0 ? string.Join(Environment.NewLine + Environment.NewLine, parts) : null;
+    }
+
+    private static string? ReadContentPartText(JsonElement part)
+    {
+        if (part.ValueKind == JsonValueKind.String)
+        {
+            return part.GetString();
+        }
+
+        if (part.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        return ReadString(part, "text") ?? ReadString(part, "content") ?? ReadString(part, "message");
+    }
+
+    private static bool IsTelemetryCompletionEvent(JsonElement root)
+    {
+        var type = ReadString(root, "type");
+        if (!string.Equals(type, "turn.completed", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(type, "turn_completed", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(type, "turn-completed", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return !TryExtractAssistantText(root, out _)
+               && (root.TryGetProperty("usage", out _) || root.TryGetProperty("token_usage", out _));
+    }
+
+    private static bool IsCompletedType(string? type) =>
+        !string.IsNullOrWhiteSpace(type)
+        && (type.EndsWith(".completed", StringComparison.OrdinalIgnoreCase)
+            || type.EndsWith("_completed", StringComparison.OrdinalIgnoreCase)
+            || type.EndsWith("-completed", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(type, "completed", StringComparison.OrdinalIgnoreCase));
+
+    private static string? ReadString(JsonElement element, string propertyName) =>
+        element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
 }

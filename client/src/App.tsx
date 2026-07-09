@@ -2845,6 +2845,144 @@ function latestRunWithCommitMetadata(runs: readonly CodexRun[]) {
   return latestRunByPredicate(runs, (run) => Boolean(run.commitSha || run.commitMessage))
 }
 
+function completionMessageForRequest(request: CodexRequest) {
+  const requestRun = latestRunOfKind(request.runs, 'Request')
+  const runMessage = requestRun ? completionMessageFromOutput(requestRun.output) : null
+  if (runMessage) {
+    return runMessage
+  }
+
+  for (const run of [...request.runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt))) {
+    const message = completionMessageFromOutput(run.output)
+    if (message) {
+      return message
+    }
+  }
+
+  return cleanCompletionFallback(request.summary)
+}
+
+function completionMessageFromOutput(output: string) {
+  const events = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => tryParseJson(line.startsWith('data:') ? line.slice(5).trim() : line))
+    .filter(isRecord)
+
+  if (events.length === 0) {
+    return null
+  }
+
+  const lastTurnCompletedIndex = findLastIndex(events, (event) => isTurnCompletedEvent(event))
+  const beforeTurnCompleted = lastTurnCompletedIndex >= 0 ? events.slice(0, lastTurnCompletedIndex) : events
+
+  for (let index = beforeTurnCompleted.length - 1; index >= 0; index -= 1) {
+    const message = assistantMessageFromEvent(beforeTurnCompleted[index])
+    if (message) {
+      return message
+    }
+  }
+
+  return null
+}
+
+function assistantMessageFromEvent(event: Record<string, unknown>): string | null {
+  const item = isRecord(event.item) ? event.item : event
+  const type = stringValue(event.type)
+  const itemType = stringValue(item.type)
+  const role = stringValue(item.role)
+  const looksLikeCompletedMessage = isCompletedType(type) && itemType === 'message'
+  const looksLikeAssistantMessage = role === 'assistant' || looksLikeCompletedMessage
+
+  if (!looksLikeAssistantMessage) {
+    return null
+  }
+
+  const message = textFromContent(item.content)
+    ?? stringValue(item.message)
+    ?? stringValue(item.text)
+    ?? stringValue(event.message)
+    ?? stringValue(event.text)
+
+  return message?.trim() || null
+}
+
+function textFromContent(content: unknown): string | undefined {
+  if (typeof content === 'string') {
+    return content.trim() || undefined
+  }
+
+  if (!Array.isArray(content)) {
+    return undefined
+  }
+
+  const parts = content
+    .map((part) => {
+      if (typeof part === 'string') {
+        return part
+      }
+
+      if (!isRecord(part)) {
+        return ''
+      }
+
+      return stringValue(part.text) ?? stringValue(part.content) ?? stringValue(part.message) ?? ''
+    })
+    .map((part) => part.trim())
+    .filter(Boolean)
+
+  return parts.length > 0 ? parts.join('\n\n') : undefined
+}
+
+function cleanCompletionFallback(summary?: string | null) {
+  const value = summary?.trim()
+  if (!value || value.startsWith('$ ')) {
+    return null
+  }
+
+  const parsed = tryParseJson(value)
+  if (isRecord(parsed)) {
+    if (isTelemetryCompletionEvent(parsed)) {
+      return null
+    }
+
+    return assistantMessageFromEvent(parsed) ?? textFromUnknownJson(parsed) ?? value
+  }
+
+  return value
+}
+
+function isCompletedType(type?: string) {
+  return Boolean(type && /(^|[._-])completed$/i.test(type))
+}
+
+function isTurnCompletedType(type?: string) {
+  return Boolean(type && /^turn[._-]completed$/i.test(type))
+}
+
+function isTurnCompletedEvent(event: Record<string, unknown>) {
+  return isTurnCompletedType(stringValue(event.type))
+}
+
+function isTelemetryCompletionEvent(event: Record<string, unknown>) {
+  if (!isTurnCompletedEvent(event)) {
+    return false
+  }
+
+  return !assistantMessageFromEvent(event) && (isRecord(event.usage) || isRecord(event.token_usage) || 'usage' in event || 'token_usage' in event)
+}
+
+function findLastIndex<T>(items: readonly T[], predicate: (item: T) => boolean) {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (predicate(items[index])) {
+      return index
+    }
+  }
+
+  return -1
+}
+
 function formatEventType(value: string) {
   return value
     .replace(/^item\./, '')
@@ -2879,6 +3017,8 @@ function textFromUnknownJson(value: unknown): string | undefined {
 
 function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: number }) {
   const separateCommitRun = request ? latestRunOfKind(request.runs, 'Commit') : undefined
+  const completionMessage = request?.status === 'Succeeded' ? completionMessageForRequest(request) : null
+  const showRunDetails = !completionMessage
 
   if (!request) {
     return (
@@ -2890,16 +3030,12 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
 
   return (
     <aside className="queue-detail-panel queue-detail-panel-compact" aria-label="Selected request details">
-      <div className="queue-detail-header queue-detail-header-compact">
-        <div className="queue-detail-heading">
-          <div className="queue-detail-compact-label">Selected request</div>
-        </div>
-        <StatusBadge status={request.status} busy={request.status === 'Running'} />
-      </div>
-
       <div className="detail-expanded-region">
         <div className="queue-detail-body">
-          <div className="section-kicker">Request body</div>
+          <div className="request-body-header">
+            <div className="section-kicker">Request body</div>
+            <ModelChips model={request.model} effort={request.modelEffort} speed={request.modelSpeed} />
+          </div>
           {request.attachments.length > 0 && (
             <div className="request-attachments">
               {request.attachments.map((attachment, index) => (
@@ -2914,7 +3050,20 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
           </div>
         </div>
 
-        {request.runs.map((run) => (
+        {completionMessage && (
+          <div className="completion-summary">
+            <div className="completion-summary-head">
+              <div>
+                <div className="completion-title">Completed</div>
+                <div className="meta">{request.finishedAt ? formatDate(request.finishedAt) : 'Succeeded'}</div>
+              </div>
+              <StatusBadge status="Succeeded" />
+            </div>
+            <div className="completion-result-box">{completionMessage}</div>
+          </div>
+        )}
+
+        {showRunDetails && request.runs.map((run) => (
           <div key={run.id} className="run-detail-card">
             <div className="run-detail-head">
               <div className="run-title-stack">
@@ -2951,7 +3100,7 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
           </div>
         ))}
 
-        {request.runs.length === 0 && (
+        {showRunDetails && request.runs.length === 0 && (
           <div className="pending-run-row">
             <div className="run-title-stack">
               <strong>Request</strong>
@@ -2961,7 +3110,7 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
           </div>
         )}
 
-        {request.generateCommit && request.separateCommitSession && !separateCommitRun && (
+        {showRunDetails && request.generateCommit && request.separateCommitSession && !separateCommitRun && (
           <div className="pending-run-row">
             <div className="run-title-stack">
               <strong>Commit</strong>
@@ -3680,7 +3829,7 @@ function DirectoryTree({
   )
 
   return (
-    <div className="section-stack">
+    <div className="section-stack directory-tree">
       <div className="meta truncate">{project.path}</div>
       {renderEntries()}
     </div>
