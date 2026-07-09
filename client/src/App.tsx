@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ClipboardEvent, DragEvent, FormEvent, ReactNode } from 'react'
 import { createPortal, flushSync } from 'react-dom'
 import {
+  ArrowDown,
+  ArrowUp,
   Check,
   ChevronDown,
   ChevronRight,
@@ -105,6 +107,25 @@ const emptyMachine: SaveMachineRequest = {
   sshKeyPath: '',
   workingRoot: '',
   platform: 'Auto',
+}
+
+function useMediaQuery(query: string) {
+  const getMatches = () => typeof window !== 'undefined' && window.matchMedia(query).matches
+  const [matches, setMatches] = useState(getMatches)
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    const mediaQuery = window.matchMedia(query)
+    const updateMatches = () => setMatches(mediaQuery.matches)
+    updateMatches()
+    mediaQuery.addEventListener('change', updateMatches)
+    return () => mediaQuery.removeEventListener('change', updateMatches)
+  }, [query])
+
+  return matches
 }
 
 function projectSavePayload(project: Project, overrides: Partial<SaveProjectRequest> = {}): SaveProjectRequest {
@@ -2553,7 +2574,19 @@ function QueueList({
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null)
   const [draggedRequestId, setDraggedRequestId] = useState<string | null>(null)
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
+  const [reorderingRequestId, setReorderingRequestId] = useState<string | null>(null)
+  const mobileDragReorder = useMediaQuery('(max-width: 820px)')
   const selectedRequest = requests.find((request) => request.id === selectedRequestId) ?? requests[0]
+  const queuedRequestIds = useMemo(
+    () => requests
+      .filter((request) => request.status === 'Queued' && !isOptimisticRequest(request.id))
+      .map((request) => request.id),
+    [requests],
+  )
+  const queuedPositionById = useMemo(
+    () => new Map(queuedRequestIds.map((id, index) => [id, index])),
+    [queuedRequestIds],
+  )
   const succeededRequestIds = requests
     .filter((request) => request.status === 'Succeeded' && !request.archivedAt && !request.deletedAt)
     .map((request) => request.id)
@@ -2569,6 +2602,28 @@ function QueueList({
     }
   }, [requests, selectedRequestId])
 
+  const submitQueuedOrder = async (requestIds: string[], movedRequestId: string) => {
+    setReorderingRequestId(movedRequestId)
+    try {
+      await onReorder(requestIds)
+    } finally {
+      setReorderingRequestId(null)
+    }
+  }
+
+  const moveQueuedRequest = async (requestId: string, direction: -1 | 1) => {
+    const fromIndex = queuedRequestIds.indexOf(requestId)
+    const toIndex = fromIndex + direction
+    if (fromIndex === -1 || toIndex < 0 || toIndex >= queuedRequestIds.length || reorderingRequestId) {
+      return
+    }
+
+    const nextIds = [...queuedRequestIds]
+    const [movedId] = nextIds.splice(fromIndex, 1)
+    nextIds.splice(toIndex, 0, movedId)
+    await submitQueuedOrder(nextIds, requestId)
+  }
+
   const reorderQueuedRequests = async (targetRequestId: string) => {
     if (!draggedRequestId || draggedRequestId === targetRequestId) {
       setDraggedRequestId(null)
@@ -2576,21 +2631,20 @@ function QueueList({
       return
     }
 
-    const queuedIds = requests.filter((request) => request.status === 'Queued').map((request) => request.id)
-    const fromIndex = queuedIds.indexOf(draggedRequestId)
-    const toIndex = queuedIds.indexOf(targetRequestId)
+    const fromIndex = queuedRequestIds.indexOf(draggedRequestId)
+    const toIndex = queuedRequestIds.indexOf(targetRequestId)
     if (fromIndex === -1 || toIndex === -1) {
       setDraggedRequestId(null)
       setDropTargetId(null)
       return
     }
 
-    const nextIds = [...queuedIds]
+    const nextIds = [...queuedRequestIds]
     const [movedId] = nextIds.splice(fromIndex, 1)
     nextIds.splice(toIndex, 0, movedId)
     setDraggedRequestId(null)
     setDropTargetId(null)
-    await onReorder(nextIds)
+    await submitQueuedOrder(nextIds, draggedRequestId)
   }
 
   return (
@@ -2623,22 +2677,30 @@ function QueueList({
               onArchive={onArchive}
               onEdit={onEdit}
               onDelete={onDelete}
+              canMoveUp={(queuedPositionById.get(request.id) ?? -1) > 0}
+              canMoveDown={(queuedPositionById.get(request.id) ?? queuedRequestIds.length) < queuedRequestIds.length - 1}
+              reorderDisabled={reorderingRequestId !== null}
+              canDragReorder={mobileDragReorder && request.status === 'Queued' && !isOptimisticRequest(request.id) && reorderingRequestId === null}
+              onMoveUp={() => { void moveQueuedRequest(request.id, -1).catch(() => undefined) }}
+              onMoveDown={() => { void moveQueuedRequest(request.id, 1).catch(() => undefined) }}
               dragging={request.id === draggedRequestId}
               dragOver={request.id === dropTargetId}
-              onDragStart={() => {
-                if (request.status === 'Queued') {
+              onDragStart={(event) => {
+                if (request.status === 'Queued' && mobileDragReorder && !reorderingRequestId) {
+                  event.dataTransfer.effectAllowed = 'move'
+                  event.dataTransfer.setData('text/plain', request.id)
                   setDraggedRequestId(request.id)
                 }
               }}
               onDragOver={(event) => {
-                if (draggedRequestId && request.status === 'Queued') {
+                if (draggedRequestId && request.status === 'Queued' && mobileDragReorder) {
                   event.preventDefault()
                   setDropTargetId(request.id)
                 }
               }}
               onDrop={() => {
-                if (request.status === 'Queued') {
-                  void reorderQueuedRequests(request.id)
+                if (request.status === 'Queued' && mobileDragReorder) {
+                  void reorderQueuedRequests(request.id).catch(() => undefined)
                 }
               }}
               onDragEnd={() => {
@@ -2665,6 +2727,12 @@ function RequestCard({
   onArchive,
   onEdit,
   onDelete,
+  canMoveUp,
+  canMoveDown,
+  reorderDisabled,
+  canDragReorder,
+  onMoveUp,
+  onMoveDown,
   dragging,
   dragOver,
   onDragStart,
@@ -2682,9 +2750,15 @@ function RequestCard({
   onArchive: (id: string) => Promise<void>
   onEdit: (request: CodexRequest) => void
   onDelete: (id: string) => void
+  canMoveUp: boolean
+  canMoveDown: boolean
+  reorderDisabled: boolean
+  canDragReorder: boolean
+  onMoveUp: () => void
+  onMoveDown: () => void
   dragging: boolean
   dragOver: boolean
-  onDragStart: () => void
+  onDragStart: (event: DragEvent<HTMLElement>) => void
   onDragOver: (event: DragEvent<HTMLElement>) => void
   onDrop: () => void
   onDragEnd: () => void
@@ -2706,12 +2780,9 @@ function RequestCard({
       className={`request-card request-card--${request.status.toLowerCase()} ${selected ? 'active' : ''} ${dragging ? 'dragging' : ''} ${dragOver ? 'drag-over' : ''}`}
       role="button"
       tabIndex={0}
-      draggable={editable}
       onClick={onSelect}
-      onDragStart={onDragStart}
-      onDragOver={onDragOver}
-      onDrop={onDrop}
-      onDragEnd={onDragEnd}
+      onDragOver={canDragReorder ? onDragOver : undefined}
+      onDrop={canDragReorder ? onDrop : undefined}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault()
@@ -2720,8 +2791,22 @@ function RequestCard({
       }}
     >
       <div className="request-head">
-        <div className={`queue-index ${editable ? 'queue-index--draggable' : ''}`} aria-label={`Queue position ${queueNumber}`}>
-          {editable ? <GripVertical size={14} /> : queueNumber}
+        <div className="queue-position-cell">
+          <div className={`queue-index ${editable ? 'queue-index--desktop-position' : ''}`} aria-label={`Queue position ${queueNumber}`}>
+            {queueNumber}
+          </div>
+          {editable && (
+            <div
+              className={`queue-index queue-index--mobile-drag ${canDragReorder ? '' : 'queue-index--disabled'}`}
+              aria-label={`Drag queue item ${queueNumber}`}
+              draggable={canDragReorder}
+              onClick={(event) => event.stopPropagation()}
+              onDragStart={canDragReorder ? onDragStart : undefined}
+              onDragEnd={canDragReorder ? onDragEnd : undefined}
+            >
+              <GripVertical size={14} />
+            </div>
+          )}
         </div>
         <div className="request-card-main">
           <div className="request-title-row">
@@ -2744,6 +2829,38 @@ function RequestCard({
           </div>
         </div>
         <div className="request-actions">
+          {editable && (
+            <div className="request-reorder-actions" aria-label="Move queued request">
+              <GlassButton
+                variant="secondary"
+                size="icon"
+                type="button"
+                disabled={!canMoveUp || reorderDisabled}
+                title="Move up"
+                aria-label={`Move queue item ${queueNumber} up`}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onMoveUp()
+                }}
+              >
+                <ArrowUp size={14} />
+              </GlassButton>
+              <GlassButton
+                variant="secondary"
+                size="icon"
+                type="button"
+                disabled={!canMoveDown || reorderDisabled}
+                title="Move down"
+                aria-label={`Move queue item ${queueNumber} down`}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onMoveDown()
+                }}
+              >
+                <ArrowDown size={14} />
+              </GlassButton>
+            </div>
+          )}
           {resumable && (
             <GlassButton
               variant="secondary"

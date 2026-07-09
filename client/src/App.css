@@ -1497,6 +1497,16 @@
   color: var(--success-strong);
 }
 
+.queue-position-cell {
+  width: 28px;
+  height: 28px;
+  display: grid;
+}
+
+.queue-position-cell > .queue-index {
+  grid-area: 1 / 1;
+}
+
 .request-card--running {
   border-color: rgba(37, 99, 235, 0.3);
   background: linear-gradient(145deg, rgba(239, 246, 255, 0.78), rgba(255, 255, 255, 0.44));
@@ -1534,10 +1544,20 @@
   font-weight: 850;
 }
 
-.queue-index--draggable {
+.queue-index--mobile-drag {
+  display: none;
   cursor: grab;
   color: #2563eb;
   background: rgba(219, 234, 254, 0.82);
+}
+
+.queue-index--mobile-drag:active {
+  cursor: grabbing;
+}
+
+.queue-index--disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
 }
 
 .request-card-main {
@@ -1569,6 +1589,12 @@
   display: flex;
   align-items: start;
   gap: 8px;
+}
+
+.request-reorder-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .request-actions .glass-button--icon {
@@ -3249,6 +3275,15 @@
     flex-wrap: wrap;
   }
 
+  .request-reorder-actions,
+  .queue-index--desktop-position {
+    display: none;
+  }
+
+  .queue-index--mobile-drag {
+    display: grid;
+  }
+
   .queue-workspace-stack {
     height: auto;
     overflow: visible;
@@ -3788,7 +3823,7 @@
 
 .project-queue-chip.running,
 .model-chip--model,
-.queue-index--draggable,
+.queue-index--mobile-drag,
 .git-status-chip,
 .workspace-tabs button.active {
   border-color: rgba(var(--theme-rgb), 0.44);
