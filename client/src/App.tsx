@@ -2567,11 +2567,19 @@ function ModelPicker({
 }) {
   const selectedOption = options.find((option) => option.model === value.model)
   const supportsPriority = selectedOption?.supportsPriority ?? false
+  const supportsUltra = supportsUltraEffort(value.model)
+  const selectedEffort = supportsUltra || value.effort !== 'ultra' ? value.effort : 'xhigh'
   const selectedModelValue = selectedOption ? value.model : 'custom'
   const dropdownOptions = useMemo(
     () => [...options.map((option) => ({ label: option.label, value: option.model })), { label: 'Custom', value: 'custom' }],
     [options],
   )
+
+  useEffect(() => {
+    if (!supportsUltra && value.effort === 'ultra') {
+      onChange({ ...value, effort: 'xhigh' })
+    }
+  }, [onChange, supportsUltra, value])
 
   return (
     <div className={`model-picker-grid ${disabled ? 'model-picker-grid--disabled' : ''}`} aria-disabled={disabled}>
@@ -2601,14 +2609,14 @@ function ModelPicker({
         <SegmentedRadio
           label="Effort"
           name={`${label}-effort`}
-          value={value.effort}
+          value={selectedEffort}
           disabled={disabled}
           options={[
             { label: 'Light', value: 'low' },
             { label: 'Medium', value: 'medium' },
             { label: 'High', value: 'high' },
             { label: 'XHigh', value: 'xhigh' },
-            { label: 'Ultra', value: 'ultra' },
+            ...(supportsUltra ? [{ label: 'Ultra', value: 'ultra' }] : []),
           ]}
           onChange={(effort) => onChange({ ...value, effort })}
         />
@@ -2628,6 +2636,10 @@ function ModelPicker({
       </div>
     </div>
   )
+}
+
+function supportsUltraEffort(model: string) {
+  return /^gpt-5\.6(?:$|[-.])/i.test(model.trim())
 }
 
 function SegmentedRadio({

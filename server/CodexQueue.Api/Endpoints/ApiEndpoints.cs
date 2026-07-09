@@ -174,10 +174,10 @@ public static class ApiEndpoints
                 Path = input.Path.Trim(),
                 MachineId = input.MachineId,
                 DefaultModel = NormalizeOptional(input.DefaultModel),
-                DefaultModelEffort = NormalizeEffort(input.DefaultModelEffort),
+                DefaultModelEffort = NormalizeEffort(input.DefaultModelEffort, input.DefaultModel),
                 DefaultModelSpeed = NormalizeOptionalSpeed(input.DefaultModelSpeed),
                 DefaultCommitModel = NormalizeOptional(input.DefaultCommitModel),
-                DefaultCommitModelEffort = NormalizeEffort(input.DefaultCommitModelEffort),
+                DefaultCommitModelEffort = NormalizeEffort(input.DefaultCommitModelEffort, input.DefaultCommitModel ?? input.DefaultModel),
                 DefaultCommitModelSpeed = NormalizeOptionalSpeed(input.DefaultCommitModelSpeed),
                 DefaultGenerateCommit = input.DefaultGenerateCommit ?? true,
                 DefaultSeparateCommitSession = input.DefaultSeparateCommitSession ?? false
@@ -210,10 +210,10 @@ public static class ApiEndpoints
             project.Path = input.Path.Trim();
             project.MachineId = input.MachineId;
             project.DefaultModel = NormalizeOptional(input.DefaultModel);
-            project.DefaultModelEffort = NormalizeEffort(input.DefaultModelEffort);
+            project.DefaultModelEffort = NormalizeEffort(input.DefaultModelEffort, input.DefaultModel);
             project.DefaultModelSpeed = NormalizeOptionalSpeed(input.DefaultModelSpeed);
             project.DefaultCommitModel = NormalizeOptional(input.DefaultCommitModel);
-            project.DefaultCommitModelEffort = NormalizeEffort(input.DefaultCommitModelEffort);
+            project.DefaultCommitModelEffort = NormalizeEffort(input.DefaultCommitModelEffort, input.DefaultCommitModel ?? input.DefaultModel);
             project.DefaultCommitModelSpeed = NormalizeOptionalSpeed(input.DefaultCommitModelSpeed);
             project.DefaultGenerateCommit = input.DefaultGenerateCommit ?? true;
             project.DefaultSeparateCommitSession = input.DefaultSeparateCommitSession ?? false;
@@ -401,7 +401,7 @@ public static class ApiEndpoints
                     project.Machine,
                     project.Path,
                     input.Model.Trim(),
-                    NormalizeEffort(input.ModelEffort),
+                    NormalizeEffort(input.ModelEffort, input.Model),
                     NormalizeOptionalSpeed(input.ModelSpeed),
                     null,
                     null,
@@ -501,7 +501,7 @@ public static class ApiEndpoints
                     project.Machine,
                     project.Path,
                     input.Model.Trim(),
-                    NormalizeEffort(input.ModelEffort),
+                    NormalizeEffort(input.ModelEffort, input.Model),
                     NormalizeOptionalSpeed(input.ModelSpeed),
                     null,
                     null,
@@ -653,12 +653,12 @@ public static class ApiEndpoints
                 Prompt = input.Prompt.Trim(),
                 AttachmentsJson = attachments.Length == 0 ? null : JsonSerializer.Serialize(attachments),
                 Model = input.Model.Trim(),
-                ModelEffort = NormalizeEffort(input.ModelEffort),
+                ModelEffort = NormalizeEffort(input.ModelEffort, input.Model),
                 ModelSpeed = NormalizeSpeed(input.ModelSpeed),
                 GenerateCommit = input.GenerateCommit,
                 SeparateCommitSession = input.GenerateCommit && input.SeparateCommitSession,
                 CommitModel = string.IsNullOrWhiteSpace(input.CommitModel) ? null : input.CommitModel.Trim(),
-                CommitModelEffort = NormalizeEffort(input.CommitModelEffort),
+                CommitModelEffort = NormalizeEffort(input.CommitModelEffort, input.CommitModel ?? input.Model),
                 CommitModelSpeed = NormalizeSpeed(input.CommitModelSpeed),
                 QueueOrder = await NextQueueOrderAsync(db, project.Id, cancellationToken),
                 Status = QueueStatus.Queued,
@@ -717,12 +717,12 @@ public static class ApiEndpoints
 
             request.Prompt = input.Prompt.Trim();
             request.Model = input.Model.Trim();
-            request.ModelEffort = NormalizeEffort(input.ModelEffort);
+            request.ModelEffort = NormalizeEffort(input.ModelEffort, input.Model);
             request.ModelSpeed = NormalizeSpeed(input.ModelSpeed);
             request.GenerateCommit = input.GenerateCommit;
             request.SeparateCommitSession = input.GenerateCommit && input.SeparateCommitSession;
             request.CommitModel = string.IsNullOrWhiteSpace(input.CommitModel) ? null : input.CommitModel.Trim();
-            request.CommitModelEffort = NormalizeEffort(input.CommitModelEffort);
+            request.CommitModelEffort = NormalizeEffort(input.CommitModelEffort, input.CommitModel ?? input.Model);
             request.CommitModelSpeed = NormalizeSpeed(input.CommitModelSpeed);
             request.Error = null;
             request.Summary = null;
@@ -969,7 +969,7 @@ public static class ApiEndpoints
         return null;
     }
 
-    private static string? NormalizeEffort(string? effort)
+    private static string? NormalizeEffort(string? effort, string? model)
     {
         if (string.IsNullOrWhiteSpace(effort))
         {
@@ -977,8 +977,16 @@ public static class ApiEndpoints
         }
 
         var normalized = effort.Trim().ToLowerInvariant();
+        if (normalized == "ultra" && !SupportsUltraEffort(model))
+        {
+            return "xhigh";
+        }
+
         return normalized is "low" or "medium" or "high" or "xhigh" or "ultra" ? normalized : null;
     }
+
+    private static bool SupportsUltraEffort(string? model) =>
+        !string.IsNullOrWhiteSpace(model) && System.Text.RegularExpressions.Regex.IsMatch(model.Trim(), @"^gpt-5\.6(?:$|[-.])", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
     private static string? NormalizeOptional(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
