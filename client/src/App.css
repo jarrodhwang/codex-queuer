@@ -36,6 +36,29 @@
   padding: 18px;
 }
 
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+}
+
+.app-brand-icon {
+  width: 32px;
+  height: 32px;
+  display: block;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+
+.app-brand-name {
+  min-width: 0;
+  color: var(--text-strong);
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
 .right-rail {
   height: 100vh;
   height: 100svh;

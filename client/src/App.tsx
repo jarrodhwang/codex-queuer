@@ -1008,6 +1008,11 @@ function LeftSidebar({
 
   return (
     <aside className="sidebar">
+      <div className="app-brand" aria-label="Codex Queue">
+        <img src="/app-icon.png" alt="" className="app-brand-icon" />
+        <span className="app-brand-name">Codex Queue</span>
+      </div>
+
       <GlassPanel>
         <div className="section-header">
           <h2>Projects</h2>
