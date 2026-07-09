@@ -3670,7 +3670,7 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
 
   return (
     <aside className="queue-detail-panel queue-detail-panel-compact" aria-label="Selected request details">
-      <div className="detail-expanded-region">
+      <div className={`detail-expanded-region ${completionMessage && !showRunDetails ? 'detail-expanded-region--completion-only' : ''}`}>
         <div className="queue-detail-body">
           <div className="request-body-header">
             <div className="section-kicker">Request body</div>
@@ -4190,12 +4190,13 @@ function GitPanel({
 
   const changeCount = status?.changes.length ?? 0
   const clean = status?.isClean ?? false
+  const gitStateLabel = clean ? 'Clean' : `${formatFileCount(changeCount)} changed`
 
   return (
     <div className="git-panel">
       <div className="git-panel-head">
         <div className="truncate">
-          <div className="meta truncate">{project.path}</div>
+          <div className="meta truncate" title={project.path}>{project.path}</div>
           <div className="git-branch-row">
             <GitBranch size={14} />
             <span className="truncate">{status?.branch ?? 'loading'}</span>
@@ -4206,6 +4207,13 @@ function GitPanel({
         </GlassButton>
       </div>
 
+      <div className="git-panel-summary" aria-label="Git working tree summary">
+        <span className={`git-state-pill ${clean ? 'git-state-pill--clean' : 'git-state-pill--dirty'}`}>
+          {gitStateLabel}
+        </span>
+        <span>{loading ? 'Refreshing...' : status ? 'Up to date' : 'Loading status'}</span>
+      </div>
+
       <section className="git-changes-section" aria-label="Git changes">
         <div className="run-output-head">
           <span>Git changes</span>
@@ -4214,12 +4222,12 @@ function GitPanel({
         <div className="git-change-list">
           {status?.changes.map((change) => (
             <div key={`${change.status}:${change.path}`} className="git-change-row">
-              <span className={`git-status-chip git-status-chip--${change.status}`}>{change.status}</span>
-              <span className="truncate" title={change.path}>{change.path}</span>
+              <span className={`git-status-chip git-status-chip--${statusClassName(change.status)}`}>{formatGitStatus(change.status)}</span>
+              <span className="git-file-path truncate" title={change.path}>{change.path}</span>
               <span className="git-stage-state">{formatGitStageState(change)}</span>
             </div>
           ))}
-          {!loading && status && status.changes.length === 0 && <div className="empty-state">No files differ from HEAD in this project path.</div>}
+          {!loading && status && status.changes.length === 0 && <div className="empty-state">Working tree is clean.</div>}
           {loading && !status && <div className="empty-state">Loading git changes...</div>}
         </div>
         {status?.diffStat && <GitDiffStat diffStat={status.diffStat} />}
@@ -4254,12 +4262,33 @@ function GitPanel({
 }
 
 function GitActionOutput({ output }: { output: string }) {
-  const lines = useMemo(() => output.replace(/\r/g, '').trimEnd().split('\n'), [output])
-  const succeeded = useMemo(() => gitActionSucceeded(output), [output])
+  const parsed = useMemo(() => parseGitActionOutput(output), [output])
+
+  if (parsed.succeeded) {
+    return (
+      <div className="git-action-card git-action-card--success" role="status" aria-label="Git commit result">
+        <div className="git-action-card-head">
+          <span className="git-action-icon"><Check size={14} /></span>
+          <span>{parsed.title}</span>
+          {parsed.sha && <code>{parsed.sha.slice(0, 12)}</code>}
+        </div>
+        {parsed.message && <div className="git-action-message">{parsed.message}</div>}
+        {parsed.changedFiles.length > 0 && (
+          <div className="git-action-files" aria-label="Committed files">
+            {parsed.changedFiles.slice(0, 4).map((file) => (
+              <span key={file} className="truncate" title={file}>{file}</span>
+            ))}
+            {parsed.changedFiles.length > 4 && <span>{parsed.changedFiles.length - 4} more</span>}
+          </div>
+        )}
+      </div>
+    )
+  }
 
   return (
-    <div className={`git-action-output ${succeeded ? 'git-action-output--success' : ''}`} role="log" aria-label="Git commit output">
-      {lines.map((line, index) => (
+    <div className="git-action-output" role="log" aria-label="Git commit output">
+      <div className="git-action-output-title">Commit details</div>
+      {parsed.lines.map((line, index) => (
         <code key={`${index}:${line}`} className={`git-action-line git-action-line--${gitActionLineKind(line)}`}>
           {line || ' '}
         </code>
@@ -4268,13 +4297,28 @@ function GitActionOutput({ output }: { output: string }) {
   )
 }
 
-function gitCommitSuccessMessage(result: { success: boolean; output: string }, fallback: string) {
+function gitCommitSuccessMessage(result: { success: boolean; output: string; commitSha?: string | null }, fallback: string) {
   if (!result.success) return result.output || 'Commit failed.'
-  return fallback
+  const message = gitCommitMessageFromOutput(result.output)
+  return [fallback, result.commitSha, message ? `Message: ${message}` : null].filter(Boolean).join('\n')
 }
 
 function gitActionSucceeded(output: string) {
   return /\b(commit (created|finished|succeeded)|git commit finished|codex commit finished)\b/i.test(output)
+}
+
+function parseGitActionOutput(output: string) {
+  const lines = output.replace(/\r/g, '').trimEnd().split('\n').filter((line) => line.trim())
+  const succeeded = gitActionSucceeded(output)
+  const sha = lines.find((line) => /^[0-9a-f]{7,40}$/i.test(line.trim()))?.trim()
+    ?? lines.map((line) => line.match(/\b[0-9a-f]{7,40}\b/i)?.[0]).find(Boolean)
+  const message = lines.map((line) => line.match(/^Message:\s*(.+)$/i)?.[1]?.trim()).find(Boolean)
+  const changedFiles = lines
+    .map((line) => line.match(/^[ MADRCU?!]{2}\s+(.+)$/)?.[1]?.trim())
+    .filter((path): path is string => Boolean(path))
+  const title = lines.find((line) => !/^[0-9a-f]{7,40}$/i.test(line.trim()) && !/^Message:/i.test(line)) ?? 'Git commit finished.'
+
+  return { lines, succeeded, sha, message, changedFiles, title }
 }
 
 function gitActionLineKind(line: string) {
@@ -4290,11 +4334,26 @@ function formatFileCount(count: number) {
   return `${count} ${count === 1 ? 'file' : 'files'}`
 }
 
+function formatGitStatus(status: string) {
+  return status
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function statusClassName(status: string) {
+  return status.toLowerCase().replace(/[^a-z0-9]+/g, '-')
+}
+
 function formatGitStageState(change: GitStatus['changes'][number]) {
-  if (change.staged && change.unstaged) return 'staged + unstaged'
-  if (change.staged) return 'staged'
-  if (change.unstaged) return 'unstaged'
-  return 'tracked'
+  if (change.staged && change.unstaged) return 'Staged + unstaged'
+  if (change.staged) return 'Staged'
+  if (change.unstaged) return 'Unstaged'
+  return 'Tracked'
+}
+
+function gitCommitMessageFromOutput(output: string) {
+  return output.replace(/\r/g, '').split('\n').map((line) => line.match(/^Message:\s*(.+)$/i)?.[1]?.trim()).find(Boolean)
 }
 
 type ParsedDiffStat = {
