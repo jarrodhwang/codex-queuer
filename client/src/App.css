@@ -54,6 +54,7 @@
 
 .main-surface {
   min-width: 0;
+  min-height: 0;
   padding: 18px;
   display: flex;
   flex-direction: column;
@@ -90,6 +91,7 @@
 
 .section-header h2,
 .section-header h3 {
+  min-width: 0;
   margin: 0;
   font-size: 13px;
   line-height: 1.2;
@@ -3159,7 +3161,7 @@
     position: fixed;
     inset: 0 0 0 auto;
     width: min(360px, 92vw);
-    z-index: 5;
+    z-index: 80;
     box-shadow: -16px 0 32px rgba(15, 23, 42, 0.18);
   }
 
@@ -3170,26 +3172,108 @@
 
 @media (max-width: 820px) {
   .app-shell {
-    display: flex;
-    flex-direction: column;
+    display: block;
+    min-height: 100svh;
   }
 
   .sidebar {
+    height: auto;
+    max-height: none;
     border-right: 0;
     border-bottom: 1px solid var(--line);
+    padding: 12px;
+    overflow: visible;
+  }
+
+  .sidebar > .section-header,
+  .section-header,
+  .row-between,
+  .project-overview,
+  .machine-manager-toolbar,
+  .machine-editor-head,
+  .machine-editor-actions,
+  .history-actions,
+  .history-row-actions,
+  .queue-header-actions {
+    flex-wrap: wrap;
+  }
+
+  .project-groups {
+    max-height: min(44svh, 420px);
+    overflow: auto;
+    padding-right: 2px;
+  }
+
+  .usage-sidebar {
+    margin-top: 0;
+  }
+
+  .main-surface {
+    padding: 12px;
+    gap: 12px;
+  }
+
+  .right-rail {
+    inset: 0;
+    width: 100%;
+    height: 100svh;
+    padding: 12px;
   }
 
   .composer-grid,
   .form-grid.two,
   .machine-manager,
-  .modal-split {
+  .modal-split,
+  .git-diff-summary {
     grid-template-columns: 1fr;
   }
 
   .composer-actions-row,
   .model-options-row,
-  .prompt-card-header {
+  .prompt-card-header,
+  .project-detail-summary,
+  .danger-zone {
     grid-template-columns: 1fr;
+  }
+
+  .project-overview {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .prompt-card-header {
+    align-items: stretch;
+  }
+
+  .workspace-tabs {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .workspace-tabs button {
+    justify-content: center;
+    padding: 0 8px;
+  }
+
+  .workspace-actions {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .workspace-actions .error-text {
+    flex: 1 0 100%;
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  .button-row,
+  .sidebar-actions,
+  .request-actions,
+  .history-row-actions,
+  .composer-actions-row .button-row {
+    flex-wrap: wrap;
   }
 
   .queue-workspace-stack {
@@ -3200,17 +3284,18 @@
   .queue-panel,
   .history-panel,
   .terminal-panel {
-    max-height: 72vh;
+    max-height: none;
+    overflow: visible;
   }
 
   .queue-workbench {
     grid-template-columns: 1fr;
-    overflow: auto;
+    overflow: visible;
   }
 
   .history-workbench {
     grid-template-columns: 1fr;
-    overflow: auto;
+    overflow: visible;
   }
 
   .queue-panel .request-list,
@@ -3218,7 +3303,7 @@
   .queue-panel .queue-detail-panel,
   .history-workbench .queue-detail-panel,
   .terminal-screen {
-    max-height: 38vh;
+    max-height: none;
   }
 
   .queue-panel .queue-detail-panel,
@@ -3226,13 +3311,142 @@
     height: auto;
   }
 
-  .workspace-actions {
-    justify-content: flex-start;
+  .queue-detail-panel {
+    position: static;
+    max-height: none;
+  }
+
+  .queue-panel .request-list,
+  .history-panel .history-list {
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .terminal-screen {
+    min-height: 52svh;
   }
 
   .request-head,
   .history-row {
     grid-template-columns: 1fr;
+  }
+
+  .request-actions,
+  .history-row-actions,
+  .queue-header-actions,
+  .history-actions {
+    justify-content: flex-start;
+  }
+
+  .machine-manager-list,
+  .machine-editor {
+    max-height: none;
+  }
+
+  .modal-backdrop {
+    align-items: stretch;
+    padding: 10px;
+  }
+
+  .modal {
+    width: 100%;
+    max-height: calc(100svh - 20px);
+    padding: 12px;
+  }
+
+  .folder-picker {
+    min-height: 240px;
+    max-height: 42svh;
+  }
+}
+
+@media (max-width: 520px) {
+  .main-surface {
+    padding: 10px;
+  }
+
+  .glass-panel {
+    padding: 12px;
+  }
+
+  .section-header {
+    align-items: flex-start;
+  }
+
+  .project-groups {
+    max-height: 36svh;
+  }
+
+  .workspace-tabs button {
+    gap: 5px;
+    font-size: 11px;
+    padding: 0 5px;
+  }
+
+  .composer-actions-row .button-row .glass-button,
+  .commit-toggle {
+    flex: 1 1 145px;
+    justify-content: center;
+  }
+
+  .request-actions .glass-button--sm {
+    flex: 1 1 118px;
+  }
+
+  .request-actions .glass-button--icon {
+    flex: 0 0 34px;
+  }
+
+  .request-title-row,
+  .completion-summary-head,
+  .run-detail-head,
+  .pending-run-row,
+  .request-body-header,
+  .folder-picker-toolbar,
+  .selected-folder,
+  .project-name-row,
+  .git-change-row,
+  .git-diff-stat-row {
+    grid-template-columns: 1fr;
+  }
+
+  .request-card-status,
+  .request-body-header .model-chip-row {
+    justify-content: flex-start;
+  }
+
+  .git-diff-stat-count {
+    text-align: left;
+  }
+
+  .git-diff-stat-change {
+    width: 100%;
+  }
+
+  .model-chip {
+    max-width: 100%;
+  }
+
+  .attachment-preview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .attachment-text-preview,
+  .body-json,
+  .log-block {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .terminal-command-line,
+  .terminal-live-line,
+  .terminal-prompt {
+    flex-wrap: wrap;
+  }
+
+  .terminal-prompt {
+    max-width: 100%;
+    white-space: normal;
   }
 }
 
@@ -3258,9 +3472,9 @@
 }
 
 .queue-detail-panel-compact .queue-detail-title {
-  font-size: clamp(1.15rem, 2.1vw, 1.8rem);
+  font-size: 18px;
   line-height: 1.18;
-  letter-spacing: -0.035em;
+  letter-spacing: 0;
 }
 
 .queue-detail-compact-label {
