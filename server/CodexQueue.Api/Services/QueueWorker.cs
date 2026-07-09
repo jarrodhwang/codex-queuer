@@ -1728,15 +1728,32 @@ public sealed class QueueWorker(
     private static bool TryExtractAssistantText(JsonElement root, out string? text)
     {
         text = null;
-        var item = root.TryGetProperty("item", out var itemElement) && itemElement.ValueKind == JsonValueKind.Object
+        var hasItem = root.TryGetProperty("item", out var itemElement) && itemElement.ValueKind == JsonValueKind.Object;
+        var item = hasItem
             ? itemElement
             : root;
 
-        var role = ReadString(item, "role");
         var eventType = ReadString(root, "type");
+        var fallback = hasItem ? root : default;
+        if (TryExtractAssistantTextFromRecord(item, eventType, fallback, out text))
+        {
+            return true;
+        }
+
+        return TryExtractAssistantTextFromNestedOutput(root, eventType, out text);
+    }
+
+    private static bool TryExtractAssistantTextFromRecord(JsonElement item, string? eventType, JsonElement fallback, out string? text)
+    {
+        text = null;
+        var role = ReadString(item, "role");
         var itemType = ReadString(item, "type");
-        var looksLikeCompletedMessage = IsCompletedType(eventType) && string.Equals(itemType, "message", StringComparison.OrdinalIgnoreCase);
-        if (!string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase) && !looksLikeCompletedMessage)
+        var looksLikeCompletedMessage = IsCompletedType(eventType) && IsMessageType(itemType);
+        var looksLikeAssistantMessage = string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase)
+                                        || looksLikeCompletedMessage
+                                        || IsAssistantMessageType(eventType)
+                                        || IsAssistantMessageType(itemType);
+        if (!looksLikeAssistantMessage)
         {
             return false;
         }
@@ -1744,11 +1761,61 @@ public sealed class QueueWorker(
         text = ReadContentText(item)
             ?? ReadString(item, "message")
             ?? ReadString(item, "text")
-            ?? ReadString(root, "message")
-            ?? ReadString(root, "text");
+            ?? ReadString(item, "output_text")
+            ?? ReadString(fallback, "message")
+            ?? ReadString(fallback, "text")
+            ?? ReadString(fallback, "output_text");
 
         text = CompletionTextCleaner.Sanitize(text);
         return text is not null;
+    }
+
+    private static bool TryExtractAssistantTextFromNestedOutput(JsonElement root, string? eventType, out string? text)
+    {
+        text = null;
+        if (root.TryGetProperty("response", out var response) && response.ValueKind == JsonValueKind.Object)
+        {
+            if (TryExtractAssistantTextFromRecord(response, eventType, default, out text)
+                || TryExtractAssistantTextFromOutputArray(response, eventType, out text))
+            {
+                return true;
+            }
+        }
+
+        if (root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object)
+        {
+            if (TryExtractAssistantTextFromRecord(data, eventType, default, out text)
+                || TryExtractAssistantTextFromOutputArray(data, eventType, out text))
+            {
+                return true;
+            }
+        }
+
+        return TryExtractAssistantTextFromOutputArray(root, eventType, out text);
+    }
+
+    private static bool TryExtractAssistantTextFromOutputArray(JsonElement source, string? eventType, out string? text)
+    {
+        text = null;
+        if (!source.TryGetProperty("output", out var output) || output.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        foreach (var item in output.EnumerateArray().Reverse())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            if (TryExtractAssistantTextFromRecord(item, eventType, default, out text))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static string? ReadContentText(JsonElement item)
@@ -1813,8 +1880,26 @@ public sealed class QueueWorker(
             || type.EndsWith("-completed", StringComparison.OrdinalIgnoreCase)
             || string.Equals(type, "completed", StringComparison.OrdinalIgnoreCase));
 
+    private static bool IsMessageType(string? type) =>
+        !string.IsNullOrWhiteSpace(type)
+        && HasNormalizedTypeSuffix(type, "message");
+
+    private static bool IsAssistantMessageType(string? type) =>
+        !string.IsNullOrWhiteSpace(type)
+        && (HasNormalizedTypeSuffix(type, "agent_message")
+            || HasNormalizedTypeSuffix(type, "assistant_message"));
+
+    private static bool HasNormalizedTypeSuffix(string type, string suffix)
+    {
+        var normalized = type.Replace('.', '_').Replace('-', '_');
+        return string.Equals(normalized, suffix, StringComparison.OrdinalIgnoreCase)
+               || normalized.EndsWith("_" + suffix, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static string? ReadString(JsonElement element, string propertyName) =>
-        element.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String
+        element.ValueKind == JsonValueKind.Object
+        && element.TryGetProperty(propertyName, out var value)
+        && value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;
 }

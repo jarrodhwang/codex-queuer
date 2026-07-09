@@ -3249,22 +3249,79 @@ function completionMessageFromOutput(output: string) {
 function assistantMessageFromEvent(event: Record<string, unknown>): string | null {
   const item = isRecord(event.item) ? event.item : event
   const type = stringValue(event.type)
-  const itemType = stringValue(item.type)
-  const role = stringValue(item.role)
-  const looksLikeCompletedMessage = isCompletedType(type) && itemType === 'message'
-  const looksLikeAssistantMessage = role === 'assistant' || looksLikeCompletedMessage
+  const directMessage = assistantMessageFromRecord(item, type, item === event ? undefined : event)
+  if (directMessage) {
+    return directMessage
+  }
+
+  return assistantMessageFromNestedOutput(event, type)
+}
+
+function assistantMessageFromRecord(value: Record<string, unknown>, eventType?: string, fallback?: Record<string, unknown>): string | null {
+  const itemType = stringValue(value.type)
+  const role = stringValue(value.role)
+  const looksLikeCompletedMessage = isCompletedType(eventType) && isMessageType(itemType)
+  const looksLikeAssistantMessage = role === 'assistant'
+    || looksLikeCompletedMessage
+    || isAssistantMessageType(eventType)
+    || isAssistantMessageType(itemType)
 
   if (!looksLikeAssistantMessage) {
     return null
   }
 
-  const message = textFromContent(item.content)
-    ?? stringValue(item.message)
-    ?? stringValue(item.text)
-    ?? stringValue(event.message)
-    ?? stringValue(event.text)
+  const message = textFromContent(value.content)
+    ?? stringValue(value.message)
+    ?? stringValue(value.text)
+    ?? stringValue(value.output_text)
+    ?? stringValue(fallback?.message)
+    ?? stringValue(fallback?.text)
+    ?? stringValue(fallback?.output_text)
 
   return sanitizeCompletionText(message)
+}
+
+function assistantMessageFromNestedOutput(event: Record<string, unknown>, eventType?: string): string | null {
+  const nestedRecords: Record<string, unknown>[] = []
+  const response = isRecord(event.response) ? event.response : undefined
+  const data = isRecord(event.data) ? event.data : undefined
+  if (response) nestedRecords.push(response)
+  if (data) nestedRecords.push(data)
+
+  for (const record of nestedRecords) {
+    const directMessage = assistantMessageFromRecord(record, eventType)
+    if (directMessage) {
+      return directMessage
+    }
+  }
+
+  const outputs = [
+    ...(Array.isArray(response?.output) ? response.output : []),
+    ...(Array.isArray(data?.output) ? data.output : []),
+    ...(Array.isArray(event.output) ? event.output : []),
+  ]
+
+  for (let index = outputs.length - 1; index >= 0; index -= 1) {
+    const output = outputs[index]
+    if (!isRecord(output)) {
+      continue
+    }
+
+    const message = assistantMessageFromRecord(output, eventType)
+    if (message) {
+      return message
+    }
+  }
+
+  return null
+}
+
+function isMessageType(type?: string) {
+  return Boolean(type && /(^|[._-])message$/i.test(type))
+}
+
+function isAssistantMessageType(type?: string) {
+  return Boolean(type && /(^|[._-])(agent|assistant)[._-]?message$/i.test(type))
 }
 
 function textFromContent(content: unknown): string | undefined {
