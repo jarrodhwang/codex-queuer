@@ -54,6 +54,19 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         if (machine.Kind == MachineKind.Local)
         {
             var arguments = BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt, allowGitWrites);
+            if (machine.TargetsWindows())
+            {
+                var command = "codex " + string.Join(" ", arguments.Select(QuotePowerShellValue));
+                return RunProcessAsync(
+                    "powershell",
+                    new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command },
+                    projectPath,
+                    BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId),
+                    onOutput,
+                    cancellationToken,
+                    firstProcessOutputTimeout: CodexFirstOutputTimeout);
+            }
+
             return RunProcessAsync(
                 "codex",
                 arguments,
@@ -149,6 +162,17 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
     {
         if (machine.Kind == MachineKind.Local)
         {
+            if (machine.TargetsWindows())
+            {
+                return RunProcessAsync(
+                    "powershell",
+                    new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "codex --version" },
+                    null,
+                    "codex --version",
+                    onOutput,
+                    cancellationToken);
+            }
+
             return RunProcessAsync("codex", new[] { "--version" }, null, "codex --version", onOutput, cancellationToken);
         }
 

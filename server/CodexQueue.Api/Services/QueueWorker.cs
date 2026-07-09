@@ -103,7 +103,11 @@ public sealed class QueueWorker(
         }
 
         ResumeRequest(request);
-        await TrySaveChangesAsync(db, "resume request", cancellationToken);
+        if (await TrySaveChangesAsync(db, "resume request", cancellationToken))
+        {
+            await KickQueueAsync(cancellationToken);
+        }
+
         return true;
     }
 

@@ -600,7 +600,7 @@ public static class ApiEndpoints
             return request is null ? Results.NotFound() : Results.Ok(request.ToDto());
         });
 
-        api.MapPost("/requests", async (CreateQueueRequest input, AppDbContext db, CancellationToken cancellationToken) =>
+        api.MapPost("/requests", async (CreateQueueRequest input, AppDbContext db, IQueueCoordinator queue, CancellationToken cancellationToken) =>
         {
             var project = await db.Projects.Include(x => x.Machine).FirstOrDefaultAsync(x => x.Id == input.ProjectId, cancellationToken);
             if (project is null)
@@ -649,6 +649,7 @@ public static class ApiEndpoints
 
             db.Requests.Add(request);
             await db.SaveChangesAsync(cancellationToken);
+            await queue.KickQueueAsync(cancellationToken);
             await db.Entry(request).Reference(x => x.Project).LoadAsync(cancellationToken);
             await db.Entry(request).Reference(x => x.Machine).LoadAsync(cancellationToken);
             return Results.Created($"/api/requests/{request.Id}", request.ToDto());
