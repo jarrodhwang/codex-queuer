@@ -3973,7 +3973,7 @@ function GitPanel({
         modelSpeed: suggestionModel.speed,
       })
       setCommitMessage('')
-      setActionOutput(result.output || (result.commitSha ? `Commit created: ${result.commitSha}` : 'Codex commit finished.'))
+      setActionOutput(gitCommitSuccessMessage(result, 'Codex commit finished.'))
       await loadStatus()
     } catch (cause) {
       onError(cause)
@@ -3991,7 +3991,7 @@ function GitPanel({
     setActionOutput('')
     try {
       const result = await api.gitCommit(project.id, { message })
-      setActionOutput(result.output || (result.commitSha ? `Commit created: ${result.commitSha}` : 'Git commit finished.'))
+      setActionOutput(gitCommitSuccessMessage(result, 'Git commit finished.'))
       setCommitMessage('')
       await loadStatus()
     } catch (cause) {
@@ -4068,9 +4068,10 @@ function GitPanel({
 
 function GitActionOutput({ output }: { output: string }) {
   const lines = useMemo(() => output.replace(/\r/g, '').trimEnd().split('\n'), [output])
+  const succeeded = useMemo(() => gitActionSucceeded(output), [output])
 
   return (
-    <div className="git-action-output" role="log" aria-label="Git commit output">
+    <div className={`git-action-output ${succeeded ? 'git-action-output--success' : ''}`} role="log" aria-label="Git commit output">
       {lines.map((line, index) => (
         <code key={`${index}:${line}`} className={`git-action-line git-action-line--${gitActionLineKind(line)}`}>
           {line || ' '}
@@ -4078,6 +4079,15 @@ function GitActionOutput({ output }: { output: string }) {
       ))}
     </div>
   )
+}
+
+function gitCommitSuccessMessage(result: { success: boolean; output: string }, fallback: string) {
+  if (!result.success) return result.output || 'Commit failed.'
+  return fallback
+}
+
+function gitActionSucceeded(output: string) {
+  return /\b(commit (created|finished|succeeded)|git commit finished|codex commit finished)\b/i.test(output)
 }
 
 function gitActionLineKind(line: string) {
