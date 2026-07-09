@@ -1221,6 +1221,20 @@ public static class ApiEndpoints
             {
                 return SanitizeGitCommitMessage(jsonMessage);
             }
+        }
+
+        for (var index = lines.Length - 1; index >= 0; index--)
+        {
+            var line = lines[index];
+            if (string.IsNullOrWhiteSpace(line) || line.StartsWith("$ ", StringComparison.Ordinal) || line.StartsWith("```", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (LooksLikeJsonObject(line))
+            {
+                continue;
+            }
 
             var labelPrefix = line.IndexOf(':', StringComparison.Ordinal);
             if (labelPrefix > 0 && line[..labelPrefix].Contains("message", StringComparison.OrdinalIgnoreCase))
@@ -1233,6 +1247,11 @@ public static class ApiEndpoints
         {
             var line = lines[index];
             if (string.IsNullOrWhiteSpace(line) || line.StartsWith("$ ", StringComparison.Ordinal) || line.StartsWith("```", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (LooksLikeJsonObject(line))
             {
                 continue;
             }
@@ -1261,15 +1280,9 @@ public static class ApiEndpoints
                 return !string.IsNullOrWhiteSpace(message);
             }
 
-            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("text", out var textMessage))
+            if (root.ValueKind == JsonValueKind.Object && TryExtractCodexAssistantText(root, out var assistantText))
             {
-                message = textMessage.GetString();
-                return !string.IsNullOrWhiteSpace(message);
-            }
-
-            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("message", out var genericMessage))
-            {
-                message = genericMessage.GetString();
+                message = assistantText;
                 return !string.IsNullOrWhiteSpace(message);
             }
         }
@@ -1280,6 +1293,84 @@ public static class ApiEndpoints
 
         return false;
     }
+
+    private static bool LooksLikeJsonObject(string line) =>
+        line.TrimStart().StartsWith("{", StringComparison.Ordinal);
+
+    private static bool TryExtractCodexAssistantText(JsonElement root, out string? text)
+    {
+        text = null;
+        var item = root.TryGetProperty("item", out var itemElement) && itemElement.ValueKind == JsonValueKind.Object
+            ? itemElement
+            : root;
+
+        var role = ReadJsonString(item, "role");
+        var eventType = ReadJsonString(root, "type");
+        var itemType = ReadJsonString(item, "type");
+        var looksLikeCompletedMessage = IsCompletedEventType(eventType)
+            && string.Equals(itemType, "message", StringComparison.OrdinalIgnoreCase);
+        if (!string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase) && !looksLikeCompletedMessage)
+        {
+            return false;
+        }
+
+        text = ReadJsonContentText(item)
+            ?? ReadJsonString(item, "message")
+            ?? ReadJsonString(item, "text")
+            ?? ReadJsonString(root, "text");
+
+        return !string.IsNullOrWhiteSpace(text);
+    }
+
+    private static string? ReadJsonContentText(JsonElement item)
+    {
+        if (!item.TryGetProperty("content", out var content))
+        {
+            return null;
+        }
+
+        if (content.ValueKind == JsonValueKind.String)
+        {
+            return content.GetString();
+        }
+
+        if (content.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var parts = content.EnumerateArray()
+            .Select(ReadJsonContentPartText)
+            .Where(part => !string.IsNullOrWhiteSpace(part))
+            .Select(part => part!.Trim())
+            .ToArray();
+
+        return parts.Length > 0 ? string.Join(Environment.NewLine + Environment.NewLine, parts) : null;
+    }
+
+    private static string? ReadJsonContentPartText(JsonElement part)
+    {
+        if (part.ValueKind == JsonValueKind.String)
+        {
+            return part.GetString();
+        }
+
+        if (part.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        return ReadJsonString(part, "text") ?? ReadJsonString(part, "content") ?? ReadJsonString(part, "message");
+    }
+
+    private static string? ReadJsonString(JsonElement value, string propertyName) =>
+        value.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String
+            ? property.GetString()
+            : null;
+
+    private static bool IsCompletedEventType(string? type) =>
+        !string.IsNullOrWhiteSpace(type)
+        && type.Split('.', '_', '-').Any(part => string.Equals(part, "completed", StringComparison.OrdinalIgnoreCase));
 
     private static string? ResolveScriptBinary()
     {

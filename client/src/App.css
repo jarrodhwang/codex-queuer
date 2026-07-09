@@ -2313,6 +2313,24 @@
   border-top: 1px solid rgba(15, 23, 42, 0.1);
 }
 
+.git-ai-box .model-options-row {
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.git-ai-box .segmented-radio {
+  grid-auto-flow: initial;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  border-radius: 14px;
+  padding: 5px;
+}
+
+.git-ai-box .segmented-radio label {
+  min-height: 32px;
+  border-radius: 10px;
+}
+
 .terminal-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
