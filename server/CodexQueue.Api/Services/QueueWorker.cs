@@ -437,6 +437,18 @@ public sealed class QueueWorker(
                 return false;
             }
 
+            if (!result.Success && request.GenerateCommit && !request.SeparateCommitSession && IsGitCommitWriteFailure(result.Output))
+            {
+                result = await RunDeterministicCommitFallbackAsync(
+                    request,
+                    run,
+                    machine,
+                    projectPath,
+                    result,
+                    "Codex could not write to .git from its sandbox; running queue-managed git commit fallback.",
+                    cancellationToken);
+            }
+
             if (result.Success && request.GenerateCommit && !request.SeparateCommitSession)
             {
                 result = await MarkCommitCreatedIfHeadChangedAsync(run, machine, projectPath, result, beforeCommitHead, cancellationToken);
@@ -555,8 +567,18 @@ public sealed class QueueWorker(
             _ => Task.CompletedTask,
             cancellationToken);
 
+        var diffResult = await runner.RunShellAsync(
+            machine,
+            projectPath,
+            "git diff --no-ext-diff -- .; git diff --cached --no-ext-diff -- .",
+            _ => Task.CompletedTask,
+            cancellationToken);
+
         var diffStatOutput = StripShellCommandPreview(diffStatResult.Output).Trim();
-        var prompt = BuildProjectScopedPrompt(projectPath, BuildCommitMessagePrompt(request, statusOutput, diffStatOutput));
+        var diffOutput = diffResult.Success ? StripShellCommandPreview(diffResult.Output).Trim() : "";
+        var projectLabel = request.Project?.Name?.Trim();
+        var target = string.IsNullOrWhiteSpace(projectLabel) ? "repository" : "project " + projectLabel;
+        var prompt = BuildProjectScopedPrompt(projectPath, GitCommitMessageHelper.BuildPrompt(statusOutput, diffStatOutput, diffOutput, target));
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(CommitMessageGenerationTimeout);
 
@@ -574,7 +596,7 @@ public sealed class QueueWorker(
                 chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
                 timeoutSource.Token);
 
-            var generatedMessage = ExtractCommitMessageFromOutput(result.Output);
+            var generatedMessage = GitCommitMessageHelper.ExtractFromOutput(result.Output);
             if (!string.IsNullOrWhiteSpace(generatedMessage))
             {
                 return generatedMessage;
@@ -629,112 +651,6 @@ public sealed class QueueWorker(
         return StripShellCommandPreview(result.Output)
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .LastOrDefault(line => line.Length == 40 && line.All(IsHex));
-    }
-
-    private static string? ExtractCommitMessageFromOutput(string output)
-    {
-        var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        for (var index = lines.Length - 1; index >= 0; index--)
-        {
-            var line = lines[index];
-            if (string.IsNullOrWhiteSpace(line))
-            {
-                continue;
-            }
-
-            if (TryReadCommitMessageFromJsonLine(line, out var jsonCommitMessage) && jsonCommitMessage is not null)
-            {
-                return SanitizeCommitMessage(jsonCommitMessage);
-            }
-
-            if (line.StartsWith("```", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            var labelMatch = Regex.Match(line, @"^(?:commit\s*message|message)\s*:\s*(.+)$", RegexOptions.IgnoreCase);
-            if (labelMatch.Success)
-            {
-                return SanitizeCommitMessage(labelMatch.Groups[1].Value);
-            }
-        }
-
-        for (var index = lines.Length - 1; index >= 0; index--)
-        {
-            var line = lines[index];
-            if (string.IsNullOrWhiteSpace(line) || line.StartsWith("```", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            return SanitizeCommitMessage(line);
-        }
-
-        return null;
-    }
-
-    private static bool TryReadCommitMessageFromJsonLine(string line, out string? message)
-    {
-        message = null;
-        if (!line.TrimStart().StartsWith("{", StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        try
-        {
-            using var document = JsonDocument.Parse(line);
-            var root = document.RootElement;
-            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("commitMessage", out var commitMessage))
-            {
-                message = commitMessage.GetString();
-                return !string.IsNullOrWhiteSpace(message);
-            }
-
-            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("text", out var textMessage))
-            {
-                message = textMessage.GetString();
-                return !string.IsNullOrWhiteSpace(message);
-            }
-
-            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("message", out var genericMessage))
-            {
-                message = genericMessage.GetString();
-                return !string.IsNullOrWhiteSpace(message);
-            }
-        }
-        catch (JsonException)
-        {
-            // Ignore non-JSON lines.
-        }
-
-        return false;
-    }
-
-    private static string SanitizeCommitMessage(string message)
-    {
-        if (string.IsNullOrWhiteSpace(message))
-        {
-            return "";
-        }
-
-        var normalized = string.Join(" ", message.Replace('\r', ' ').Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-        if (string.IsNullOrWhiteSpace(normalized))
-        {
-            return "";
-        }
-
-        if (normalized.StartsWith("\"") && normalized.EndsWith("\"") && normalized.Length > 1)
-        {
-            normalized = normalized.Trim('"');
-        }
-
-        if (normalized.StartsWith("`") && normalized.EndsWith("`") && normalized.Length > 1)
-        {
-            normalized = normalized.Trim('`');
-        }
-
-        return normalized.Length <= 120 ? normalized : normalized[..117] + "...";
     }
 
     private async Task<bool> IsRunSucceededAsync(Guid requestId, RunKind kind, CancellationToken cancellationToken)
@@ -1737,6 +1653,14 @@ public sealed class QueueWorker(
     private static bool CommitOutputClaimsCreated(string output) =>
         CommitCreatedOutputRegex.IsMatch(output);
 
+    private static bool IsGitCommitWriteFailure(string output)
+    {
+        return output.Contains(".git/index.lock", StringComparison.OrdinalIgnoreCase)
+            || output.Contains("Read-only file system", StringComparison.OrdinalIgnoreCase)
+            || output.Contains("Unable to create", StringComparison.OrdinalIgnoreCase)
+               && output.Contains(".git", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool IsHex(char value) =>
         value is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F';
 
@@ -1760,39 +1684,10 @@ public sealed class QueueWorker(
         return request.Prompt.TrimEnd()
             + """
 
-            Create commit after completing the requested changes if there are actual changes.
-            Use git to include all relevant changed files in that commit.
+            Do not run git commit in this run.
+            Make the requested file changes only.
+            Leave commit creation to the queue-managed commit step after this run succeeds.
             """;
-    }
-
-    private static string BuildCommitMessagePrompt(CodexRequest request, string gitStatus, string diffStat)
-    {
-        var projectLabel = request.Project?.Name?.Trim();
-        var target = string.IsNullOrWhiteSpace(projectLabel) ? "repository" : "project " + projectLabel;
-        var statusText = string.IsNullOrWhiteSpace(gitStatus) ? "No status output." : gitStatus.Trim();
-        var diffText = string.IsNullOrWhiteSpace(diffStat) ? "No diff stat output." : diffStat.Trim();
-
-        return $"""
-        You are generating a git commit message for this {target}.
-
-        Use this current git status and diff summary.
-
-        git status --porcelain:
-        ```
-        {statusText}
-        ```
-
-        git diff --stat --no-ext-diff:
-        ```
-        {diffText}
-        ```
-
-        If there are no changes, return exactly: No changes to commit.
-        Otherwise return exactly one concise imperative line describing what changed.
-        Do not include numbering, bullets, markdown, or quotes.
-        Do not mention that you inspected files.
-        Output only the commit message text, no extra commentary.
-        """;
     }
 
     private static string BuildProjectScopedPrompt(string projectPath, string userPrompt) =>
