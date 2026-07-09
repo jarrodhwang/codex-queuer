@@ -7,6 +7,7 @@ import {
   ChevronRight,
   ClipboardList,
   Code2,
+  FileText,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -15,6 +16,7 @@ import {
   GitCommit,
   GripVertical,
   History,
+  Image as ImageIcon,
   Menu,
   Monitor,
   Pencil,
@@ -73,6 +75,19 @@ type ProjectModelDefaults = {
 }
 
 type RightRailView = 'files' | 'git'
+type AttachmentKind = 'image' | 'json' | 'csv' | 'text' | 'binary'
+
+type AttachmentInsight = {
+  kind: AttachmentKind
+  label: string
+  preview?: string
+  detail?: string
+  imageUrl?: string
+}
+
+type LocalQueueAttachment = QueueAttachment & {
+  insight: AttachmentInsight
+}
 
 const defaultModels: ModelOption[] = [
   { label: 'GPT-5.5', model: 'gpt-5.5', supportsPriority: true },
@@ -128,17 +143,19 @@ function projectModelDefaults(project: Project, models: ModelOption[]): ProjectM
   }
 }
 
-async function readQueueAttachment(file: File): Promise<QueueAttachment> {
+async function readQueueAttachment(file: File): Promise<LocalQueueAttachment> {
   if (file.size > 5_000_000) {
     throw new Error(`${file.name} is larger than 5 MB.`)
   }
 
   const buffer = await file.arrayBuffer()
+  const contentBase64 = arrayBufferToBase64(buffer)
   return {
     name: file.name,
     contentType: file.type || 'application/octet-stream',
     size: file.size,
-    contentBase64: arrayBufferToBase64(buffer),
+    contentBase64,
+    insight: analyzeAttachment(file.name, file.type || 'application/octet-stream', buffer, contentBase64),
   }
 }
 
@@ -180,6 +197,151 @@ function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+function attachmentPayload(attachments: LocalQueueAttachment[]): QueueAttachment[] {
+  return attachments.map(({ name, contentType, size, contentBase64 }) => ({ name, contentType, size, contentBase64 }))
+}
+
+function analyzeAttachment(name: string, contentType: string, buffer: ArrayBuffer, contentBase64: string): AttachmentInsight {
+  if (contentType.startsWith('image/')) {
+    return {
+      kind: 'image',
+      label: 'Image',
+      detail: `${contentType} · ${formatBytes(buffer.byteLength)}`,
+      imageUrl: `data:${contentType};base64,${contentBase64}`,
+    }
+  }
+
+  if (!isTextLikeAttachment(name, contentType)) {
+    return {
+      kind: 'binary',
+      label: 'File',
+      detail: contentType || 'binary file',
+    }
+  }
+
+  const text = new TextDecoder('utf-8', { fatal: false }).decode(buffer)
+  const clippedText = clipPreview(text)
+  if (isJsonAttachment(name, contentType)) {
+    const parsed = tryParseJson(text.trim())
+    if (parsed !== undefined) {
+      return {
+        kind: 'json',
+        label: 'JSON',
+        detail: jsonSummary(parsed),
+        preview: JSON.stringify(parsed, null, 2).slice(0, 2400),
+      }
+    }
+  }
+
+  if (isCsvAttachment(name, contentType)) {
+    const summary = csvSummary(text)
+    return {
+      kind: 'csv',
+      label: 'CSV',
+      detail: summary.detail,
+      preview: summary.preview,
+    }
+  }
+
+  return {
+    kind: 'text',
+    label: textAttachmentLabel(name, contentType),
+    detail: textLineSummary(text),
+    preview: clippedText,
+  }
+}
+
+function clipPreview(text: string) {
+  const normalized = text.replace(/\r\n/g, '\n').trim()
+  return normalized.length > 2400 ? `${normalized.slice(0, 2400)}\n...truncated...` : normalized
+}
+
+function isTextLikeAttachment(name: string, contentType: string) {
+  const lowerName = name.toLowerCase()
+  return contentType.startsWith('text/')
+    || contentType.includes('json')
+    || contentType.includes('xml')
+    || ['.csv', '.json', '.xml', '.xaml', '.html', '.css', '.js', '.ts', '.tsx', '.py', '.cs', '.c', '.cpp', '.h', '.md', '.txt']
+      .some((extension) => lowerName.endsWith(extension))
+}
+
+function isJsonAttachment(name: string, contentType: string) {
+  return contentType.includes('json') || name.toLowerCase().endsWith('.json')
+}
+
+function isCsvAttachment(name: string, contentType: string) {
+  return contentType === 'text/csv' || name.toLowerCase().endsWith('.csv')
+}
+
+function textAttachmentLabel(name: string, contentType: string) {
+  if (name.toLowerCase().endsWith('.md')) return 'Markdown'
+  if (contentType.includes('xml') || name.toLowerCase().endsWith('.xml')) return 'XML'
+  if (name.match(/\.(ts|tsx|js|css|py|cs|cpp|c|h)$/i)) return 'Code'
+  return 'Text'
+}
+
+function textLineSummary(text: string) {
+  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  const nonEmpty = lines.filter((line) => line.trim()).length
+  return `${nonEmpty.toLocaleString()} non-empty ${nonEmpty === 1 ? 'line' : 'lines'}`
+}
+
+function jsonSummary(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `${value.length.toLocaleString()} ${value.length === 1 ? 'item' : 'items'}`
+  }
+
+  if (isRecord(value)) {
+    const keys = Object.keys(value)
+    return `${keys.length.toLocaleString()} ${keys.length === 1 ? 'key' : 'keys'}${keys.length > 0 ? ` · ${keys.slice(0, 4).join(', ')}` : ''}`
+  }
+
+  return typeof value
+}
+
+function csvSummary(text: string) {
+  const rows = text.replace(/\r\n/g, '\n').split('\n').filter((line) => line.trim())
+  const header = rows[0] ? parseCsvLine(rows[0]) : []
+  const sampleRows = rows.slice(1, 5).map(parseCsvLine)
+  const widths = header.map((column, index) => Math.max(column.length, ...sampleRows.map((row) => row[index]?.length ?? 0))).map((width) => Math.min(width, 28))
+  const formatRow = (row: string[]) => row.map((cell, index) => (cell ?? '').slice(0, widths[index] ?? 16).padEnd(widths[index] ?? 16)).join('  ').trimEnd()
+  const preview = [formatRow(header), widths.map((width) => '-'.repeat(width)).join('  '), ...sampleRows.map(formatRow)]
+    .filter(Boolean)
+    .join('\n')
+  return {
+    detail: `${Math.max(rows.length - 1, 0).toLocaleString()} rows · ${header.length.toLocaleString()} columns`,
+    preview,
+  }
+}
+
+function parseCsvLine(line: string) {
+  const cells: string[] = []
+  let current = ''
+  let quoted = false
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index]
+    if (character === '"') {
+      if (quoted && line[index + 1] === '"') {
+        current += '"'
+        index += 1
+      } else {
+        quoted = !quoted
+      }
+      continue
+    }
+
+    if (character === ',' && !quoted) {
+      cells.push(current.trim())
+      current = ''
+      continue
+    }
+
+    current += character
+  }
+  cells.push(current.trim())
+  return cells
 }
 
 function isOptimisticRequest(id: string) {
@@ -1844,7 +2006,7 @@ function QueueComposer({
   const [generateCommit, setGenerateCommit] = useState(defaults.generateCommit)
   const [separateCommitSession, setSeparateCommitSession] = useState(defaults.separateCommitSession)
   const [prompt, setPrompt] = useState('')
-  const [attachments, setAttachments] = useState<QueueAttachment[]>([])
+  const [attachments, setAttachments] = useState<LocalQueueAttachment[]>([])
   const [attachmentError, setAttachmentError] = useState('')
   const [draggingFiles, setDraggingFiles] = useState(false)
   const [savingDefaults, setSavingDefaults] = useState(false)
@@ -1897,7 +2059,7 @@ function QueueComposer({
     try {
       const payload: UpdateQueueRequest = {
         prompt,
-        attachments: editingRequest && attachments.length === 0 ? undefined : attachments,
+        attachments: editingRequest && attachments.length === 0 ? undefined : attachmentPayload(attachments),
         model: requestModel.model,
         modelEffort: requestModel.effort,
         modelSpeed: requestModel.speed,
@@ -1926,7 +2088,7 @@ function QueueComposer({
           machineName: selectedProject.machineName,
           machineKind: selectedProject.machineKind,
           prompt,
-          attachments: attachments.map(({ name, contentType, size }) => ({ name, contentType, size })),
+          attachments: attachmentPayload(attachments).map(({ name, contentType, size }) => ({ name, contentType, size })),
           model: requestModel.model,
           modelEffort: requestModel.effort,
           modelSpeed: requestModel.speed,
@@ -1950,7 +2112,7 @@ function QueueComposer({
         const createdRequest = await api.createRequest({
           projectId: selectedProject.id,
           ...payload,
-          attachments,
+          attachments: attachmentPayload(attachments),
         })
         onCreated(createdRequest, previewId)
         return
@@ -2093,17 +2255,10 @@ function QueueComposer({
               <span className="meta">Existing attachments are kept unless you attach replacement files.</span>
             )}
             {attachments.length > 0 && (
-              <div className="attachment-list">
-                {attachments.map((attachment, index) => (
-                  <div key={`${attachment.name}:${index}`} className="attachment-chip">
-                    <span className="truncate">{attachment.name}</span>
-                    <span>{formatBytes(attachment.size)}</span>
-                    <button type="button" onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`Remove ${attachment.name}`}>
-                      <X size={12} />
-                    </button>
-                  </div>
-                ))}
-              </div>
+              <AttachmentPreviewList
+                attachments={attachments}
+                onRemove={(index) => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+              />
             )}
             {attachmentError && <span className="error-text">{attachmentError}</span>}
           </div>
@@ -2152,6 +2307,97 @@ function QueueComposer({
       </form>
     </GlassPanel>
   )
+}
+
+function AttachmentPreviewList({
+  attachments,
+  onRemove,
+}: {
+  attachments: LocalQueueAttachment[]
+  onRemove: (index: number) => void
+}) {
+  const textLikeCount = attachments.filter((attachment) => attachment.insight.preview).length
+  const imageCount = attachments.filter((attachment) => attachment.insight.kind === 'image').length
+
+  return (
+    <div className="attachment-preview-stack" aria-label="Attachment previews">
+      <div className="attachment-preview-summary">
+        <span>{attachments.length} {attachments.length === 1 ? 'file' : 'files'}</span>
+        {textLikeCount > 0 && <span>{textLikeCount} extracted</span>}
+        {imageCount > 0 && <span>{imageCount} image{imageCount === 1 ? '' : 's'}</span>}
+      </div>
+      <div className="attachment-preview-grid">
+        {attachments.map((attachment, index) => (
+          <AttachmentPreviewCard
+            key={`${attachment.name}:${index}`}
+            attachment={attachment}
+            onRemove={() => onRemove(index)}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function AttachmentPreviewCard({
+  attachment,
+  onRemove,
+}: {
+  attachment: LocalQueueAttachment
+  onRemove: () => void
+}) {
+  const icon = attachment.insight.kind === 'image' ? <ImageIcon size={15} /> : <FileText size={15} />
+
+  return (
+    <article className={`attachment-preview-card attachment-preview-card--${attachment.insight.kind}`}>
+      <div className="attachment-preview-head">
+        <span className="attachment-kind-icon" aria-hidden="true">{icon}</span>
+        <div className="attachment-preview-title">
+          <strong className="truncate" title={attachment.name}>{attachment.name}</strong>
+          <span>{attachment.insight.label} · {formatBytes(attachment.size)}</span>
+        </div>
+        <button type="button" onClick={onRemove} aria-label={`Remove ${attachment.name}`}>
+          <X size={13} />
+        </button>
+      </div>
+      {attachment.insight.detail && <div className="attachment-preview-detail">{attachment.insight.detail}</div>}
+      {attachment.insight.imageUrl && (
+        <img className="attachment-image-preview" src={attachment.insight.imageUrl} alt={attachment.name} />
+      )}
+      {attachment.insight.preview && (
+        <pre className="attachment-text-preview">{attachment.insight.preview}</pre>
+      )}
+    </article>
+  )
+}
+
+function AttachmentMetadataChips({ attachments }: { attachments: Array<{ name: string, contentType: string, size: number }> }) {
+  if (attachments.length === 0) {
+    return null
+  }
+
+  return (
+    <div className="request-attachments">
+      {attachments.map((attachment, index) => {
+        const kind = attachmentKindFromMetadata(attachment)
+        return (
+          <span key={`${attachment.name}:${index}`} className={`model-chip attachment-meta-chip attachment-meta-chip--${kind}`} title={`${attachment.contentType} · ${formatBytes(attachment.size)}`}>
+            {kind === 'image' ? <ImageIcon size={12} /> : <FileText size={12} />}
+            <span className="truncate">{attachment.name}</span>
+            <span>{formatBytes(attachment.size)}</span>
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
+function attachmentKindFromMetadata(attachment: { name: string, contentType: string }) {
+  if (attachment.contentType.startsWith('image/')) return 'image'
+  if (isJsonAttachment(attachment.name, attachment.contentType)) return 'json'
+  if (isCsvAttachment(attachment.name, attachment.contentType)) return 'csv'
+  if (isTextLikeAttachment(attachment.name, attachment.contentType)) return 'text'
+  return 'binary'
 }
 
 function ModelPicker({
@@ -2480,6 +2726,7 @@ function RequestCard({
           <div className="request-card-meta-row">
             <span className="request-stage-chip">{stageLabel(request)}</span>
             <span>{commitModeLabel(request)}</span>
+            {request.attachments.length > 0 && <span>{attachmentSummary(request.attachments)}</span>}
             {duration && <span>{duration}</span>}
             <span className="truncate">{request.machineName}</span>
             <span>created {formatDate(request.createdAt)}</span>
@@ -3052,15 +3299,7 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
             <div className="section-kicker">Request body</div>
             <ModelChips model={request.model} effort={request.modelEffort} speed={request.modelSpeed} />
           </div>
-          {request.attachments.length > 0 && (
-            <div className="request-attachments">
-              {request.attachments.map((attachment, index) => (
-                <span key={`${attachment.name}:${index}`} className="model-chip">
-                  {attachment.name} · {formatBytes(attachment.size)}
-                </span>
-              ))}
-            </div>
-          )}
+          <AttachmentMetadataChips attachments={request.attachments} />
           <div className="request-body-scroll">
             <StructuredBodyView content={request.prompt} />
           </div>
@@ -4386,6 +4625,12 @@ function requestDisplayName(request: CodexRequest) {
   }
 
   return normalized.length <= 80 ? normalized : normalized.slice(0, 80).trimEnd()
+}
+
+function attachmentSummary(attachments: Array<{ contentType: string }>) {
+  const imageCount = attachments.filter((attachment) => attachment.contentType.startsWith('image/')).length
+  const fileLabel = `${attachments.length} ${attachments.length === 1 ? 'file' : 'files'}`
+  return imageCount > 0 ? `${fileLabel}, ${imageCount} image${imageCount === 1 ? '' : 's'}` : fileLabel
 }
 
 function ModelChips({ model, effort, speed }: { model: string, effort?: string | null, speed?: string | null }) {

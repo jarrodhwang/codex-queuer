@@ -362,6 +362,7 @@
 .tree-list,
 .request-body-scroll,
 .completion-result-box,
+.attachment-text-preview,
 .terminal-screen,
 .folder-picker,
 .modal,
@@ -377,6 +378,7 @@
 .tree-list::-webkit-scrollbar,
 .request-body-scroll::-webkit-scrollbar,
 .completion-result-box::-webkit-scrollbar,
+.attachment-text-preview::-webkit-scrollbar,
 .terminal-screen::-webkit-scrollbar,
 .folder-picker::-webkit-scrollbar,
 .modal::-webkit-scrollbar,
@@ -392,6 +394,7 @@
 .tree-list::-webkit-scrollbar-thumb,
 .request-body-scroll::-webkit-scrollbar-thumb,
 .completion-result-box::-webkit-scrollbar-thumb,
+.attachment-text-preview::-webkit-scrollbar-thumb,
 .terminal-screen::-webkit-scrollbar-thumb,
 .folder-picker::-webkit-scrollbar-thumb,
 .modal::-webkit-scrollbar-thumb,
@@ -820,33 +823,119 @@
   gap: 8px;
 }
 
-.attachment-list {
+.attachment-preview-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.attachment-preview-summary {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
 }
 
-.attachment-chip {
-  max-width: 280px;
-  min-height: 26px;
-  display: inline-grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid rgba(15, 23, 42, 0.08);
+.attachment-preview-summary span {
   border-radius: 999px;
-  background: rgba(241, 245, 249, 0.82);
-  color: var(--text);
-  padding: 0 7px;
-  font-size: 12px;
+  background: rgba(15, 23, 42, 0.06);
+  padding: 2px 7px;
 }
 
-.attachment-chip button {
+.attachment-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.attachment-preview-card {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 8px;
+  background: rgba(248, 250, 252, 0.72);
+  padding: 9px;
+}
+
+.attachment-preview-card--image {
+  border-color: rgba(14, 165, 233, 0.24);
+  background: rgba(240, 249, 255, 0.72);
+}
+
+.attachment-preview-card--json,
+.attachment-preview-card--csv,
+.attachment-preview-card--text {
+  border-color: rgba(5, 150, 105, 0.18);
+  background: rgba(240, 253, 244, 0.62);
+}
+
+.attachment-preview-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+}
+
+.attachment-kind-icon {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  background: rgba(15, 23, 42, 0.07);
+  color: var(--text-strong);
+}
+
+.attachment-preview-title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.attachment-preview-title strong {
+  color: var(--text-strong);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.attachment-preview-title span,
+.attachment-preview-detail {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.3;
+}
+
+.attachment-preview-head button {
   border: 0;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
   padding: 0;
+}
+
+.attachment-image-preview {
+  width: 100%;
+  max-height: 180px;
+  object-fit: contain;
+  border: 1px solid rgba(14, 165, 233, 0.18);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.64);
+}
+
+.attachment-text-preview {
+  margin: 0;
+  max-height: 164px;
+  overflow: auto;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 7px;
+  background: #0f172a;
+  color: #dbeafe;
+  padding: 8px;
+  font: 11px/1.5 var(--mono);
+  white-space: pre;
 }
 
 .project-overview {
@@ -1778,6 +1867,33 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.attachment-meta-chip {
+  max-width: min(280px, 100%);
+  gap: 5px;
+}
+
+.attachment-meta-chip svg {
+  flex: 0 0 auto;
+}
+
+.attachment-meta-chip span:first-of-type {
+  min-width: 0;
+}
+
+.attachment-meta-chip--image {
+  border-color: rgba(14, 165, 233, 0.22);
+  background: rgba(224, 242, 254, 0.78);
+  color: #0369a1;
+}
+
+.attachment-meta-chip--json,
+.attachment-meta-chip--csv,
+.attachment-meta-chip--text {
+  border-color: rgba(5, 150, 105, 0.18);
+  background: rgba(220, 252, 231, 0.72);
+  color: #047857;
 }
 
 .completion-summary {
