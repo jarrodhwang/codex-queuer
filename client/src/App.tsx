@@ -387,7 +387,7 @@ function App() {
   const [requests, setRequests] = useState<CodexRequest[]>([])
   const [queueDiagnostics, setQueueDiagnostics] = useState<QueueDiagnostics | null>(null)
   const [selectedProjectId, setSelectedProjectId] = useState('')
-  const [rightOpen, setRightOpen] = useState(true)
+  const [rightOpen, setRightOpen] = useState(false)
   const [rightRailView, setRightRailView] = useState<RightRailView>('files')
   const [authBlocked, setAuthBlocked] = useState(false)
   const [error, setError] = useState('')
