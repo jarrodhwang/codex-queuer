@@ -73,7 +73,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         }
 
         var remoteCommand = machine.TargetsWindows()
-            ? BuildPowerShellRemoteCommand("codex app-server --stdio")
+            ? BuildPowerShellRemoteCommand(BuildPowerShellCodexPathSetupCommand() + "; codex app-server --stdio")
             : UnixRemotePathPrefix + " codex app-server --stdio";
         return RunSshAsync(
             machine,
@@ -103,7 +103,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             var arguments = BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt, allowGitWrites);
             if (machine.TargetsWindows())
             {
-                var command = "codex " + string.Join(" ", arguments.Select(QuotePowerShellValue));
+                var command = BuildPowerShellCodexPathSetupCommand() + "; codex " + string.Join(" ", arguments.Select(QuotePowerShellValue));
                 return RunProcessAsync(
                     "powershell",
                     new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command },
@@ -127,7 +127,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         if (machine.TargetsWindows())
         {
             var windowsCommand = BuildPowerShellSetLocationCommand(projectPath) + "; "
-                + "codex " + string.Join(" ", BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt, allowGitWrites).Select(QuotePowerShellValue));
+                + BuildPowerShellCodexPathSetupCommand() + "; codex "
+                + string.Join(" ", BuildCodexArguments(projectPath, model, modelEffort, modelSpeed, codexSessionId, imagePaths, prompt, allowGitWrites).Select(QuotePowerShellValue));
 
             return RunSshAsync(
                 machine,
@@ -213,7 +214,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             {
                 return RunProcessAsync(
                     "powershell",
-                    new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "codex --version" },
+                    new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", BuildPowerShellCodexPathSetupCommand() + "; codex --version" },
                     null,
                     "codex --version",
                     onOutput,
@@ -225,7 +226,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
         if (machine.TargetsWindows())
         {
-            return RunSshAsync(machine, BuildPowerShellRemoteCommand("codex --version; Get-Location"), "ssh " + machine.Host + " codex --version", onOutput, cancellationToken);
+            return RunSshAsync(machine, BuildPowerShellRemoteCommand(BuildPowerShellCodexPathSetupCommand() + "; codex --version; Get-Location"), "ssh " + machine.Host + " codex --version", onOutput, cancellationToken);
         }
 
         return RunSshAsync(machine, UnixRemotePathPrefix + " codex --version && pwd", "ssh " + machine.Host + " codex --version", onOutput, cancellationToken);
@@ -448,6 +449,10 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
     public static string BuildPowerShellSetLocationCommand(string path) =>
         "Set-Location -LiteralPath " + QuotePowerShellValue(path) + " -ErrorAction Stop";
+
+    private static string BuildPowerShellCodexPathSetupCommand() =>
+        "$codexPathCandidates = @($env:APPDATA + '\\npm', $env:USERPROFILE + '\\.local\\bin', $env:LOCALAPPDATA + '\\Programs\\nodejs', $env:ProgramFiles + '\\nodejs'); "
+        + "foreach ($codexPath in $codexPathCandidates) { if ($codexPath -and (Test-Path -LiteralPath $codexPath)) { $env:Path = $codexPath + ';' + $env:Path } }";
 
     private static string ResolveSshKeyPath(string configuredPath)
     {
