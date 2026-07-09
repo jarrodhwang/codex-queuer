@@ -1751,6 +1751,8 @@ public sealed class QueueWorker(
         var looksLikeCompletedMessage = IsCompletedType(eventType) && IsMessageType(itemType);
         var looksLikeAssistantMessage = string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase)
                                         || looksLikeCompletedMessage
+                                        || IsAssistantTextEventType(eventType)
+                                        || IsAssistantTextEventType(itemType)
                                         || IsAssistantMessageType(eventType)
                                         || IsAssistantMessageType(itemType);
         if (!looksLikeAssistantMessage)
@@ -1856,7 +1858,7 @@ public sealed class QueueWorker(
             return null;
         }
 
-        return ReadString(part, "text") ?? ReadString(part, "content") ?? ReadString(part, "message");
+        return ReadString(part, "text") ?? ReadString(part, "content") ?? ReadString(part, "message") ?? ReadString(part, "output_text");
     }
 
     private static bool IsTelemetryCompletionEvent(JsonElement root)
@@ -1888,6 +1890,10 @@ public sealed class QueueWorker(
         !string.IsNullOrWhiteSpace(type)
         && (HasNormalizedTypeSuffix(type, "agent_message")
             || HasNormalizedTypeSuffix(type, "assistant_message"));
+
+    private static bool IsAssistantTextEventType(string? type) =>
+        !string.IsNullOrWhiteSpace(type)
+        && HasNormalizedTypeSuffix(type, "output_text_done");
 
     private static bool HasNormalizedTypeSuffix(string type, string suffix)
     {

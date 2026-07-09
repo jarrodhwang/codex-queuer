@@ -3263,6 +3263,8 @@ function assistantMessageFromRecord(value: Record<string, unknown>, eventType?: 
   const looksLikeCompletedMessage = isCompletedType(eventType) && isMessageType(itemType)
   const looksLikeAssistantMessage = role === 'assistant'
     || looksLikeCompletedMessage
+    || isAssistantTextEventType(eventType)
+    || isAssistantTextEventType(itemType)
     || isAssistantMessageType(eventType)
     || isAssistantMessageType(itemType)
 
@@ -3324,6 +3326,17 @@ function isAssistantMessageType(type?: string) {
   return Boolean(type && /(^|[._-])(agent|assistant)[._-]?message$/i.test(type))
 }
 
+function isAssistantTextEventType(type?: string) {
+  if (!type) {
+    return false
+  }
+
+  const normalized = type.replace(/[.-]/g, '_').toLowerCase()
+  return normalized === 'output_text_done'
+    || normalized === 'response_output_text_done'
+    || normalized.endsWith('_output_text_done')
+}
+
 function textFromContent(content: unknown): string | undefined {
   if (typeof content === 'string') {
     return content.trim() || undefined
@@ -3343,7 +3356,7 @@ function textFromContent(content: unknown): string | undefined {
         return ''
       }
 
-      return stringValue(part.text) ?? stringValue(part.content) ?? stringValue(part.message) ?? ''
+      return stringValue(part.text) ?? stringValue(part.content) ?? stringValue(part.message) ?? stringValue(part.output_text) ?? ''
     })
     .map((part) => part.trim())
     .filter(Boolean)
