@@ -2138,6 +2138,48 @@
   white-space: pre-wrap;
 }
 
+.body-event-markdown,
+.body-text-markdown {
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.64);
+  padding: 10px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.body-event-markdown {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  white-space: normal;
+}
+
+.body-text-markdown .completion-markdown h1,
+.body-text-markdown .completion-markdown h2,
+.body-text-markdown .completion-markdown h3,
+.body-event-markdown .completion-markdown h1,
+.body-event-markdown .completion-markdown h2,
+.body-event-markdown .completion-markdown h3 {
+  color: var(--text-strong);
+}
+
+.body-text-markdown .completion-markdown code,
+.body-event-markdown .completion-markdown code {
+  color: var(--text-strong);
+}
+
+.body-text-markdown .completion-code-block,
+.body-event-markdown .completion-code-block {
+  background: rgba(15, 23, 42, 0.92);
+}
+
+.body-text-markdown .completion-markdown a,
+.body-event-markdown .completion-markdown a {
+  color: #2563eb;
+}
+
 .body-event--compact .body-event-text {
   display: -webkit-box;
   overflow: hidden;

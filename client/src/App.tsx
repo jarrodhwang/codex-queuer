@@ -2884,7 +2884,7 @@ function StructuredBodyView({
   if (hideJson && parsed.kind === 'json' && !isDetailedCodexJson(parsed.value)) {
     const jsonText = textFromUnknownJson(parsed.value)
     if (jsonText) {
-      return <pre className="log-block body-json">{jsonText}</pre>
+      return <BodyTextBlock text={normalizeBodyText(jsonText)} compact={false} />
     }
 
     return <pre className="log-block body-json">{JSON.stringify(parsed.value, null, 2)}</pre>
@@ -2925,7 +2925,7 @@ function renderStructuredBody(parsed: Exclude<ParsedBody, { kind: 'empty' }>, co
     return <pre className={`log-block body-json ${compact ? 'body-compact-block' : ''}`}>{JSON.stringify(parsed.value, null, 2)}</pre>
   }
 
-  return <pre className={`log-block ${compact ? 'body-compact-block' : ''}`}>{parsed.text}</pre>
+  return <BodyTextBlock text={parsed.text} compact={compact} />
 }
 
 function isDetailedCodexJson(value: unknown) {
@@ -2946,8 +2946,8 @@ function BodyEventRow({ event, compact }: { event: BodyEvent, compact: boolean }
         {event.status && <span className="body-event-status">{event.status}</span>}
         {typeof event.exitCode === 'number' && <span className="body-event-status">exit {event.exitCode}</span>}
       </div>
-      {event.text && <p className="body-event-text">{event.text}</p>}
-      {event.output && <pre className="body-event-output">{event.output}</pre>}
+      {event.text && <BodyEventText text={event.text} />}
+      {event.output && <LogBlock text={event.output} className="body-event-output" />}
       {event.changes.length > 0 && (
         <div className="body-event-changes">
           {event.changes.map((change, index) => (
@@ -2963,8 +2963,45 @@ function BodyEventRow({ event, compact }: { event: BodyEvent, compact: boolean }
   )
 }
 
+function BodyEventText({ text }: { text: string }) {
+  if (looksLikeInformativeText(text)) {
+    return (
+      <div className="body-event-text body-event-markdown">
+        <CompletionMarkdown content={text} />
+      </div>
+    )
+  }
+
+  return <p className="body-event-text">{text}</p>
+}
+
+function BodyTextBlock({ text, compact }: { text: string; compact: boolean }) {
+  if (looksLikeInformativeText(text)) {
+    return (
+      <div className={`body-text-markdown ${compact ? 'body-compact-block' : ''}`}>
+        <CompletionMarkdown content={text} />
+      </div>
+    )
+  }
+
+  return <LogBlock text={text} className={`log-block ${compact ? 'body-compact-block' : ''}`} />
+}
+
+function LogBlock({ text, className }: { text: string; className: string }) {
+  const segments = useMemo(() => parseAnsiOutput(text), [text])
+
+  return (
+    <pre className={className}>
+      {segments.map((segment, index) => (
+        <span key={index} className={segment.className}>{segment.text}</span>
+      ))}
+    </pre>
+  )
+}
+
 function parseBody(content: string): ParsedBody {
-  const text = content.trim()
+  const normalizedContent = normalizeBodyText(content)
+  const text = normalizedContent.trim()
   if (!text) {
     return { kind: 'empty' }
   }
@@ -2997,7 +3034,68 @@ function parseBody(content: string): ParsedBody {
     return { kind: 'events', events }
   }
 
-  return { kind: 'text', text: content }
+  const assistantText = completionMessageFromOutput(normalizedContent)
+  if (assistantText) {
+    return { kind: 'text', text: assistantText }
+  }
+
+  return { kind: 'text', text: normalizedContent }
+}
+
+function normalizeBodyText(content: string) {
+  let text = content.replace(/\r\n?/g, '\n').replace(/\\u001b/gi, String.fromCharCode(27))
+
+  for (let index = 0; index < 2; index += 1) {
+    const parsed = tryParseJson(text.trim())
+    if (typeof parsed !== 'string' || parsed === text) {
+      break
+    }
+
+    text = parsed.replace(/\r\n?/g, '\n').replace(/\\u001b/gi, String.fromCharCode(27))
+  }
+
+  if (looksLikeEscapedTransportText(text)) {
+    text = text
+      .replace(/\\r\\n|\\n|\\r/g, '\n')
+      .replace(/\\t/g, '  ')
+      .replace(/\\"/g, '"')
+      .replace(/\\u001b/gi, String.fromCharCode(27))
+  }
+
+  return text
+}
+
+function looksLikeEscapedTransportText(value: string) {
+  return !value.includes('\n')
+    && /\\r|\\n/.test(value)
+    && (/\\"(?:type|item|content|message|output)\\"/.test(value) || value.includes('\\u001b['))
+}
+
+function looksLikeInformativeText(value: string) {
+  const text = value.trim()
+  if (!text || text.startsWith('$ ')) {
+    return false
+  }
+
+  const lines = text.split(/\n/)
+  const nonEmptyLines = lines.map((line) => line.trim()).filter(Boolean)
+  if (nonEmptyLines.length === 0) {
+    return false
+  }
+
+  const commandLikeLines = nonEmptyLines.filter((line) =>
+    line.startsWith('$ ')
+    || /^[A-Z]:\\/.test(line)
+    || /^[-/][\w-]+(?:\s|$)/.test(line)
+    || /^[ MADRCU?!]{2}\s+\S/.test(line))
+
+  if (commandLikeLines.length / nonEmptyLines.length > 0.35) {
+    return false
+  }
+
+  return /(^|\n)\s*(#{1,3}\s+|[-*]\s+|\d+[.)]\s+|```)/.test(text)
+    || /\n\s*\n/.test(text)
+    || nonEmptyLines.some((line) => /[.!?]$/.test(line) && line.split(/\s+/).length >= 8)
 }
 
 function isBodyExpandable(parsed: ParsedBody) {
@@ -3027,7 +3125,9 @@ function toBodyEvent(value: Record<string, unknown>): BodyEvent {
   const item = isRecord(value.item) ? value.item : undefined
   const eventType = stringValue(value.type) ?? stringValue(item?.type) ?? 'event'
   const status = stringValue(value.status) ?? stringValue(item?.status)
-  const text = stringValue(value.text)
+  const text = textFromContent(item?.content)
+    ?? textFromContent(value.content)
+    ?? stringValue(value.text)
     ?? stringValue(item?.text)
     ?? stringValue(value.message)
     ?? stringValue(item?.message)
@@ -3112,7 +3212,17 @@ function completionMessageForRequest(request: CodexRequest) {
 }
 
 function completionMessageFromOutput(output: string) {
-  const events = output
+  const normalizedOutput = normalizeBodyText(output)
+  const parsedOutput = tryParseJson(normalizedOutput.trim())
+  if (typeof parsedOutput === 'string') {
+    return completionMessageFromOutput(parsedOutput)
+  }
+
+  if (isRecord(parsedOutput)) {
+    return assistantMessageFromEvent(parsedOutput) ?? null
+  }
+
+  const events = normalizedOutput
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
