@@ -2229,6 +2229,8 @@
 }
 
 .git-action-output {
+  display: grid;
+  gap: 3px;
   max-height: 170px;
   overflow: auto;
   margin: 0;
@@ -2238,7 +2240,32 @@
   color: var(--text);
   padding: 9px;
   font: 12px/1.45 var(--mono);
+}
+
+.git-action-line {
+  display: block;
+  min-width: 0;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.git-action-line--command {
+  color: var(--muted);
+}
+
+.git-action-line--heading,
+.git-action-line--commit,
+.git-action-line--sha {
+  color: var(--text-strong);
+  font-weight: 800;
+}
+
+.git-action-line--change {
+  color: var(--muted-strong);
+}
+
+.git-action-line--text {
+  word-break: break-word;
 }
 
 .git-diff-summary {

@@ -3779,7 +3779,7 @@ function GitPanel({
         </GlassButton>
       </form>
 
-      {actionOutput && <pre className="git-action-output">{actionOutput}</pre>}
+      {actionOutput && <GitActionOutput output={actionOutput} />}
 
       <div className="git-ai-box">
         <ModelPicker label="Codex commit" options={config.models} value={suggestionModel} onChange={setSuggestionModel} disabled={clean || generating} />
@@ -3790,6 +3790,29 @@ function GitPanel({
       </div>
     </div>
   )
+}
+
+function GitActionOutput({ output }: { output: string }) {
+  const lines = useMemo(() => output.replace(/\r/g, '').trimEnd().split('\n'), [output])
+
+  return (
+    <div className="git-action-output" role="log" aria-label="Git commit output">
+      {lines.map((line, index) => (
+        <code key={`${index}:${line}`} className={`git-action-line git-action-line--${gitActionLineKind(line)}`}>
+          {line || ' '}
+        </code>
+      ))}
+    </div>
+  )
+}
+
+function gitActionLineKind(line: string) {
+  if (line.startsWith('$ ')) return 'command'
+  if (/^[0-9a-f]{7,40}$/i.test(line.trim())) return 'sha'
+  if (/^\[[^\]\r\n]+\s+[0-9a-f]{7,40}\]/.test(line.trim())) return 'commit'
+  if (/^(Changed files before commit|Commit created):$/.test(line.trim())) return 'heading'
+  if (/^[ MADRCU?!]{2}\s+\S/.test(line)) return 'change'
+  return 'text'
 }
 
 function formatFileCount(count: number) {
