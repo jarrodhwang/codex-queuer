@@ -478,21 +478,19 @@ public sealed class QueueWorker(
     {
         var beforeCommitHead = await ReadGitHeadAsync(machine, projectPath, cancellationToken);
         var beforeStatus = await ReadGitStatusPorcelainAsync(machine, projectPath, cancellationToken);
-        var prompt = BuildProjectScopedPrompt(
-            projectPath,
-            """
-            Review Changes and Create Commit
+        if (string.IsNullOrWhiteSpace(beforeStatus))
+        {
+            var output = "No changes to commit." + Environment.NewLine;
+            await AppendOutputAsync(run.Id, output, CancellationToken.None);
+            return new CommandResult(0, output, "git status --porcelain -- .");
+        }
 
-            Inspect the current git changes and create exactly one git commit yourself.
-            Stage only changes under this project root. Prefer pathspec-limited commands such as `git add -A -- .`.
-            Choose one concise imperative commit message.
-            If there are no changes, do not create a commit and return exactly: No changes to commit.
-            Do not amend existing commits.
-            Do not push.
-            After committing, report the commit SHA and commit message.
-            """);
+        await AppendOutputAsync(run.Id, "Generating commit message..." + Environment.NewLine, CancellationToken.None);
+        var diffStat = await ReadGitDiffStatAsync(machine, projectPath, cancellationToken);
+        var diff = await ReadGitDiffAsync(machine, projectPath, cancellationToken);
+        var prompt = GitCommitMessageHelper.BuildPrompt(beforeStatus, diffStat, diff, "project root");
 
-        var result = await runner.RunCodexAsync(
+        var messageResult = await runner.RunCodexAsync(
             machine,
             projectPath,
             run.Model,
@@ -501,9 +499,45 @@ public sealed class QueueWorker(
             null,
             null,
             prompt,
-            true,
+            false,
             chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
             cancellationToken);
+
+        if (!messageResult.Success)
+        {
+            return messageResult;
+        }
+
+        var message = GitCommitMessageHelper.ExtractFromOutput(messageResult.Output);
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            var output = messageResult.Output.TrimEnd()
+                + Environment.NewLine
+                + "Codex did not return a commit message."
+                + Environment.NewLine;
+            await AppendOutputAsync(run.Id, "Codex did not return a commit message." + Environment.NewLine, CancellationToken.None);
+            return messageResult with { ExitCode = 12, Output = output };
+        }
+
+        message = GitCommitMessageHelper.Sanitize(message);
+        if (string.Equals(message, "No changes to commit.", StringComparison.OrdinalIgnoreCase))
+        {
+            var output = messageResult.Output.TrimEnd()
+                + Environment.NewLine
+                + "Codex reported no changes, but git status still has changes."
+                + Environment.NewLine;
+            await AppendOutputAsync(run.Id, "Codex reported no changes, but git status still has changes." + Environment.NewLine, CancellationToken.None);
+            return messageResult with { ExitCode = 12, Output = output };
+        }
+
+        await AppendOutputAsync(run.Id, "Creating git commit..." + Environment.NewLine, CancellationToken.None);
+        var result = await runner.RunShellAsync(
+            machine,
+            projectPath,
+            GitCommitShellHelper.BuildCommitCommand(machine, message),
+            chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
+            cancellationToken);
+        result = result with { CodexSessionId = messageResult.CodexSessionId };
 
         return await ValidateCodexCommitAsync(
             run,
@@ -581,6 +615,30 @@ public sealed class QueueWorker(
             machine,
             projectPath,
             "git status --porcelain -- .",
+            _ => Task.CompletedTask,
+            cancellationToken);
+
+        return result.Success ? StripShellCommandPreview(result.Output).Trim() : "";
+    }
+
+    private async Task<string> ReadGitDiffStatAsync(TargetMachine machine, string projectPath, CancellationToken cancellationToken)
+    {
+        var result = await runner.RunShellAsync(
+            machine,
+            projectPath,
+            "git diff --stat --no-ext-diff -- .; git diff --cached --stat --no-ext-diff -- .",
+            _ => Task.CompletedTask,
+            cancellationToken);
+
+        return result.Success ? StripShellCommandPreview(result.Output).Trim() : "";
+    }
+
+    private async Task<string> ReadGitDiffAsync(TargetMachine machine, string projectPath, CancellationToken cancellationToken)
+    {
+        var result = await runner.RunShellAsync(
+            machine,
+            projectPath,
+            "git diff --no-ext-diff -- .; git diff --cached --no-ext-diff -- .",
             _ => Task.CompletedTask,
             cancellationToken);
 
