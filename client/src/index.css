@@ -2,8 +2,8 @@
 
 :root {
   --right-width: 332px;
-  --app-bg: #f8f4df;
-  --app-bg-2: #fbfaf0;
+  --app-bg: #f8fbff;
+  --app-bg-2: #ffffff;
   --text: #475569;
   --text-strong: #0f172a;
   --muted: #64748b;
@@ -11,13 +11,13 @@
   --ink: #0f172a;
   --line: rgba(15, 23, 42, 0.12);
   --line-strong: rgba(15, 23, 42, 0.18);
-  --accent: #f9de4e;
-  --accent-strong: #6f5800;
-  --accent-green: #44d62c;
-  --accent-green-strong: #168a1a;
-  --accent-warm: #d9a909;
-  --accent-soft: rgba(249, 222, 78, 0.34);
-  --accent-line: rgba(217, 169, 9, 0.36);
+  --accent: #5ac8fa;
+  --accent-strong: #075985;
+  --accent-cool: #7dd3fc;
+  --accent-cool-strong: #0369a1;
+  --accent-warm: #38bdf8;
+  --accent-soft: rgba(90, 200, 250, 0.34);
+  --accent-line: rgba(56, 189, 248, 0.36);
   --glass-bg: linear-gradient(145deg, rgba(255, 255, 255, 0.68), rgba(255, 255, 255, 0.34));
   --glass-bg-strong: linear-gradient(145deg, rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.48));
   --glass-edge: rgba(255, 255, 255, 0.82);
