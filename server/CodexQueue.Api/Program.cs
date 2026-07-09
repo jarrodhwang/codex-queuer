@@ -35,6 +35,8 @@ builder.Services.AddCors(options =>
         .AllowAnyMethod());
 });
 builder.Services.AddSingleton<ITargetCommandRunner, TargetCommandRunner>();
+builder.Services.AddHttpClient();
+builder.Services.AddSingleton<ITerminalSessionService, TerminalSessionService>();
 builder.Services.AddScoped<IProjectFileService, ProjectFileService>();
 builder.Services.AddSingleton<QueueWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<QueueWorker>());

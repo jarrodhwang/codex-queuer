@@ -11,7 +11,8 @@ public sealed class ApiTokenMiddleware(RequestDelegate next, IConfiguration conf
         if (string.IsNullOrWhiteSpace(_token)
             || !context.Request.Path.StartsWithSegments("/api")
             || context.Request.Path.StartsWithSegments("/api/health")
-            || context.Request.Path.StartsWithSegments("/api/config"))
+            || context.Request.Path.StartsWithSegments("/api/config")
+            || context.Request.Path.StartsWithSegments("/api/terminal-sessions"))
         {
             await next(context);
             return;

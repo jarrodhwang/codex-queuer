@@ -2,9 +2,6 @@ using CodexQueue.Api.Data;
 using CodexQueue.Api.Domain;
 using CodexQueue.Api.Services;
 using Microsoft.EntityFrameworkCore;
-using System.Diagnostics;
-using System.Net.WebSockets;
-using System.Text;
 using System.Text.Json;
 
 namespace CodexQueue.Api.Endpoints;
@@ -542,25 +539,35 @@ public static class ApiEndpoints
             }
         });
 
-        api.MapGet("/projects/{id:guid}/terminal/ws", async (Guid id, HttpContext context, AppDbContext db) =>
+        api.MapGet("/projects/{id:guid}/terminal/ttyd", async (Guid id, AppDbContext db, ITerminalSessionService terminal, CancellationToken cancellationToken) =>
         {
-            if (!context.WebSockets.IsWebSocketRequest)
+            var project = await db.Projects.Include(x => x.Machine).AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            if (project is null)
             {
-                context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                await context.Response.WriteAsJsonAsync(new { error = "WebSocket request is required." });
-                return;
+                return Results.NotFound();
             }
 
-            var project = await db.Projects.Include(x => x.Machine).AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, context.RequestAborted);
-            if (project?.Machine is null)
+            if (project.Machine is null)
             {
-                context.Response.StatusCode = StatusCodes.Status404NotFound;
-                return;
+                return Results.BadRequest(new { error = "Project machine is missing." });
             }
 
-            using var socket = await context.WebSockets.AcceptWebSocketAsync();
-            await RunInteractiveTerminalAsync(project, socket, context.RequestAborted);
+            try
+            {
+                var session = await terminal.StartAsync(project, cancellationToken);
+                return Results.Redirect(session.EntryPath);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or IOException or TimeoutException or System.ComponentModel.Win32Exception)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
         });
+
+        api.MapGet("/terminal-sessions/{sessionId:guid}/{sessionToken}", async (Guid sessionId, string sessionToken, HttpContext context, ITerminalSessionService terminal) =>
+            await terminal.ProxyAsync(sessionId, sessionToken, context));
+
+        api.MapMethods("/terminal-sessions/{sessionId:guid}/{sessionToken}/{**targetPath}", new[] { "GET", "POST", "PUT", "DELETE", "OPTIONS" }, async (Guid sessionId, string sessionToken, HttpContext context, ITerminalSessionService terminal) =>
+            await terminal.ProxyAsync(sessionId, sessionToken, context));
 
         api.MapGet("/requests", async (Guid? projectId, bool? includeDeleted, AppDbContext db, CancellationToken cancellationToken) =>
         {
@@ -979,153 +986,6 @@ public static class ApiEndpoints
         return (maxOrder ?? 0) + 1;
     }
 
-    private static async Task RunInteractiveTerminalAsync(Project project, WebSocket socket, CancellationToken cancellationToken)
-    {
-        ProcessStartInfo startInfo;
-        try
-        {
-            startInfo = BuildInteractiveTerminalStartInfo(project);
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
-        {
-            await SendTerminalTextAsync(socket, ex.Message + "\n", cancellationToken);
-            return;
-        }
-
-        using var process = new Process
-        {
-            StartInfo = startInfo,
-            EnableRaisingEvents = true
-        };
-
-        try
-        {
-            if (!process.Start())
-            {
-                await SendTerminalTextAsync(socket, "Failed to start terminal process.\n", cancellationToken);
-                return;
-            }
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
-        {
-            await SendTerminalTextAsync(socket, ex.Message + "\n", cancellationToken);
-            return;
-        }
-
-        var stdoutTask = PumpTerminalReaderAsync(process.StandardOutput, socket, cancellationToken);
-        var stderrTask = PumpTerminalReaderAsync(process.StandardError, socket, cancellationToken);
-        var inputTask = PumpTerminalInputAsync(socket, process.StandardInput, cancellationToken);
-        var exitTask = process.WaitForExitAsync(cancellationToken);
-
-        await Task.WhenAny(inputTask, exitTask);
-        if (!process.HasExited)
-        {
-            try
-            {
-                process.Kill(entireProcessTree: true);
-            }
-            catch
-            {
-                // Best effort cleanup after the browser closes the terminal.
-            }
-        }
-
-        await Task.WhenAll(stdoutTask, stderrTask).WaitAsync(TimeSpan.FromSeconds(2), CancellationToken.None).ContinueWith(_ => { });
-        if (socket.State == WebSocketState.Open)
-        {
-            await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "terminal closed", CancellationToken.None);
-        }
-    }
-
-    private static ProcessStartInfo BuildInteractiveTerminalStartInfo(Project project)
-    {
-        var machine = project.Machine ?? throw new InvalidOperationException("Project machine is missing.");
-        if (machine.Kind == MachineKind.Local)
-        {
-            if (machine.TargetsWindows())
-            {
-                return TerminalStartInfo(
-                    "powershell",
-                    new[] { "-NoLogo", "-NoExit", "-Command", "Set-Location -LiteralPath " + TargetCommandRunner.QuotePowerShellValue(project.Path) },
-                    null);
-            }
-
-            var scriptBinary = ResolveScriptBinary();
-            if (scriptBinary is not null)
-            {
-                return TerminalStartInfo(
-                    scriptBinary,
-                    new[] { "-q", "-f", "-e", "-c", BuildInteractiveUnixShellCommand(project.Path), "/dev/null" },
-                    null);
-            }
-
-            return TerminalStartInfo("/bin/bash", new[] { "-li" }, project.Path);
-        }
-
-        if (string.IsNullOrWhiteSpace(machine.Host))
-        {
-            throw new InvalidOperationException("SSH machine host is required.");
-        }
-
-        var destination = string.IsNullOrWhiteSpace(machine.UserName)
-            ? machine.Host
-            : machine.UserName + "@" + machine.Host;
-        var arguments = new List<string>
-        {
-            "-tt",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-p",
-            machine.Port.ToString()
-        };
-
-        if (!string.IsNullOrWhiteSpace(machine.SshKeyPath))
-        {
-            var keyPath = ResolveSshKeyPath(machine.SshKeyPath);
-            if (!File.Exists(keyPath))
-            {
-                throw new InvalidOperationException("SSH key file is not accessible inside the API runtime: " + keyPath + ".");
-            }
-
-            arguments.Add("-i");
-            arguments.Add(keyPath);
-        }
-
-        arguments.Add(destination);
-        arguments.Add(machine.TargetsWindows()
-            ? "powershell -NoLogo"
-            : BuildInteractiveUnixShellCommand(project.Path));
-        return TerminalStartInfo("ssh", arguments, null);
-    }
-
-    private static ProcessStartInfo TerminalStartInfo(string fileName, IReadOnlyList<string> arguments, string? workingDirectory)
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = fileName,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-
-        if (!string.IsNullOrWhiteSpace(workingDirectory))
-        {
-            startInfo.WorkingDirectory = workingDirectory;
-        }
-
-        startInfo.Environment["TERM"] = "xterm-256color";
-        foreach (var argument in arguments)
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
-
-        return startInfo;
-    }
-
-    private static string BuildInteractiveUnixShellCommand(string projectPath) =>
-        "cd " + QuoteShell(projectPath) + " && exec ${SHELL:-/bin/bash} -li";
-
     private static Task<Project?> LoadProjectWithMachineAsync(Guid id, AppDbContext db, CancellationToken cancellationToken) =>
         db.Projects.Include(x => x.Machine).AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
 
@@ -1321,76 +1181,6 @@ public static class ApiEndpoints
         }
 
         return normalized.Length <= 180 ? normalized : normalized[..180];
-    }
-
-    private static string? ResolveScriptBinary()
-    {
-        foreach (var path in new[] { "/usr/bin/script", "/bin/script" })
-        {
-            if (File.Exists(path))
-            {
-                return path;
-            }
-        }
-
-        return null;
-    }
-
-    private static async Task PumpTerminalReaderAsync(StreamReader reader, WebSocket socket, CancellationToken cancellationToken)
-    {
-        var buffer = new char[2048];
-        while (socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
-        {
-            var read = await reader.ReadAsync(buffer, cancellationToken);
-            if (read <= 0)
-            {
-                break;
-            }
-
-            await SendTerminalTextAsync(socket, new string(buffer, 0, read), cancellationToken);
-        }
-    }
-
-    private static async Task PumpTerminalInputAsync(WebSocket socket, StreamWriter input, CancellationToken cancellationToken)
-    {
-        var buffer = new byte[4096];
-        while (socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
-        {
-            var received = await socket.ReceiveAsync(buffer, cancellationToken);
-            if (received.MessageType == WebSocketMessageType.Close)
-            {
-                break;
-            }
-
-            if (received.MessageType != WebSocketMessageType.Text)
-            {
-                continue;
-            }
-
-            var text = Encoding.UTF8.GetString(buffer, 0, received.Count);
-            await input.WriteAsync(text.AsMemory(), cancellationToken);
-            await input.FlushAsync(cancellationToken);
-        }
-    }
-
-    private static Task SendTerminalTextAsync(WebSocket socket, string text, CancellationToken cancellationToken)
-    {
-        var bytes = Encoding.UTF8.GetBytes(text);
-        return socket.SendAsync(bytes, WebSocketMessageType.Text, true, cancellationToken);
-    }
-
-    private static string QuoteShell(string value) => "'" + value.Replace("'", "'\"'\"'", StringComparison.Ordinal) + "'";
-
-    private static string ResolveSshKeyPath(string configuredPath)
-    {
-        var expanded = configuredPath.Replace("~", Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StringComparison.Ordinal);
-        if (Path.IsPathRooted(expanded))
-        {
-            return expanded;
-        }
-
-        var fileName = Path.GetFileName(expanded);
-        return Path.Combine("/home/app/.ssh", fileName);
     }
 
     private static string NormalizeSpeed(string? speed)

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ClipboardEvent, DragEvent, FormEvent, KeyboardEvent, ReactNode } from 'react'
+import type { ClipboardEvent, DragEvent, FormEvent, ReactNode } from 'react'
 import { createPortal, flushSync } from 'react-dom'
 import {
   Check,
@@ -30,7 +30,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
-import { ApiError, api, apiWebSocketUrl, getStoredToken, storeToken } from '@/api/client'
+import { ApiError, api, apiUrl, getStoredToken, storeToken } from '@/api/client'
 import type {
   ApiConfig,
   CodexRun,
@@ -1865,7 +1865,7 @@ function QueueWorkspace({
           ) : activeTab === 'history' ? (
             <RequestHistory requests={historyRequests} deletedRequests={deletedRequests} now={now} onDelete={onDeleteRequest} />
           ) : (
-            <ProjectTerminal project={selectedProject} requests={queueRequests} now={now} onError={onError} />
+            <ProjectTerminal project={selectedProject} requests={queueRequests} now={now} />
           )}
         </>
       ) : (
@@ -3568,112 +3568,16 @@ function ProjectTerminal({
   project,
   requests,
   now,
-  onError,
 }: {
   project: Project
   requests: CodexRequest[]
   now: number
-  onError: (cause: unknown) => void
 }) {
-  const [command, setCommand] = useState('')
-  const [terminalOutput, setTerminalOutput] = useState('')
-  const [socketStatus, setSocketStatus] = useState<'connecting' | 'connected' | 'closed'>('connecting')
-  const [commandHistory, setCommandHistory] = useState<string[]>([])
-  const [historyCursor, setHistoryCursor] = useState<number | null>(null)
-  const screenRef = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
-  const socketRef = useRef<WebSocket | null>(null)
   const queuedCount = requests.filter((request) => request.status === 'Queued').length
   const runningCount = requests.filter((request) => request.status === 'Running').length
   const limitedRequest = requests.find((request) => request.status === 'UsageLimited')
   const limitedRemaining = limitedRequest?.retryAfter ? formatRemainingTime(limitedRequest.retryAfter, now) : null
-  const promptPath = terminalPathLabel(project.path)
-  const secretPrompt = isTerminalSecretPrompt(terminalOutput)
-  const replyPrompt = secretPrompt || isTerminalReplyPrompt(terminalOutput)
-
-  useEffect(() => {
-    screenRef.current?.scrollTo({ top: screenRef.current.scrollHeight })
-  }, [terminalOutput, command])
-
-  useEffect(() => {
-    setTerminalOutput('')
-    setSocketStatus('connecting')
-    const socket = new WebSocket(apiWebSocketUrl(`/projects/${project.id}/terminal/ws`))
-    socketRef.current = socket
-    socket.onopen = () => {
-      setSocketStatus('connected')
-      inputRef.current?.focus()
-    }
-    socket.onmessage = (event) => {
-      setTerminalOutput((current) => current + String(event.data))
-    }
-    socket.onerror = () => {
-      setSocketStatus('closed')
-      setTerminalOutput((current) => current + '\n[terminal disconnected]\n')
-    }
-    socket.onclose = () => {
-      setSocketStatus('closed')
-    }
-
-    return () => {
-      socket.close()
-      socketRef.current = null
-    }
-  }, [project.id])
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault()
-    const trimmed = command.trim()
-    if (!trimmed) return
-
-    setCommand('')
-    setCommandHistory((current) => (current.at(-1) === trimmed ? current : [...current, trimmed].slice(-100)))
-    setHistoryCursor(null)
-    if (socketRef.current?.readyState !== WebSocket.OPEN) {
-      const message = 'Terminal is not connected.'
-      setTerminalOutput((current) => current + `\n${message}\n`)
-      onError(new Error(message))
-      return
-    }
-
-    setTerminalOutput((current) => {
-      if (secretPrompt) return current + '\n'
-      if (replyPrompt) return current + `${trimmed}\n`
-      return current + `${project.machineName}:${promptPath}$ ${trimmed}\n`
-    })
-    socketRef.current.send(`${trimmed}\n`)
-  }
-
-  const handleTerminalKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.ctrlKey && event.key.toLowerCase() === 'l') {
-      event.preventDefault()
-      setTerminalOutput('')
-      return
-    }
-
-    if (event.key === 'ArrowUp') {
-      event.preventDefault()
-      if (commandHistory.length === 0) return
-      const nextCursor = historyCursor === null ? commandHistory.length - 1 : Math.max(0, historyCursor - 1)
-      setHistoryCursor(nextCursor)
-      setCommand(commandHistory[nextCursor] ?? '')
-      return
-    }
-
-    if (event.key === 'ArrowDown') {
-      event.preventDefault()
-      if (commandHistory.length === 0 || historyCursor === null) return
-      const nextCursor = historyCursor + 1
-      if (nextCursor >= commandHistory.length) {
-        setHistoryCursor(null)
-        setCommand('')
-        return
-      }
-
-      setHistoryCursor(nextCursor)
-      setCommand(commandHistory[nextCursor] ?? '')
-    }
-  }
+  const terminalSrc = useMemo(() => apiUrl(`/projects/${project.id}/terminal/ttyd`), [project.id])
 
   return (
     <GlassPanel className="terminal-panel">
@@ -3684,91 +3588,19 @@ function ProjectTerminal({
           <strong>{limitedRequest ? 'Limited' : 'Ready'}</strong>
           {limitedRequest ? ` ${limitedRemaining ? `for ${limitedRemaining}` : 'retry pending'}` : ' usage'}
         </span>
-        <span className={socketStatus === 'connected' ? 'terminal-status-ok' : ''}>
-          <strong>{socketStatus}</strong> shell
+        <span className="terminal-status-ok">
+          <strong>ttyd</strong> shell
         </span>
       </div>
-      <form className="terminal-form" onSubmit={submit}>
-        <div
-          ref={screenRef}
-          className="terminal-screen"
-          aria-live="polite"
-          onClick={() => inputRef.current?.focus()}
-        >
-          {!terminalOutput && (
-            <div className="terminal-empty">
-              <div>Codex Queue terminal</div>
-              <div>{project.machineName}:{project.path}</div>
-            </div>
-          )}
-          <TerminalOutput output={terminalOutput} success />
-          <div className="terminal-live-line">
-            <TerminalPrompt machineName={project.machineName} path={promptPath} />
-            <input
-              ref={inputRef}
-              className="terminal-inline-input"
-              value={command}
-              onChange={(event) => {
-                setCommand(event.target.value)
-                setHistoryCursor(null)
-              }}
-              onKeyDown={handleTerminalKeyDown}
-              readOnly={socketStatus !== 'connected'}
-              type={secretPrompt ? 'password' : 'text'}
-              spellCheck={false}
-              autoCapitalize="off"
-              autoComplete="off"
-              aria-label="Terminal command"
-              autoFocus
-            />
-            <span className="terminal-cursor" aria-hidden="true" />
-          </div>
-        </div>
-      </form>
+      <iframe
+        key={project.id}
+        className="terminal-frame"
+        src={terminalSrc}
+        title={`${project.machineName} terminal for ${project.name}`}
+        allow="clipboard-read; clipboard-write"
+      />
     </GlassPanel>
   )
-}
-
-function TerminalPrompt({ machineName, path }: { machineName: string; path: string }) {
-  return (
-    <span className="terminal-prompt" aria-hidden="true">
-      <span className="terminal-prompt-user">{machineName}</span>
-      <span className="terminal-prompt-separator">:</span>
-      <span className="terminal-prompt-path">{path}</span>
-      <span className="terminal-prompt-symbol">$</span>
-    </span>
-  )
-}
-
-function TerminalOutput({ output, success }: { output: string; success: boolean }) {
-  const segments = useMemo(() => parseAnsiOutput(output), [output])
-
-  return (
-    <pre className={`terminal-output ${success ? 'terminal-output--ok' : 'terminal-output--bad'}`}>
-      {segments.map((segment, index) => (
-        <span key={index} className={segment.className}>{segment.text}</span>
-      ))}
-    </pre>
-  )
-}
-
-function terminalPathLabel(path: string) {
-  const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '')
-  const name = normalized.split('/').filter(Boolean).at(-1)
-  return name ? `~/${name}` : '~'
-}
-
-function terminalLastLine(output: string) {
-  return output.replace(/\r/g, '').split('\n').at(-1)?.trim() ?? ''
-}
-
-function isTerminalSecretPrompt(output: string) {
-  return /password(?: for [^:]+)?\s*:?\s*$/i.test(terminalLastLine(output))
-}
-
-function isTerminalReplyPrompt(output: string) {
-  const line = terminalLastLine(output)
-  return /(\[[yYnN]\/[yYnN]\]|\(yes\/no\)|yes\/no|\?|:)\s*$/.test(line)
 }
 
 function parseAnsiOutput(value: string) {

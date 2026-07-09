@@ -24,10 +24,9 @@ import type {
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '/api'
 const TOKEN_KEY = 'codex-queue-token'
 
-export function apiWebSocketUrl(path: string) {
+export function apiUrl(path: string) {
   const base = new URL(API_BASE, window.location.origin)
   const url = new URL(`${base.pathname.replace(/\/$/, '')}${path}`, base.origin)
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   const token = getStoredToken()
   if (token) {
     url.searchParams.set('access_token', token)

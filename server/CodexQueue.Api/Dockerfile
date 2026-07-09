@@ -12,7 +12,7 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git openssh-client \
+    && apt-get install -y --no-install-recommends ca-certificates git openssh-client ttyd \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /app/data /home/app/.ssh \
     && chmod 700 /home/app/.ssh
