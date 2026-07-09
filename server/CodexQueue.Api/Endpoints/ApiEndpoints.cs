@@ -333,7 +333,12 @@ public static class ApiEndpoints
                     return Results.BadRequest(new { error = string.IsNullOrWhiteSpace(output) ? "Git commit failed." : output });
                 }
 
-                return Results.Ok(new GitCommitDto(result.Success, output, result.ExitCode, result.CommandPreview, ExtractCommitSha(output)));
+                var commitInfo = await ReadGitCommitInfoAsync(runner, project.Machine, project.Path, cancellationToken);
+                var commitSha = commitInfo.Sha ?? ExtractCommitSha(output);
+                var formattedOutput = commitSha is null
+                    ? output
+                    : GitCommitResultFormatter.Format(commitSha, commitInfo.Message ?? message);
+                return Results.Ok(new GitCommitDto(result.Success, formattedOutput, result.ExitCode, result.CommandPreview, commitSha));
             }
             catch (Exception ex) when (ex is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
             {
@@ -397,8 +402,13 @@ public static class ApiEndpoints
                 var afterHead = await ReadGitHeadAsync(runner, project.Machine, project.Path, cancellationToken);
                 if (!string.IsNullOrWhiteSpace(afterHead) && !string.Equals(beforeHead, afterHead, StringComparison.OrdinalIgnoreCase))
                 {
-                    var outputWithMarker = output.TrimEnd() + Environment.NewLine + "Commit created:" + Environment.NewLine + afterHead;
-                    return Results.Ok(new GitCommitDto(true, outputWithMarker.Trim(), result.ExitCode, result.CommandPreview, afterHead));
+                    var commitInfo = await ReadGitCommitInfoAsync(runner, project.Machine, project.Path, cancellationToken);
+                    return Results.Ok(new GitCommitDto(
+                        true,
+                        GitCommitResultFormatter.Format(afterHead, commitInfo.Message ?? GitCommitMessageHelper.ExtractFromOutput(output)),
+                        result.ExitCode,
+                        result.CommandPreview,
+                        afterHead));
                 }
 
                 var afterStatusResult = await ReadGitStatusPorcelainAsync(runner, project.Machine, project.Path, cancellationToken);
@@ -1228,6 +1238,41 @@ public static class ApiEndpoints
         return StripCommandPreview(result.Output)
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .LastOrDefault(line => line.Length == 40 && line.All(IsHex));
+    }
+
+    private static async Task<(string? Sha, string? Message)> ReadGitCommitInfoAsync(
+        ITargetCommandRunner runner,
+        TargetMachine machine,
+        string projectPath,
+        CancellationToken cancellationToken)
+    {
+        var result = await runner.RunShellAsync(
+            machine,
+            projectPath,
+            "git rev-parse HEAD && git log -1 --pretty=%B",
+            _ => Task.CompletedTask,
+            cancellationToken);
+
+        if (!result.Success)
+        {
+            return (null, null);
+        }
+
+        var lines = StripCommandPreview(result.Output).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var shaIndex = Array.FindIndex(lines, line =>
+        {
+            var trimmed = line.Trim();
+            return trimmed.Length == 40 && trimmed.All(IsHex);
+        });
+
+        if (shaIndex < 0)
+        {
+            return (null, null);
+        }
+
+        var sha = lines[shaIndex].Trim();
+        var message = string.Join('\n', lines.Skip(shaIndex + 1)).Trim();
+        return (sha, string.IsNullOrWhiteSpace(message) ? null : message);
     }
 
     private static string BuildProjectScopedPrompt(string projectPath, string userPrompt) =>

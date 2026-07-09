@@ -939,6 +939,7 @@ public sealed class QueueWorker(
             if (CommitOutputClaimsCreated(result.Output))
             {
                 await PopulateCommitMetadataAsync(db, request, run, cancellationToken);
+                ApplyFormattedCommitOutput(run);
                 ApplyCommitSummary(request, run);
             }
         }
@@ -951,6 +952,7 @@ public sealed class QueueWorker(
             if (result.Success && request.GenerateCommit && CommitOutputClaimsCreated(result.Output))
             {
                 await PopulateCommitMetadataAsync(db, request, run, cancellationToken);
+                ApplyFormattedCommitOutput(run);
                 ApplyCommitSummary(request, run);
             }
         }
@@ -1264,6 +1266,16 @@ public sealed class QueueWorker(
         request.Summary = string.IsNullOrWhiteSpace(run.CommitMessage)
             ? "Commit created: " + run.CommitSha
             : run.CommitMessage;
+    }
+
+    private static void ApplyFormattedCommitOutput(CodexRun run)
+    {
+        if (string.IsNullOrWhiteSpace(run.CommitSha))
+        {
+            return;
+        }
+
+        run.Output = GitCommitResultFormatter.Format(run.CommitSha, run.CommitMessage) + Environment.NewLine;
     }
 
     private async Task AppendOutputAsync(Guid runId, string chunk, CancellationToken cancellationToken)
