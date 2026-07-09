@@ -312,62 +312,71 @@ public sealed class QueueWorker(
                 return;
             }
 
-            await using (var scope = scopeFactory.CreateAsyncScope())
+            if (await PrepareCommitRunAfterRequestAsync(requestId, requestCancellation.Token))
             {
-                var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-                var request = await db.Requests.Include(x => x.Runs).FirstAsync(x => x.Id == requestId, stoppingToken);
-                if (!request.GenerateCommit || !request.SeparateCommitSession)
-                {
-                    CancelUnusedCommitRun(GetLatestRunOfKind(request.Runs, RunKind.Commit));
-                    request.Status = QueueStatus.Succeeded;
-                    request.FinishedAt = DateTimeOffset.UtcNow;
-                    request.Summary = LastUsefulLine(GetLatestRunOfKind(request.Runs, RunKind.Request)?.Output ?? string.Empty);
-                    await TrySaveChangesAsync(db, "complete request without separate commit", stoppingToken);
-                    return;
-                }
-
-                var commitRun = GetLatestRunOfKind(request.Runs, RunKind.Commit);
-                if (commitRun?.Status == QueueStatus.Succeeded)
-                {
-                    request.Status = QueueStatus.Succeeded;
-                    request.FinishedAt = commitRun.FinishedAt ?? DateTimeOffset.UtcNow;
-                    request.Error = null;
-                    request.Summary = LastUsefulLine(commitRun.Output);
-                    await TrySaveChangesAsync(db, "complete already committed request", stoppingToken);
-                    return;
-                }
-
-                commitRun ??= new CodexRun
-                {
-                    RequestId = request.Id,
-                    Kind = RunKind.Commit,
-                    Status = QueueStatus.Queued,
-                    CreatedAt = DateTimeOffset.UtcNow
-                };
-                ApplyCommitModel(request, commitRun);
-                if (!request.Runs.Contains(commitRun))
-                {
-                    request.Runs.Add(commitRun);
-                }
-
-                if (commitRun.Status is QueueStatus.Failed or QueueStatus.Cancelled or QueueStatus.UsageLimited)
-                {
-                    ResetRunForResume(commitRun);
-                }
-
-                request.Status = QueueStatus.Queued;
-                request.Error = null;
-                request.FinishedAt = null;
-                if (!await TrySaveChangesAsync(db, "prepare commit run", stoppingToken))
-                {
-                    return;
-                }
+                await ExecuteRunAsync(requestId, RunKind.Commit, requestCancellation.Token);
             }
         }
         finally
         {
             _activeRequests.TryRemove(requestId, out _);
         }
+    }
+
+    private async Task<bool> PrepareCommitRunAfterRequestAsync(Guid requestId, CancellationToken cancellationToken)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var request = await db.Requests.Include(x => x.Runs).FirstAsync(x => x.Id == requestId, cancellationToken);
+        var requestRun = GetLatestRunOfKind(request.Runs, RunKind.Request);
+
+        if (!request.GenerateCommit || !request.SeparateCommitSession)
+        {
+            CancelUnusedCommitRun(GetLatestRunOfKind(request.Runs, RunKind.Commit));
+            request.Status = QueueStatus.Succeeded;
+            request.FinishedAt = DateTimeOffset.UtcNow;
+            request.Summary = LastUsefulLine(requestRun?.Output ?? string.Empty);
+            await TrySaveChangesAsync(db, "complete request without separate commit", cancellationToken);
+            return false;
+        }
+
+        var commitRun = GetLatestRunOfKind(request.Runs, RunKind.Commit);
+        if (commitRun?.Status == QueueStatus.Succeeded)
+        {
+            request.Status = QueueStatus.Succeeded;
+            request.FinishedAt = commitRun.FinishedAt ?? DateTimeOffset.UtcNow;
+            request.Error = null;
+            request.Summary = LastUsefulLine(commitRun.Output);
+            await TrySaveChangesAsync(db, "complete already committed request", cancellationToken);
+            return false;
+        }
+
+        if (commitRun is null)
+        {
+            commitRun = CreateCommitRun(request);
+            request.Runs.Add(commitRun);
+        }
+        else
+        {
+            ApplyCommitModel(request, commitRun);
+            if (commitRun.Status is QueueStatus.Failed or QueueStatus.Cancelled or QueueStatus.UsageLimited)
+            {
+                ResetRunForResume(commitRun);
+                ApplyCommitModel(request, commitRun);
+            }
+        }
+
+        if (await IsRunModelUsageLimitedAsync(db, request.MachineId, commitRun.Model, DateTimeOffset.UtcNow, cancellationToken))
+        {
+            MarkRequestQueued(request);
+            await TrySaveChangesAsync(db, "queue commit run behind usage limit", cancellationToken);
+            return false;
+        }
+
+        request.Status = QueueStatus.Running;
+        request.Error = null;
+        request.FinishedAt = null;
+        return await TrySaveChangesAsync(db, "prepare immediate commit run", cancellationToken);
     }
 
     private async Task RunCommitAsync(Guid requestId, CancellationToken stoppingToken)

@@ -52,7 +52,7 @@ import type {
   SaveProjectRequest,
   UpdateQueueRequest,
 } from '@/api/types'
-import { FieldLabel, GlassButton, GlassInput, GlassPanel, GlassSelect, GlassTextarea } from '@/components/einui/Glass'
+import { FieldLabel, GlassButton, GlassDropdownSelect, GlassInput, GlassPanel, GlassSelect, GlassTextarea } from '@/components/einui/Glass'
 import { ProgressLine, StatusBadge } from '@/components/einui/Status'
 import { formatDate, shortId } from '@/lib/utils'
 import './App.css'
@@ -2379,7 +2379,7 @@ function QueueComposer({
             <GlassButton variant="secondary" size="sm" type="button" onClick={saveDefaults} disabled={!defaultsChanged || savingDefaults}>
               <Check size={13} /> {savingDefaults ? 'Saving' : 'Save defaults'}
             </GlassButton>
-            <GlassButton variant="primary" type="submit" disabled={!prompt.trim() || !requestModel.model.trim() || isQueueing}>
+            <GlassButton className="queue-submit-button" variant="primary" type="submit" disabled={!prompt.trim() || !requestModel.model.trim() || isQueueing}>
               {isQueueing ? <RefreshCcw size={16} className="action-spinner" /> : <Play size={16} />}
               {isQueueing ? (editingRequest ? 'Updating...' : 'Queueing...') : (editingRequest ? 'Update' : 'Queue')}
             </GlassButton>
@@ -2496,30 +2496,32 @@ function ModelPicker({
 }) {
   const selectedOption = options.find((option) => option.model === value.model)
   const supportsPriority = selectedOption?.supportsPriority ?? false
+  const selectedModelValue = selectedOption ? value.model : 'custom'
+  const dropdownOptions = useMemo(
+    () => [...options.map((option) => ({ label: option.label, value: option.model })), { label: 'Custom', value: 'custom' }],
+    [options],
+  )
 
   return (
     <div className={`model-picker-grid ${disabled ? 'model-picker-grid--disabled' : ''}`} aria-disabled={disabled}>
       <div className="model-picker-head">
         <span className="model-picker-title">{label}</span>
-        <GlassSelect
-          value={selectedOption ? value.model : 'custom'}
+        <GlassDropdownSelect
+          label={`${label} model`}
+          options={dropdownOptions}
+          value={selectedModelValue}
           disabled={disabled}
-          onChange={(event) => {
-            if (event.target.value === 'custom') {
+          onChange={(nextValue) => {
+            if (nextValue === 'custom') {
               onChange({ ...value, model: value.model || '' })
               return
             }
-            const option = options.find((item) => item.model === event.target.value)
+            const option = options.find((item) => item.model === nextValue)
             if (option) {
               onChange({ model: option.model, effort: value.effort || 'medium', speed: option.supportsPriority ? value.speed : 'normal' })
             }
           }}
-        >
-          {options.map((option) => (
-            <option key={option.model} value={option.model}>{option.label}</option>
-          ))}
-          <option value="custom">Custom</option>
-        </GlassSelect>
+        />
       </div>
       {!selectedOption && (
         <GlassInput value={value.model} disabled={disabled} onChange={(event) => onChange({ ...value, model: event.target.value })} placeholder="model id" />
@@ -4227,7 +4229,7 @@ function GitPanel({
             rows={3}
           />
         </FieldLabel>
-        <GlassButton variant="primary" type="submit" disabled={!commitMessage.trim() || committing || clean}>
+        <GlassButton className="manual-commit-button" variant="secondary" type="submit" disabled={!commitMessage.trim() || committing || clean}>
           {committing ? <RefreshCcw size={15} className="action-spinner" /> : <GitCommit size={15} />}
           {committing ? 'Committing...' : 'Commit'}
         </GlassButton>
@@ -4237,7 +4239,7 @@ function GitPanel({
 
       <div className="git-ai-box">
         <ModelPicker label="Codex commit" options={config.models} value={suggestionModel} onChange={setSuggestionModel} disabled={clean || generating} />
-        <GlassButton variant="secondary" type="button" onClick={commitWithCodex} disabled={clean || generating || !suggestionModel.model.trim()}>
+        <GlassButton variant="primary" type="button" onClick={commitWithCodex} disabled={clean || generating || !suggestionModel.model.trim()}>
           {generating ? <RefreshCcw size={15} className="action-spinner" /> : <GitCommit size={15} />}
           {generating ? 'Committing...' : 'Commit with Codex'}
         </GlassButton>
