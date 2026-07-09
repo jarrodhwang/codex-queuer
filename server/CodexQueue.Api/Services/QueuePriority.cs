@@ -4,39 +4,8 @@ namespace CodexQueue.Api.Services;
 
 public static class QueuePriority
 {
-    public static int DisplayRank(QueueStatus status) =>
-        status switch
-        {
-            QueueStatus.Succeeded => 0,
-            QueueStatus.Running or QueueStatus.CancelRequested => 1,
-            QueueStatus.Queued => 2,
-            QueueStatus.UsageLimited => 3,
-            QueueStatus.Failed or QueueStatus.Cancelled => 4,
-            _ => 5
-        };
-
     public static int CompareForDisplay(CodexRequest left, CodexRequest right)
     {
-        var rankComparison = DisplayRank(left.Status).CompareTo(DisplayRank(right.Status));
-        if (rankComparison != 0)
-        {
-            return rankComparison;
-        }
-
-        if (left.Status == QueueStatus.Succeeded)
-        {
-            return CompareDescending(left.FinishedAt ?? left.CreatedAt, right.FinishedAt ?? right.CreatedAt)
-                ?? CompareDescending(left.CreatedAt, right.CreatedAt)
-                ?? left.Id.CompareTo(right.Id);
-        }
-
-        if (left.Status is QueueStatus.Failed or QueueStatus.Cancelled or QueueStatus.UsageLimited)
-        {
-            return CompareDescending(left.FinishedAt ?? left.CreatedAt, right.FinishedAt ?? right.CreatedAt)
-                ?? CompareDescending(left.CreatedAt, right.CreatedAt)
-                ?? left.Id.CompareTo(right.Id);
-        }
-
         return left.QueueOrder.CompareTo(right.QueueOrder) != 0
             ? left.QueueOrder.CompareTo(right.QueueOrder)
             : left.CreatedAt.CompareTo(right.CreatedAt) != 0
@@ -73,10 +42,15 @@ public static class QueuePriority
             .ThenBy(x => x.CreatedAt)
             .ThenBy(x => x.Id);
 
-        var order = 1;
-        foreach (var request in active.Concat(requestedQueued).Concat(remainingQueued))
+        var orderedRequests = active.Concat(requestedQueued).Concat(remainingQueued).ToArray();
+        var orderSlots = orderedRequests
+            .Select(x => x.QueueOrder)
+            .Order()
+            .ToArray();
+
+        for (var index = 0; index < orderedRequests.Length; index++)
         {
-            request.QueueOrder = order++;
+            orderedRequests[index].QueueOrder = orderSlots[index];
         }
     }
 
@@ -90,9 +64,4 @@ public static class QueuePriority
         request.ArchivedAt is null &&
         request.Status is QueueStatus.Queued or QueueStatus.Running or QueueStatus.CancelRequested;
 
-    private static int? CompareDescending(DateTimeOffset left, DateTimeOffset right)
-    {
-        var comparison = right.CompareTo(left);
-        return comparison == 0 ? null : comparison;
-    }
 }
