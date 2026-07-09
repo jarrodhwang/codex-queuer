@@ -110,6 +110,26 @@ public static class ApiEndpoints
             }
         });
 
+        api.MapGet("/machines/{id:guid}/usage", async (Guid id, AppDbContext db, ITargetCommandRunner runner, CancellationToken cancellationToken) =>
+        {
+            var machine = await db.Machines.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            if (machine is null)
+            {
+                return Results.NotFound();
+            }
+
+            try
+            {
+                var result = await runner.ReadRateLimitsAsync(machine, cancellationToken);
+                var snapshot = ParseRateLimits(result.Output);
+                return Results.Ok(new MachineRateLimitsDto(machine.Id, machine.Name, snapshot is not null, snapshot is null ? "Codex did not return rate-limit data." : null, snapshot?.Primary, snapshot?.Secondary, snapshot?.RateLimitReachedType));
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or TimeoutException)
+            {
+                return Results.Ok(new MachineRateLimitsDto(machine.Id, machine.Name, false, ex.Message, null, null, null));
+            }
+        });
+
         api.MapGet("/machines/{id:guid}/folders", async (Guid id, string? path, AppDbContext db, IProjectFileService files, CancellationToken cancellationToken) =>
         {
             var machine = await db.Machines.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
@@ -863,6 +883,56 @@ public static class ApiEndpoints
                     x.CommitSha))
                 .ToArray();
         });
+    }
+
+    private sealed record RateLimitSnapshot(RateLimitWindowDto? Primary, RateLimitWindowDto? Secondary, string? RateLimitReachedType);
+
+    private static RateLimitSnapshot? ParseRateLimits(string output)
+    {
+        foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Reverse())
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(line);
+                var root = document.RootElement;
+                if (!root.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.Number || id.GetInt32() != 2
+                    || !root.TryGetProperty("result", out var result)
+                    || !result.TryGetProperty("rateLimits", out var rateLimits))
+                {
+                    continue;
+                }
+
+                return new RateLimitSnapshot(
+                    ParseRateLimitWindow(rateLimits, "primary"),
+                    ParseRateLimitWindow(rateLimits, "secondary"),
+                    rateLimits.TryGetProperty("rateLimitReachedType", out var reachedType) && reachedType.ValueKind == JsonValueKind.String
+                        ? reachedType.GetString()
+                        : null);
+            }
+            catch (JsonException)
+            {
+                // The process preview and stderr may be mixed into the captured output.
+            }
+        }
+
+        return null;
+    }
+
+    private static RateLimitWindowDto? ParseRateLimitWindow(JsonElement rateLimits, string propertyName)
+    {
+        if (!rateLimits.TryGetProperty(propertyName, out var window) || window.ValueKind != JsonValueKind.Object
+            || !window.TryGetProperty("usedPercent", out var usedPercent) || !usedPercent.TryGetInt32(out var used))
+        {
+            return null;
+        }
+
+        var duration = window.TryGetProperty("windowDurationMins", out var durationElement) && durationElement.TryGetInt32(out var durationValue)
+            ? durationValue
+            : (int?)null;
+        var resetsAt = window.TryGetProperty("resetsAt", out var resetsElement) && resetsElement.TryGetInt64(out var resetValue)
+            ? resetValue
+            : (long?)null;
+        return new RateLimitWindowDto(Math.Clamp(used, 0, 100), duration, resetsAt);
     }
 
     private static void Apply(SaveMachineRequest input, TargetMachine machine)

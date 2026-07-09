@@ -241,6 +241,22 @@ export type MachineTest = {
   output: string
 }
 
+export type RateLimitWindow = {
+  usedPercent: number
+  windowDurationMins?: number | null
+  resetsAt?: number | null
+}
+
+export type MachineRateLimits = {
+  machineId: string
+  machineName: string
+  available: boolean
+  error?: string | null
+  primary?: RateLimitWindow | null
+  secondary?: RateLimitWindow | null
+  rateLimitReachedType?: string | null
+}
+
 export type QueueDiagnostics = {
   lastHeartbeat?: string | null
   lastDispatch?: string | null

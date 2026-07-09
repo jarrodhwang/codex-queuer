@@ -7,6 +7,10 @@ namespace CodexQueue.Api.Services;
 
 public interface ITargetCommandRunner
 {
+    Task<CommandResult> ReadRateLimitsAsync(
+        TargetMachine machine,
+        CancellationToken cancellationToken);
+
     Task<CommandResult> RunCodexAsync(
         TargetMachine machine,
         string projectPath,
@@ -37,6 +41,49 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 {
     private const string UnixRemotePathPrefix = "export PATH=\"$HOME/.local/bin:$HOME/bin:$PATH\";";
     private static readonly TimeSpan CodexFirstOutputTimeout = TimeSpan.FromSeconds(75);
+    private static readonly TimeSpan RateLimitsTimeout = TimeSpan.FromSeconds(20);
+
+    public Task<CommandResult> ReadRateLimitsAsync(TargetMachine machine, CancellationToken cancellationToken)
+    {
+        var initialize = JsonSerializer.Serialize(new
+        {
+            method = "initialize",
+            id = 1,
+            @params = new
+            {
+                clientInfo = new { name = "codex-queue", title = "Codex Queue", version = "1.0" },
+                capabilities = new { experimentalApi = false }
+            }
+        });
+        var initialized = "{\"method\":\"initialized\"}";
+        var readRateLimits = "{\"method\":\"account/rateLimits/read\",\"id\":2}";
+        var input = string.Join(Environment.NewLine, new[] { initialize, initialized, readRateLimits }) + Environment.NewLine;
+
+        if (machine.Kind == MachineKind.Local)
+        {
+            return RunProcessAsync(
+                "codex",
+                new[] { "app-server", "--stdio" },
+                null,
+                "codex app-server --stdio (account/rateLimits/read)",
+                static _ => Task.CompletedTask,
+                cancellationToken,
+                firstProcessOutputTimeout: RateLimitsTimeout,
+                standardInput: input);
+        }
+
+        var remoteCommand = machine.TargetsWindows()
+            ? BuildPowerShellRemoteCommand("codex app-server --stdio")
+            : UnixRemotePathPrefix + " codex app-server --stdio";
+        return RunSshAsync(
+            machine,
+            remoteCommand,
+            "ssh " + machine.Host + " codex app-server --stdio (account/rateLimits/read)",
+            static _ => Task.CompletedTask,
+            cancellationToken,
+            firstProcessOutputTimeout: RateLimitsTimeout,
+            standardInput: input);
+    }
 
     public Task<CommandResult> RunCodexAsync(
         TargetMachine machine,

@@ -555,6 +555,11 @@
   gap: 8px;
 }
 
+.usage-window {
+  display: grid;
+  gap: 5px;
+}
+
 .usage-sidebar-item {
   display: grid;
   gap: 5px;

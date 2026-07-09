@@ -10,6 +10,7 @@ import type {
   GitStatus,
   Machine,
   MachineTest,
+  MachineRateLimits,
   Project,
   QueueDiagnostics,
   SaveMachineRequest,
@@ -97,6 +98,7 @@ export const api = {
     }),
   deleteMachine: (id: string) => apiFetch<void>(`/machines/${id}`, { method: 'DELETE' }),
   testMachine: (id: string) => apiFetch<MachineTest>(`/machines/${id}/test`, { method: 'POST' }),
+  machineUsage: (id: string) => apiFetch<MachineRateLimits>(`/machines/${id}/usage`),
   machineFolders: (id: string, path = '') =>
     apiFetch<FileTreeEntry[]>(`/machines/${id}/folders?path=${encodeURIComponent(path)}`),
   projects: () => apiFetch<Project[]>('/projects'),

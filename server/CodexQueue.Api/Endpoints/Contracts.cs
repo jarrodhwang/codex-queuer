@@ -180,6 +180,17 @@ public sealed record ApiConfigDto(bool RequiresToken, IReadOnlyList<ModelOptionD
 
 public sealed record MachineTestDto(bool Success, string Output);
 
+public sealed record RateLimitWindowDto(int UsedPercent, int? WindowDurationMins, long? ResetsAt);
+
+public sealed record MachineRateLimitsDto(
+    Guid MachineId,
+    string MachineName,
+    bool Available,
+    string? Error,
+    RateLimitWindowDto? Primary,
+    RateLimitWindowDto? Secondary,
+    string? RateLimitReachedType);
+
 public sealed record QueueWorkerDiagnosticsDto(
     DateTimeOffset? LastHeartbeat,
     DateTimeOffset? LastDispatch,

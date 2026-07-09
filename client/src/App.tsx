@@ -43,6 +43,7 @@ import type {
   GitStatus,
   Machine,
   MachineKind,
+  MachineRateLimits,
   MachinePlatform,
   ModelOption,
   Project,
@@ -1173,6 +1174,7 @@ function LeftSidebar({
       )}
       {usageModalOpen && (
         <UsageLimitModal
+          machines={machines}
           requests={usageLimitedRequests}
           now={now}
           onClose={() => setUsageModalOpen(false)}
@@ -1226,17 +1228,43 @@ function MachineConnectionStatus({
   )
 }
 
-function UsageLimitModal({ requests, now, onClose }: { requests: CodexRequest[]; now: number; onClose: () => void }) {
+function UsageLimitModal({ machines, requests, now, onClose }: { machines: Machine[]; requests: CodexRequest[]; now: number; onClose: () => void }) {
+  const [usage, setUsage] = useState<Record<string, MachineRateLimits>>({})
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    void Promise.all(machines.map(async (machine) => {
+      try {
+        return await api.machineUsage(machine.id)
+      } catch (cause) {
+        return {
+          machineId: machine.id,
+          machineName: machine.name,
+          available: false,
+          error: cause instanceof Error ? cause.message : 'Could not read Codex usage.',
+        }
+      }
+    })).then((snapshots) => {
+      if (cancelled) return
+      setUsage(Object.fromEntries(snapshots.map((snapshot) => [snapshot.machineId, snapshot])))
+      setLoading(false)
+    })
+
+    return () => { cancelled = true }
+  }, [machines])
+
   return (
     <Modal title="Codex usage" icon={<Gauge size={18} />} onClose={onClose}>
       <div className="usage-modal">
-        <UsageLimitSidebarPanel requests={requests} now={now} />
+        <UsageLimitSidebarPanel machines={machines} usage={usage} loading={loading} requests={requests} now={now} />
       </div>
     </Modal>
   )
 }
 
-function UsageLimitSidebarPanel({ requests, now }: { requests: CodexRequest[], now: number }) {
+function UsageLimitSidebarPanel({ machines, usage, loading, requests, now }: { machines: Machine[]; usage: Record<string, MachineRateLimits>; loading: boolean; requests: CodexRequest[]; now: number }) {
   const active = requests.length > 0
   const buckets = usageLimitBuckets(requests, now)
 
@@ -1249,11 +1277,17 @@ function UsageLimitSidebarPanel({ requests, now }: { requests: CodexRequest[], n
         </a>
       </div>
       <div className="usage-sidebar-tip">
-        <span>{active ? `${requests.length} paused by limits` : 'Live quota is available in Codex settings.'}</span>
+        <span>{active ? `${requests.length} paused by limits` : 'Live quota from Codex app-server.'}</span>
         <a href="https://community.openai.com/c/codex/37" target="_blank" rel="noreferrer">Forum</a>
       </div>
       <div className="usage-sidebar-list">
-        {buckets.map((bucket) => (
+        {loading && <div className="meta">Reading current Codex limits…</div>}
+        {!loading && machines.length === 0 && <div className="meta">No machines configured.</div>}
+        {!loading && machines.map((machine) => (
+          <MachineUsageSection key={machine.id} snapshot={usage[machine.id]} />
+        ))}
+        {active && <div className="usage-section-title">Paused queue requests</div>}
+        {active && buckets.filter((bucket) => bucket.limited).map((bucket) => (
           <div key={bucket.key} className={`usage-sidebar-item ${bucket.limited ? 'limited' : ''} ${bucket.section ? 'usage-sidebar-item--sectioned' : ''}`}>
             {bucket.section && <div className="usage-section-title">{bucket.section}</div>}
             <div className="usage-row-head">
@@ -1270,6 +1304,40 @@ function UsageLimitSidebarPanel({ requests, now }: { requests: CodexRequest[], n
       </div>
     </div>
   )
+}
+
+function MachineUsageSection({ snapshot }: { snapshot?: MachineRateLimits }) {
+  if (!snapshot || !snapshot.available) {
+    return <div className="usage-sidebar-item"><div className="usage-row-head"><span>{snapshot?.machineName ?? 'Machine'}</span><span>unavailable</span></div><div className="meta">{snapshot?.error ?? 'No usage data returned.'}</div></div>
+  }
+
+  const windows = [
+    ['Current window', snapshot.primary],
+    ['Secondary window', snapshot.secondary],
+  ] as const
+  return <div className="usage-sidebar-item">
+    <div className="usage-section-title">{snapshot.machineName}</div>
+    {windows.map(([label, window]) => window && <UsageWindow key={label} label={label} window={window} />)}
+    {!snapshot.primary && !snapshot.secondary && <div className="meta">No active rate-limit windows.</div>}
+    {snapshot.rateLimitReachedType && <div className="meta">Limit reached: {snapshot.rateLimitReachedType}</div>}
+  </div>
+}
+
+function UsageWindow({ label, window }: { label: string; window: NonNullable<MachineRateLimits['primary']> }) {
+  const remaining = Math.max(0, 100 - window.usedPercent)
+  const reset = window.resetsAt ? formatDate(new Date(window.resetsAt * 1000).toISOString()) : 'reset time unknown'
+  const duration = window.windowDurationMins ? ` · ${formatWindowDuration(window.windowDurationMins)}` : ''
+  return <div className="usage-window">
+    <div className="usage-row-head"><span>{label}{duration}</span><span>{remaining}% left</span></div>
+    <div className="usage-meter" aria-label={`${label} ${remaining}% left`}><span style={{ width: `${remaining}%` }} /></div>
+    <div className="meta">resets {reset}</div>
+  </div>
+}
+
+function formatWindowDuration(minutes: number) {
+  if (minutes % 1440 === 0) return `${minutes / 1440}d window`
+  if (minutes % 60 === 0) return `${minutes / 60}h window`
+  return `${minutes}m window`
 }
 
 type UsageBucket = {
