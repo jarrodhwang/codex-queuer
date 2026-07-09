@@ -574,9 +574,12 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         if (useUnelevatedWindowsSandbox && !allowGitWrites)
         {
             // Windows SSH sessions cannot service the setup or logon requirements of the
-            // elevated native sandbox reliably. Keep workspace isolation with its ACL fallback.
+            // elevated native sandbox or private desktop reliably. Keep workspace isolation
+            // with its ACL fallback while using the SSH session's compatible desktop.
             arguments.Add("-c");
             arguments.Add("windows.sandbox=\"unelevated\"");
+            arguments.Add("-c");
+            arguments.Add("windows.sandbox_private_desktop=false");
         }
 
         foreach (var imagePath in imagePaths ?? Array.Empty<string>())
