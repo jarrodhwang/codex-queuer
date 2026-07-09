@@ -475,34 +475,13 @@ public sealed class QueueWorker(
         string projectPath,
         CancellationToken cancellationToken)
     {
-        var beforeCommitHead = await ReadGitHeadAsync(machine, projectPath, cancellationToken);
-        var codexResult = await runner.RunCodexAsync(
-            machine,
-            projectPath,
-            run.Model,
-            run.ModelEffort,
-            run.ModelSpeed,
-            null,
-            null,
-            BuildProjectScopedPrompt(projectPath, BuildCommitPrompt()),
-            chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
-            cancellationToken);
-
-        codexResult = await MarkCommitCreatedIfHeadChangedAsync(run, machine, projectPath, codexResult, beforeCommitHead, cancellationToken);
-        if (CommitOutputClaimsCreated(codexResult.Output))
-        {
-            return codexResult;
-        }
-
         return await RunDeterministicCommitFallbackAsync(
             request,
             run,
             machine,
             projectPath,
-            codexResult,
-            codexResult.Success
-                ? "Separate commit session did not report a created commit; running deterministic git commit fallback."
-                : "Separate commit session failed before creating a commit; running deterministic git commit fallback.",
+            new CommandResult(0, "Preparing deterministic git commit." + Environment.NewLine, "deterministic git commit", null),
+            "Creating git commit from current changes.",
             cancellationToken);
     }
 
@@ -559,11 +538,12 @@ public sealed class QueueWorker(
         var statusResult = await runner.RunShellAsync(
             machine,
             projectPath,
-            "git status --porcelain",
+            "git status --porcelain -- .",
             _ => Task.CompletedTask,
             cancellationToken);
 
-        if (string.IsNullOrWhiteSpace(statusResult.Output))
+        var statusOutput = StripShellCommandPreview(statusResult.Output).Trim();
+        if (string.IsNullOrWhiteSpace(statusOutput))
         {
             return "No changes to commit.";
         }
@@ -571,11 +551,12 @@ public sealed class QueueWorker(
         var diffStatResult = await runner.RunShellAsync(
             machine,
             projectPath,
-            "git diff --stat --no-ext-diff",
+            "git diff --stat --no-ext-diff -- .; git diff --cached --stat --no-ext-diff -- .",
             _ => Task.CompletedTask,
             cancellationToken);
 
-        var prompt = BuildProjectScopedPrompt(projectPath, BuildCommitMessagePrompt(request, statusResult.Output, diffStatResult.Output));
+        var diffStatOutput = StripShellCommandPreview(diffStatResult.Output).Trim();
+        var prompt = BuildProjectScopedPrompt(projectPath, BuildCommitMessagePrompt(request, statusOutput, diffStatOutput));
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(CommitMessageGenerationTimeout);
 
@@ -645,7 +626,7 @@ public sealed class QueueWorker(
             return null;
         }
 
-        return result.Output
+        return StripShellCommandPreview(result.Output)
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .LastOrDefault(line => line.Length == 40 && line.All(IsHex));
     }
@@ -1123,6 +1104,7 @@ public sealed class QueueWorker(
             if (CommitOutputClaimsCreated(result.Output))
             {
                 await PopulateCommitMetadataAsync(db, request, run, cancellationToken);
+                ApplyCommitSummary(request, run);
             }
         }
         else if (!request.GenerateCommit || !request.SeparateCommitSession)
@@ -1134,6 +1116,7 @@ public sealed class QueueWorker(
             if (result.Success && request.GenerateCommit && CommitOutputClaimsCreated(result.Output))
             {
                 await PopulateCommitMetadataAsync(db, request, run, cancellationToken);
+                ApplyCommitSummary(request, run);
             }
         }
         else if (!result.Success)
@@ -1420,12 +1403,32 @@ public sealed class QueueWorker(
             return;
         }
 
-        var lines = result.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        if (lines.Length > 0)
+        var output = StripShellCommandPreview(result.Output);
+        var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var shaIndex = Array.FindIndex(lines, line =>
         {
-            run.CommitSha = lines[0].Trim();
-            run.CommitMessage = string.Join('\n', lines.Skip(1)).Trim();
+            var trimmed = line.Trim();
+            return trimmed.Length == 40 && trimmed.All(IsHex);
+        });
+
+        if (shaIndex >= 0)
+        {
+            run.CommitSha = lines[shaIndex].Trim();
+            var message = string.Join('\n', lines.Skip(shaIndex + 1)).Trim();
+            run.CommitMessage = string.IsNullOrWhiteSpace(message) ? null : message;
         }
+    }
+
+    private static void ApplyCommitSummary(CodexRequest request, CodexRun run)
+    {
+        if (string.IsNullOrWhiteSpace(run.CommitSha))
+        {
+            return;
+        }
+
+        request.Summary = string.IsNullOrWhiteSpace(run.CommitMessage)
+            ? "Commit created: " + run.CommitSha
+            : run.CommitMessage;
     }
 
     private async Task AppendOutputAsync(Guid runId, string chunk, CancellationToken cancellationToken)
@@ -1684,17 +1687,17 @@ public sealed class QueueWorker(
     {
         var quotedMessage = TargetCommandRunner.Quote(message);
         return "before_head=$(git rev-parse HEAD); "
-            + "before=$(git status --porcelain); "
+            + "before=$(git status --porcelain -- .); "
             + "if [ -z \"$before\" ]; then printf 'No changes to commit.\\n'; exit 0; fi; "
             + "printf 'Changed files before commit:\\n%s\\n' \"$before\"; "
-            + "git add -A; "
-            + "diff_exit=0; git diff --cached --quiet || diff_exit=$?; "
+            + "git add -A -- .; "
+            + "diff_exit=0; git diff --cached --quiet -- . || diff_exit=$?; "
             + "if [ \"$diff_exit\" -eq 0 ]; then printf 'No changes staged after git add.\\n'; exit 0; fi; "
             + "if [ \"$diff_exit\" -ne 1 ]; then exit \"$diff_exit\"; fi; "
-            + "git commit -m " + quotedMessage + "; "
+            + "git commit -m " + quotedMessage + " -- .; "
             + "commit_exit=$?; if [ \"$commit_exit\" -ne 0 ]; then exit \"$commit_exit\"; fi; "
             + "after_head=$(git rev-parse HEAD); "
-            + "if [ \"$before_head\" = \"$after_head\" ]; then current=$(git status --porcelain); "
+            + "if [ \"$before_head\" = \"$after_head\" ]; then current=$(git status --porcelain -- .); "
             + "if [ -z \"$current\" ]; then printf 'No changes to commit.\\n'; exit 0; fi; "
             + "printf 'No changes were committed; HEAD did not change.\\n'; exit 12; fi; "
             + "printf '\\nCommit created:\\n'; echo \"$after_head\"";
@@ -1704,17 +1707,17 @@ public sealed class QueueWorker(
     {
         var quotedMessage = TargetCommandRunner.QuotePowerShellValue(message);
         return "$beforeHead = (git rev-parse HEAD); "
-            + "$before = git status --porcelain; "
+            + "$before = git status --porcelain -- .; "
             + "if (-not $before) { Write-Output 'No changes to commit.'; exit 0 }; "
             + "Write-Output 'Changed files before commit:'; $before; "
-            + "git add -A; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; "
-            + "git diff --cached --quiet; $diffExit = $LASTEXITCODE; "
+            + "git add -A -- .; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; "
+            + "git diff --cached --quiet -- .; $diffExit = $LASTEXITCODE; "
             + "if ($diffExit -eq 0) { Write-Output 'No changes staged after git add.'; exit 0 }; "
             + "if ($diffExit -ne 1) { exit $diffExit }; "
-            + "git commit -m " + quotedMessage + "; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; "
+            + "git commit -m " + quotedMessage + " -- .; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; "
             + "$afterHead = (git rev-parse HEAD); "
             + "if ($afterHead -eq $beforeHead) { "
-            + "$current = git status --porcelain; "
+            + "$current = git status --porcelain -- .; "
             + "if (-not $current) { Write-Output 'No changes to commit.'; exit 0 }; "
             + "Write-Output 'No changes were committed; HEAD did not change.'; exit 12 }; "
             + "Write-Output ''; Write-Output 'Commit created:'; Write-Output $afterHead";
@@ -1762,24 +1765,6 @@ public sealed class QueueWorker(
             """;
     }
 
-    private static string BuildCommitPrompt() =>
-        """
-        You are running after a separate Codex implementation session.
-
-        Review all current git changes, create a concise commit message from those changes, and create commit for all changes in the current repository only if there are actual changes.
-        Look at the diff and status first, then derive the message from what changed.
-        Do not use any user-facing request sentence as the commit message; derive it from the file changes.
-        Do not ask for clarification and do not wait for further input.
-        Requirements:
-        1. Inspect git status and the diff.
-        2. Write one concise commit message.
-        3. Run git add -A.
-        4. Run git commit -m "<message>".
-        5. Return the commit SHA, commit message, and changed files. Include a line exactly named "Commit created:" immediately before the SHA.
-
-        If there are no changes, do not create an empty commit. Say that there were no changes and exit.
-        """;
-
     private static string BuildCommitMessagePrompt(CodexRequest request, string gitStatus, string diffStat)
     {
         var projectLabel = request.Project?.Name?.Trim();
@@ -1826,6 +1811,17 @@ public sealed class QueueWorker(
     private static string TrimOutput(string value) =>
         value.Length <= MaxStoredOutput ? value : value[^MaxStoredOutput..];
 
+    private static string StripShellCommandPreview(string output)
+    {
+        if (!output.StartsWith("$ ", StringComparison.Ordinal))
+        {
+            return output;
+        }
+
+        var newline = output.IndexOf('\n', StringComparison.Ordinal);
+        return newline < 0 ? "" : output[(newline + 1)..];
+    }
+
     private static string? LastUsefulLine(string output)
     {
         string? lastPlainText = null;
@@ -1846,7 +1842,8 @@ public sealed class QueueWorker(
                         lastAssistantText = assistantText;
                     }
 
-                    if (!IsTelemetryCompletionEvent(eventJson.RootElement))
+                    if (!IsTelemetryCompletionEvent(eventJson.RootElement)
+                        && !CompletionTextCleaner.IsNoiseLine(line))
                     {
                         lastPlainText = line;
                     }
@@ -1855,7 +1852,7 @@ public sealed class QueueWorker(
                 continue;
             }
 
-            if (!line.StartsWith("$ ", StringComparison.Ordinal))
+            if (!CompletionTextCleaner.IsNoiseLine(line))
             {
                 lastPlainText = line;
             }
@@ -1907,7 +1904,7 @@ public sealed class QueueWorker(
             ?? ReadString(root, "message")
             ?? ReadString(root, "text");
 
-        text = string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+        text = CompletionTextCleaner.Sanitize(text);
         return text is not null;
     }
 

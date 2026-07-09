@@ -404,6 +404,6 @@ public static class DbInitializer
         }
 
         return output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .LastOrDefault(line => !string.IsNullOrWhiteSpace(line));
+            .LastOrDefault(line => !CompletionTextCleaner.IsNoiseLine(line));
     }
 }

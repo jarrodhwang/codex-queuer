@@ -2905,7 +2905,7 @@ function assistantMessageFromEvent(event: Record<string, unknown>): string | nul
     ?? stringValue(event.message)
     ?? stringValue(event.text)
 
-  return message?.trim() || null
+  return sanitizeCompletionText(message)
 }
 
 function textFromContent(content: unknown): string | undefined {
@@ -2936,8 +2936,8 @@ function textFromContent(content: unknown): string | undefined {
 }
 
 function cleanCompletionFallback(summary?: string | null) {
-  const value = summary?.trim()
-  if (!value || value.startsWith('$ ')) {
+  const value = sanitizeCompletionText(summary)
+  if (!value) {
     return null
   }
 
@@ -2947,10 +2947,24 @@ function cleanCompletionFallback(summary?: string | null) {
       return null
     }
 
-    return assistantMessageFromEvent(parsed) ?? textFromUnknownJson(parsed) ?? value
+    return assistantMessageFromEvent(parsed) ?? sanitizeCompletionText(textFromUnknownJson(parsed)) ?? value
   }
 
   return value
+}
+
+function sanitizeCompletionText(value?: string | null) {
+  const lines = value
+    ?.split(/\r?\n/)
+    .filter((line) => !isCompletionNoiseLine(line))
+    ?? []
+  const text = lines.join('\n').trim()
+  return text || null
+}
+
+function isCompletionNoiseLine(line: string) {
+  const text = line.trim()
+  return Boolean(text && (text.startsWith('$ ') || /^[0-9a-f]{32,64}$/i.test(text)))
 }
 
 function isCompletedType(type?: string) {
@@ -3059,7 +3073,9 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
               </div>
               <StatusBadge status="Succeeded" />
             </div>
-            <div className="completion-result-box">{completionMessage}</div>
+            <div className="completion-result-box">
+              <CompletionMarkdown content={completionMessage} />
+            </div>
           </div>
         )}
 
@@ -3731,20 +3747,20 @@ function GitPanel({
       <section className="git-changes-section" aria-label="Git changes">
         <div className="run-output-head">
           <span>Git changes</span>
-          <span>{loading ? 'refreshing' : `${changeCount} files`}</span>
+          <span>{loading ? 'refreshing' : formatFileCount(changeCount)}</span>
         </div>
         <div className="git-change-list">
           {status?.changes.map((change) => (
             <div key={`${change.status}:${change.path}`} className="git-change-row">
               <span className={`git-status-chip git-status-chip--${change.status}`}>{change.status}</span>
               <span className="truncate" title={change.path}>{change.path}</span>
-              <span className="git-stage-state">{change.staged ? 'staged' : change.unstaged ? 'unstaged' : 'tracked'}</span>
+              <span className="git-stage-state">{formatGitStageState(change)}</span>
             </div>
           ))}
-          {!loading && status && status.changes.length === 0 && <div className="empty-state">No git changes.</div>}
+          {!loading && status && status.changes.length === 0 && <div className="empty-state">No files differ from HEAD in this project path.</div>}
           {loading && !status && <div className="empty-state">Loading git changes...</div>}
         </div>
-        {status?.diffStat && <pre className="git-diff-stat">{status.diffStat}</pre>}
+        {status?.diffStat && <GitDiffStat diffStat={status.diffStat} />}
       </section>
 
       <form className="git-commit-form" onSubmit={commit}>
@@ -3773,6 +3789,298 @@ function GitPanel({
       </div>
     </div>
   )
+}
+
+function formatFileCount(count: number) {
+  return `${count} ${count === 1 ? 'file' : 'files'}`
+}
+
+function formatGitStageState(change: GitStatus['changes'][number]) {
+  if (change.staged && change.unstaged) return 'staged + unstaged'
+  if (change.staged) return 'staged'
+  if (change.unstaged) return 'unstaged'
+  return 'tracked'
+}
+
+type ParsedDiffStat = {
+  entries: Array<{
+    path: string
+    changedLabel: string
+    additions: number
+    deletions: number
+    isBinary: boolean
+  }>
+  summary: {
+    files?: number
+    additions?: number
+    deletions?: number
+    text: string
+  }
+}
+
+function GitDiffStat({ diffStat }: { diffStat: string }) {
+  const parsed = useMemo(() => parseDiffStat(diffStat), [diffStat])
+  const fileCount = parsed.summary.files ?? parsed.entries.length
+  const additions = parsed.summary.additions ?? parsed.entries.reduce((total, entry) => total + entry.additions, 0)
+  const deletions = parsed.summary.deletions ?? parsed.entries.reduce((total, entry) => total + entry.deletions, 0)
+
+  if (parsed.entries.length === 0) {
+    return (
+      <div className="git-stat-block">
+        <div className="run-output-head">
+          <span>Diff stat</span>
+          <span>{parsed.summary.text || 'summary'}</span>
+        </div>
+        <pre className="git-action-output">{diffStat}</pre>
+      </div>
+    )
+  }
+
+  return (
+    <div className="git-stat-block">
+      <div className="run-output-head">
+        <span>Diff stat</span>
+        <span>{parsed.summary.text || formatFileCount(fileCount)}</span>
+      </div>
+      <div className="git-diff-summary" aria-label="Diff summary">
+        <DiffMetric label={fileCount === 1 ? 'file' : 'files'} value={fileCount} />
+        <DiffMetric label="additions" value={additions} tone="add" />
+        <DiffMetric label="deletions" value={deletions} tone="delete" />
+      </div>
+      <div className="git-diff-stat-list">
+        {parsed.entries.map((entry) => (
+          <DiffStatRow key={`${entry.path}:${entry.changedLabel}`} entry={entry} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function DiffMetric({ label, value, tone = 'neutral' }: { label: string; value: number; tone?: 'neutral' | 'add' | 'delete' }) {
+  return (
+    <span className={`git-diff-metric git-diff-metric--${tone}`}>
+      <strong>{value.toLocaleString()}</strong>
+      <span>{label}</span>
+    </span>
+  )
+}
+
+function DiffStatRow({ entry }: { entry: ParsedDiffStat['entries'][number] }) {
+  const total = entry.additions + entry.deletions
+  const additionsWidth = total > 0 ? (entry.additions / total) * 100 : 0
+  const deletionsWidth = total > 0 ? (entry.deletions / total) * 100 : 0
+  const changeLabel = entry.isBinary ? entry.changedLabel : `${entry.additions.toLocaleString()} + / ${entry.deletions.toLocaleString()} -`
+
+  return (
+    <div className="git-diff-stat-row">
+      <span className="git-diff-stat-path truncate" title={entry.path}>{entry.path}</span>
+      <span className="git-diff-stat-count">{entry.changedLabel}</span>
+      <span className="git-diff-stat-change" title={changeLabel}>
+        {entry.isBinary ? (
+          <span className="git-diff-stat-binary">binary</span>
+        ) : (
+          <>
+            <span className="git-diff-stat-bar git-diff-stat-bar--add" style={{ width: `${additionsWidth}%` }} />
+            <span className="git-diff-stat-bar git-diff-stat-bar--delete" style={{ width: `${deletionsWidth}%` }} />
+          </>
+        )}
+      </span>
+    </div>
+  )
+}
+
+function parseDiffStat(diffStat: string): ParsedDiffStat {
+  const summary: ParsedDiffStat['summary'] = { text: '' }
+  const entries: ParsedDiffStat['entries'] = []
+
+  for (const rawLine of diffStat.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+
+    const pipeIndex = line.lastIndexOf('|')
+    if (pipeIndex === -1) {
+      summary.text = line
+      summary.files = numberBefore(line, /files? changed/)
+      summary.additions = numberBefore(line, /insertions?\(\+\)/)
+      summary.deletions = numberBefore(line, /deletions?\(-\)/)
+      continue
+    }
+
+    const path = line.slice(0, pipeIndex).trim()
+    const detail = line.slice(pipeIndex + 1).trim()
+    const isBinary = /^bin\b/i.test(detail)
+    const changedLabel = isBinary ? detail : detail.match(/^\d+/)?.[0] ?? detail
+    const graph = detail.replace(/^\d+\s*/, '')
+    const additions = countCharacters(graph, '+')
+    const deletions = countCharacters(graph, '-')
+    entries.push({ path, changedLabel, additions, deletions, isBinary })
+  }
+
+  return { entries, summary }
+}
+
+function numberBefore(value: string, marker: RegExp) {
+  const match = value.match(new RegExp(`(\\d+)\\s+${marker.source}`, marker.flags))
+  return match ? Number.parseInt(match[1], 10) : undefined
+}
+
+function countCharacters(value: string, character: string) {
+  let count = 0
+  for (const current of value) {
+    if (current === character) count += 1
+  }
+  return count
+}
+
+type MarkdownBlock =
+  | { kind: 'heading', level: 1 | 2 | 3, text: string }
+  | { kind: 'paragraph', text: string }
+  | { kind: 'list', ordered: boolean, items: string[] }
+  | { kind: 'code', code: string }
+
+function CompletionMarkdown({ content }: { content: string }) {
+  const blocks = useMemo(() => parseCompletionMarkdown(content), [content])
+
+  return (
+    <div className="completion-markdown">
+      {blocks.map((block, index) => renderMarkdownBlock(block, index))}
+    </div>
+  )
+}
+
+function renderMarkdownBlock(block: MarkdownBlock, index: number) {
+  switch (block.kind) {
+    case 'heading': {
+      const HeadingTag = `h${block.level}` as 'h1' | 'h2' | 'h3'
+      return <HeadingTag key={index}>{renderMarkdownInline(block.text)}</HeadingTag>
+    }
+    case 'list': {
+      const ListTag = block.ordered ? 'ol' : 'ul'
+      return (
+        <ListTag key={index}>
+          {block.items.map((item, itemIndex) => (
+            <li key={itemIndex}>{renderMarkdownInline(item)}</li>
+          ))}
+        </ListTag>
+      )
+    }
+    case 'code':
+      return (
+        <pre key={index} className="completion-code-block">
+          <code>{block.code}</code>
+        </pre>
+      )
+    case 'paragraph':
+      return <p key={index}>{renderMarkdownInline(block.text)}</p>
+  }
+}
+
+function parseCompletionMarkdown(content: string): MarkdownBlock[] {
+  const lines = content.replace(/\r\n?/g, '\n').split('\n')
+  const blocks: MarkdownBlock[] = []
+  let index = 0
+
+  while (index < lines.length) {
+    const line = lines[index]
+    const trimmed = line.trim()
+
+    if (!trimmed) {
+      index += 1
+      continue
+    }
+
+    if (trimmed.startsWith('```')) {
+      const codeLines: string[] = []
+      index += 1
+      while (index < lines.length && !lines[index].trim().startsWith('```')) {
+        codeLines.push(lines[index])
+        index += 1
+      }
+      if (index < lines.length) index += 1
+      blocks.push({ kind: 'code', code: codeLines.join('\n') })
+      continue
+    }
+
+    const heading = trimmed.match(/^(#{1,3})\s+(.+)$/)
+    if (heading) {
+      blocks.push({ kind: 'heading', level: heading[1].length as 1 | 2 | 3, text: heading[2].trim() })
+      index += 1
+      continue
+    }
+
+    const unordered = trimmed.match(/^[-*]\s+(.+)$/)
+    const ordered = trimmed.match(/^\d+[.)]\s+(.+)$/)
+    if (unordered || ordered) {
+      const orderedList = Boolean(ordered)
+      const items: string[] = []
+      while (index < lines.length) {
+        const itemLine = lines[index].trim()
+        const item = orderedList
+          ? itemLine.match(/^\d+[.)]\s+(.+)$/)
+          : itemLine.match(/^[-*]\s+(.+)$/)
+        if (!item) break
+        items.push(item[1].trim())
+        index += 1
+      }
+      blocks.push({ kind: 'list', ordered: orderedList, items })
+      continue
+    }
+
+    const paragraphLines = [trimmed]
+    index += 1
+    while (index < lines.length && lines[index].trim() && !startsMarkdownBlock(lines[index].trim())) {
+      paragraphLines.push(lines[index].trim())
+      index += 1
+    }
+    blocks.push({ kind: 'paragraph', text: paragraphLines.join('\n') })
+  }
+
+  return blocks
+}
+
+function startsMarkdownBlock(trimmed: string) {
+  return trimmed.startsWith('```')
+    || /^(#{1,3})\s+/.test(trimmed)
+    || /^[-*]\s+/.test(trimmed)
+    || /^\d+[.)]\s+/.test(trimmed)
+}
+
+function renderMarkdownInline(text: string): ReactNode[] {
+  const nodes: ReactNode[] = []
+  const pattern = /(\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]\n]+\]\(https?:\/\/[^)\s]+\))/g
+  let cursor = 0
+
+  for (const match of text.matchAll(pattern)) {
+    const index = match.index ?? 0
+    if (index > cursor) {
+      nodes.push(text.slice(cursor, index))
+    }
+
+    const value = match[0]
+    if (value.startsWith('**')) {
+      nodes.push(<strong key={nodes.length}>{value.slice(2, -2)}</strong>)
+    } else if (value.startsWith('`')) {
+      nodes.push(<code key={nodes.length}>{value.slice(1, -1)}</code>)
+    } else {
+      const link = value.match(/^\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)$/)
+      if (link) {
+        nodes.push(
+          <a key={nodes.length} href={link[2]} target="_blank" rel="noreferrer">
+            {link[1]}
+          </a>
+        )
+      } else {
+        nodes.push(value)
+      }
+    }
+    cursor = index + value.length
+  }
+
+  if (cursor < text.length) {
+    nodes.push(text.slice(cursor))
+  }
+
+  return nodes
 }
 
 function DirectoryTree({
