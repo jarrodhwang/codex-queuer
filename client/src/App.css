@@ -2085,6 +2085,20 @@
   line-height: 1.45;
 }
 
+.codex-answers,
+.codex-answers-list {
+  display: grid;
+  gap: 8px;
+}
+
+.codex-answers {
+  padding-top: 2px;
+}
+
+.codex-answer-box {
+  max-height: 260px;
+}
+
 .completion-markdown {
   display: grid;
   gap: 8px;

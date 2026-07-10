@@ -3613,14 +3613,20 @@ function completionMessageForRequest(request: CodexRequest) {
 }
 
 function completionMessageFromOutput(output: string) {
+  const messages = completionMessagesFromOutput(output)
+  return messages.at(-1) ?? null
+}
+
+function completionMessagesFromOutput(output: string): string[] {
   const normalizedOutput = normalizeBodyText(output)
   const parsedOutput = tryParseJson(normalizedOutput.trim())
   if (typeof parsedOutput === 'string') {
-    return completionMessageFromOutput(parsedOutput)
+    return completionMessagesFromOutput(parsedOutput)
   }
 
   if (isRecord(parsedOutput)) {
-    return assistantMessageFromEvent(parsedOutput) ?? null
+    const message = assistantMessageFromEvent(parsedOutput)
+    return message ? [message] : []
   }
 
   const events = normalizedOutput
@@ -3631,20 +3637,22 @@ function completionMessageFromOutput(output: string) {
     .filter(isRecord)
 
   if (events.length === 0) {
-    return null
+    return []
   }
 
-  const lastTurnCompletedIndex = findLastIndex(events, (event) => isTurnCompletedEvent(event))
-  const beforeTurnCompleted = lastTurnCompletedIndex >= 0 ? events.slice(0, lastTurnCompletedIndex) : events
+  const messages: string[] = []
+  for (const event of events) {
+    if (isTurnCompletedEvent(event)) {
+      continue
+    }
 
-  for (let index = beforeTurnCompleted.length - 1; index >= 0; index -= 1) {
-    const message = assistantMessageFromEvent(beforeTurnCompleted[index])
-    if (message) {
-      return message
+    const message = assistantMessageFromEvent(event)
+    if (message && messages.at(-1) !== message) {
+      messages.push(message)
     }
   }
 
-  return null
+  return messages
 }
 
 function assistantMessageFromEvent(event: Record<string, unknown>): string | null {
@@ -3817,16 +3825,6 @@ function isTelemetryCompletionEvent(event: Record<string, unknown>) {
   return !assistantMessageFromEvent(event) && (isRecord(event.usage) || isRecord(event.token_usage) || 'usage' in event || 'token_usage' in event)
 }
 
-function findLastIndex<T>(items: readonly T[], predicate: (item: T) => boolean) {
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    if (predicate(items[index])) {
-      return index
-    }
-  }
-
-  return -1
-}
-
 function formatEventType(value: string) {
   return value
     .replace(/^item\./, '')
@@ -3942,8 +3940,9 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
               </div>
             )}
             {run.error && <div className="error-text">{run.error}</div>}
+            <DetailedCodexAnswers output={run.output} />
             <div className="run-output-head">
-              <span>Output</span>
+              <span>Run log</span>
               <span>{run.output.trim() ? `${run.output.length.toLocaleString()} chars` : 'empty'}</span>
             </div>
             <StructuredBodyView
@@ -3975,6 +3974,30 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
         )}
       </div>
     </aside>
+  )
+}
+
+function DetailedCodexAnswers({ output }: { output: string }) {
+  const answers = useMemo(() => completionMessagesFromOutput(output), [output])
+
+  if (answers.length === 0) {
+    return null
+  }
+
+  return (
+    <section className="codex-answers" aria-label="Codex answers">
+      <div className="run-output-head">
+        <span>Codex answers</span>
+        <span>{answers.length === 1 ? '1 answer' : `${answers.length} answers`}</span>
+      </div>
+      <div className="codex-answers-list">
+        {answers.map((answer, index) => (
+          <div key={`${index}:${answer}`} className="completion-result-box codex-answer-box">
+            <CompletionMarkdown content={answer} />
+          </div>
+        ))}
+      </div>
+    </section>
   )
 }
 
