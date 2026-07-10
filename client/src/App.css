@@ -4801,3 +4801,36 @@
 ) {
   color: var(--text-strong);
 }
+
+/* Status labels use their own semantic fills, so they need explicit dark
+   variants instead of inheriting the light-mode pastels. */
+:root[data-theme='dark'] .git-state-pill--dirty {
+  background: rgba(120, 53, 15, 0.48);
+  color: #fde68a;
+}
+
+:root[data-theme='dark'] .git-status-chip {
+  border-color: rgba(103, 232, 249, 0.28);
+  background: rgba(8, 95, 130, 0.44);
+  color: #a5f3fc;
+}
+
+:root[data-theme='dark'] .git-status-chip--deleted {
+  border-color: rgba(252, 165, 165, 0.3);
+  background: rgba(127, 29, 29, 0.48);
+}
+
+:root[data-theme='dark'] .git-status-chip--renamed {
+  border-color: rgba(216, 180, 254, 0.3);
+  background: rgba(88, 28, 135, 0.42);
+}
+
+:root[data-theme='dark'] :is(.git-action-card-head code, .git-action-icon) {
+  background: rgba(6, 78, 59, 0.44);
+  color: #a7f3d0;
+}
+
+:root[data-theme='dark'] :is(.usage-meter, .git-diff-stat-change) {
+  border-color: rgba(148, 163, 184, 0.22);
+  background: rgba(2, 6, 23, 0.48);
+}

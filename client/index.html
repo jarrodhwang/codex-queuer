@@ -7,6 +7,30 @@
     <link rel="manifest" href="/site.webmanifest" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f8fbff" />
+    <script>
+      (() => {
+        const storageKey = 'codex-queue-theme'
+        let theme = 'light'
+
+        try {
+          const storedTheme = localStorage.getItem(storageKey)
+          theme = storedTheme === 'light' || storedTheme === 'dark'
+            ? storedTheme
+            : matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'dark'
+              : 'light'
+        } catch {
+          theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+        }
+
+        document.documentElement.dataset.theme = theme
+        document.documentElement.style.colorScheme = theme
+        document.querySelector('meta[name="theme-color"]')?.setAttribute(
+          'content',
+          theme === 'dark' ? '#070b16' : '#f8fbff',
+        )
+      })()
+    </script>
     <meta
       name="description"
       content="Codex Queue dashboard for managing project requests, history, and terminal sessions."
