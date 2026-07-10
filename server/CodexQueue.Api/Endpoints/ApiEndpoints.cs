@@ -608,9 +608,24 @@ public static class ApiEndpoints
             }
 
             var requests = await query.ToArrayAsync(cancellationToken);
-            return requests
-                .Order(Comparer<CodexRequest>.Create(QueuePriority.CompareForDisplay))
-                .Take(200)
+            var orderedRequests = requests
+                .Order(Comparer<CodexRequest>.Create(QueuePriority.CompareForDisplay));
+
+            // Keep every actionable queue item in the polling response. Applying the
+            // history limit to the whole ordered list could omit a newly-created item
+            // behind older requests, causing its optimistic UI card to disappear on
+            // the next refresh.
+            var activeRequests = orderedRequests.Where(x =>
+                x.DeletedAt is null
+                && x.ArchivedAt is null
+                && x.Status != QueueStatus.Succeeded);
+            var remainingSlots = Math.Max(0, 200 - activeRequests.Count());
+            return activeRequests
+                .Concat(orderedRequests.Where(x =>
+                    x.DeletedAt is not null
+                    || x.ArchivedAt is not null
+                    || x.Status == QueueStatus.Succeeded)
+                    .Take(remainingSlots))
                 .Select(x => x.ToDto(includeOutput == true))
                 .ToArray();
         });
