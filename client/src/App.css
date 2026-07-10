@@ -147,6 +147,8 @@
 
 .queue-workspace-stack > .prompt-card {
   flex: 0 0 auto;
+  position: relative;
+  z-index: 2;
 }
 
 .sidebar-stack,
