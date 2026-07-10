@@ -113,6 +113,29 @@ const emptyMachine: SaveMachineRequest = {
   platform: 'Auto',
 }
 
+function requestCompletionNotificationPermission() {
+  if (typeof Notification === 'undefined' || Notification.permission !== 'default') {
+    return
+  }
+
+  void Notification.requestPermission().catch(() => undefined)
+}
+
+function notifyRequestSucceeded(request: CodexRequest) {
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') {
+    return
+  }
+
+  const notification = new Notification('Codex Queue item succeeded', {
+    body: `${request.projectName}: ${clipPreview(request.prompt).replace(/\s+/g, ' ').slice(0, 160)}`,
+    tag: `codex-queue-request-${request.id}`,
+  })
+  notification.onclick = () => {
+    window.focus()
+    notification.close()
+  }
+}
+
 function useMediaQuery(query: string) {
   const getMatches = () => typeof window !== 'undefined' && window.matchMedia(query).matches
   const [matches, setMatches] = useState(getMatches)
@@ -444,6 +467,8 @@ function App() {
   const [deleteRequestId, setDeleteRequestId] = useState<string | null>(null)
   const pendingRequestOverridesRef = useRef(new Map<string, Partial<CodexRequest>>())
   const liveRequestSequenceRef = useRef(0)
+  const hasLoadedLiveRequestsRef = useRef(false)
+  const previousRequestStatusRef = useRef<Map<string, CodexRequest['status']> | null>(null)
 
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0]
   const activeFile = openFiles.find((file) => file.key === activeFileKey)
@@ -495,6 +520,7 @@ function App() {
       ]
     })
     setQueueDiagnostics(nextDiagnostics)
+    hasLoadedLiveRequestsRef.current = true
   }, [])
 
   const handleApiError = useCallback((cause: unknown) => {
@@ -532,6 +558,21 @@ function App() {
   useEffect(() => {
     loadStatic().then(() => loadLive()).catch(handleApiError)
   }, [handleApiError, loadLive, loadStatic])
+
+  useEffect(() => {
+    if (!hasLoadedLiveRequestsRef.current) return
+
+    const previousStatuses = previousRequestStatusRef.current
+    const nextStatuses = new Map(requests.map((request) => [request.id, request.status]))
+    previousRequestStatusRef.current = nextStatuses
+    if (!previousStatuses) return
+
+    requests.forEach((request) => {
+      if (request.status === 'Succeeded' && previousStatuses.get(request.id) !== 'Succeeded') {
+        notifyRequestSucceeded(request)
+      }
+    })
+  }, [requests])
 
   useEffect(() => {
     if (authBlocked) return
@@ -2203,6 +2244,9 @@ function QueueComposer({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
+    if (!editingRequest) {
+      requestCompletionNotificationPermission()
+    }
     setIsQueueing(true)
     let previewId: string | null = null
     try {
