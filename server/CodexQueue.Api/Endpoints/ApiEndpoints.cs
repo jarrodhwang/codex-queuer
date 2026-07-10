@@ -620,12 +620,15 @@ public static class ApiEndpoints
                 && x.ArchivedAt is null
                 && x.Status != QueueStatus.Succeeded);
             var remainingSlots = Math.Max(0, 200 - activeRequests.Count());
-            return activeRequests
-                .Concat(orderedRequests.Where(x =>
-                    x.DeletedAt is not null
+            var historyRequests = requests
+                .Where(x => x.DeletedAt is not null
                     || x.ArchivedAt is not null
                     || x.Status == QueueStatus.Succeeded)
-                    .Take(remainingSlots))
+                .OrderByDescending(x => x.FinishedAt ?? x.DeletedAt ?? x.ArchivedAt ?? x.CreatedAt)
+                .ThenByDescending(x => x.CreatedAt)
+                .ThenByDescending(x => x.Id);
+            return activeRequests
+                .Concat(historyRequests.Take(remainingSlots))
                 .Select(x => x.ToDto(includeOutput == true))
                 .ToArray();
         });
