@@ -2520,31 +2520,36 @@ function QueueComposer({
           <ModelPicker label="Commit" options={config.models} value={commitModel} onChange={setCommitModel} disabled={!generateCommit || !separateCommitSession} />
         </div>
         <div className="composer-actions-row">
-          <div className="commit-toggle-group" aria-label="Commit options">
-            <label className={`commit-toggle ${generateCommit ? 'active' : ''}`}>
-              <input
-                type="checkbox"
-                checked={generateCommit}
-                onChange={(event) => {
-                  setGenerateCommit(event.target.checked)
-                  if (!event.target.checked) {
-                    setSeparateCommitSession(false)
-                  }
-                }}
-              />
-              <span className="commit-toggle-icon"><Check size={12} /></span>
-              <span>Generate git commit</span>
-            </label>
-            <label className={`commit-toggle ${generateCommit && separateCommitSession ? 'active' : ''} ${!generateCommit ? 'disabled' : ''}`}>
-              <input
-                type="checkbox"
-                checked={generateCommit && separateCommitSession}
-                disabled={!generateCommit}
-                onChange={(event) => setSeparateCommitSession(event.target.checked)}
-              />
-              <span className="commit-toggle-icon"><Check size={12} /></span>
-              <span>Separate commit session</span>
-            </label>
+          <div className="commit-options">
+            <div className="commit-toggle-group" aria-label="Commit options">
+              <label className={`commit-toggle ${generateCommit ? 'active' : ''}`}>
+                <input
+                  type="checkbox"
+                  checked={generateCommit}
+                  onChange={(event) => {
+                    setGenerateCommit(event.target.checked)
+                    if (!event.target.checked) {
+                      setSeparateCommitSession(false)
+                    }
+                  }}
+                />
+                <span className="commit-toggle-icon"><Check size={12} /></span>
+                <span>Generate git commit</span>
+              </label>
+              <label className={`commit-toggle ${generateCommit && separateCommitSession ? 'active' : ''} ${!generateCommit ? 'disabled' : ''}`}>
+                <input
+                  type="checkbox"
+                  checked={generateCommit && separateCommitSession}
+                  disabled={!generateCommit}
+                  onChange={(event) => setSeparateCommitSession(event.target.checked)}
+                />
+                <span className="commit-toggle-icon"><Check size={12} /></span>
+                <span>Separate commit session</span>
+              </label>
+            </div>
+            <div className="meta commit-options-help">
+              New queued requests start a fresh Codex CLI session. Only retries/resumes of the same queued request reuse its prior Codex context; enabling a separate commit session starts another fresh session for the commit step.
+            </div>
           </div>
           <div className="button-row">
             <GlassButton variant="secondary" size="sm" type="button" onClick={saveDefaults} disabled={!defaultsChanged || savingDefaults}>
