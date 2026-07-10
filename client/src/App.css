@@ -4707,3 +4707,97 @@
 :root[data-theme='dark'] :is(.auth-screen, .modal-backdrop) {
   background-color: rgba(2, 6, 23, 0.76);
 }
+
+/* Keep the smaller, stateful controls on the same dark material as their
+   containers. These controls previously retained the light theme's pale
+   fills and dark ink, making selections and status information hard to read. */
+:root[data-theme='dark'] :is(
+  .machine-manager-list,
+  .machine-editor,
+  .machine-card,
+  .settings-section,
+  .settings-list,
+  .settings-row,
+  .body-event-change,
+  .body-hidden-count,
+  .segmented-radio,
+  .workspace-tabs,
+  .folder-picker,
+  .run-usage-limit
+) {
+  border-color: var(--line);
+  background: rgba(15, 23, 42, 0.76);
+  color: var(--text);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 8px 22px rgba(0, 0, 0, 0.2);
+}
+
+:root[data-theme='dark'] :is(
+  .machine-card.active,
+  .tree-row.selected,
+  .file-tab.active,
+  .workspace-tabs button.active,
+  .segmented-radio label.active,
+  .commit-toggle.active
+) {
+  border-color: var(--accent-line);
+  background: linear-gradient(145deg, rgba(8, 95, 130, 0.58), rgba(30, 41, 59, 0.9));
+  color: var(--text-strong);
+}
+
+:root[data-theme='dark'] :is(
+  .machine-chip,
+  .project-queue-chip.queued,
+  .request-stage-chip,
+  .usage-sidebar-pill,
+  .usage-row-head span:last-child,
+  .attachment-meta-chip--image,
+  .attachment-meta-chip--json,
+  .attachment-meta-chip--csv,
+  .attachment-meta-chip--text
+) {
+  border-color: rgba(148, 163, 184, 0.22);
+  background: rgba(30, 41, 59, 0.9);
+  color: var(--muted-strong);
+}
+
+:root[data-theme='dark'] :is(.project-queue-chip.queued, .status-badge--queued, .status-badge--cancelrequested) {
+  border-color: rgba(252, 211, 77, 0.3);
+  background: rgba(120, 53, 15, 0.48);
+  color: #fde68a;
+}
+
+:root[data-theme='dark'] :is(.status-badge--running, .status-badge--usagelimited) {
+  border-color: rgba(103, 232, 249, 0.32);
+  background: rgba(8, 95, 130, 0.48);
+  color: #a5f3fc;
+}
+
+:root[data-theme='dark'] :is(.model-chip--effort-low, .model-chip--effort-medium) {
+  border-color: rgba(125, 211, 252, 0.3);
+  background: rgba(12, 74, 110, 0.5);
+  color: #bae6fd;
+}
+
+:root[data-theme='dark'] .glass-button--danger {
+  border-color: rgba(252, 165, 165, 0.36);
+  background: linear-gradient(145deg, rgba(127, 29, 29, 0.7), rgba(69, 10, 10, 0.76));
+  color: #fecaca;
+  box-shadow: inset 0 1px 0 rgba(254, 202, 202, 0.12), 0 8px 18px rgba(0, 0, 0, 0.24);
+}
+
+:root[data-theme='dark'] .glass-button--danger:not(:disabled):hover {
+  border-color: rgba(254, 202, 202, 0.58);
+  background: linear-gradient(145deg, rgba(153, 27, 27, 0.8), rgba(69, 10, 10, 0.86));
+  color: #fff1f2;
+}
+
+:root[data-theme='dark'] :is(
+  .segmented-radio label.segmented-radio-option--low.active,
+  .segmented-radio label.segmented-radio-option--medium.active,
+  .segmented-radio label.segmented-radio-option--high.active,
+  .segmented-radio label.segmented-radio-option--xhigh.active,
+  .segmented-radio label.segmented-radio-option--ultra.active,
+  .segmented-radio label.segmented-radio-option--priority.active
+) {
+  color: var(--text-strong);
+}
