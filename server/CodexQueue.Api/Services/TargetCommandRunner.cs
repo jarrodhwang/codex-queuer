@@ -108,7 +108,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 codexSessionId,
                 imagePaths,
                 allowGitWrites,
-                useUnelevatedWindowsSandbox: false);
+                disableWindowsSandbox: false);
             if (machine.TargetsWindows())
             {
                 var command = BuildPowerShellCodexCommandSetup() + "; & $codexCommand " + string.Join(" ", arguments.Select(QuotePowerShellValue));
@@ -146,7 +146,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                     codexSessionId,
                     imagePaths,
                     allowGitWrites,
-                    useUnelevatedWindowsSandbox: true).Select(QuotePowerShellValue));
+                    disableWindowsSandbox: true).Select(QuotePowerShellValue));
 
             return RunSshAsync(
                 machine,
@@ -173,7 +173,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 codexSessionId,
                 imagePaths,
                 allowGitWrites,
-                useUnelevatedWindowsSandbox: false).Select(Quote))
+                disableWindowsSandbox: false).Select(Quote))
         });
 
         return RunSshAsync(
@@ -550,7 +550,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         string? codexSessionId,
         IReadOnlyList<string>? imagePaths,
         bool allowGitWrites,
-        bool useUnelevatedWindowsSandbox)
+        bool disableWindowsSandbox)
     {
         var arguments = new List<string> { "exec" };
 
@@ -571,17 +571,6 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         arguments.Add(model);
         arguments.Add("--skip-git-repo-check");
 
-        if (useUnelevatedWindowsSandbox && !allowGitWrites)
-        {
-            // Windows SSH sessions cannot service the setup or logon requirements of the
-            // elevated native sandbox or private desktop reliably. Keep workspace isolation
-            // with its ACL fallback while using the SSH session's compatible desktop.
-            arguments.Add("-c");
-            arguments.Add("windows.sandbox=\"unelevated\"");
-            arguments.Add("-c");
-            arguments.Add("windows.sandbox_private_desktop=false");
-        }
-
         foreach (var imagePath in imagePaths ?? Array.Empty<string>())
         {
             arguments.Add("-i");
@@ -595,14 +584,16 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             arguments.Add("-c");
             arguments.Add("approval_policy=\"never\"");
             arguments.Add("-s");
-            arguments.Add(allowGitWrites ? "danger-full-access" : "workspace-write");
+            arguments.Add(allowGitWrites || disableWindowsSandbox ? "danger-full-access" : "workspace-write");
         }
         else
         {
             arguments.Add("-c");
             arguments.Add("approval_policy=\"never\"");
             arguments.Add("-c");
-            arguments.Add(allowGitWrites ? "sandbox_mode=\"danger-full-access\"" : "sandbox_mode=\"workspace-write\"");
+            arguments.Add(allowGitWrites || disableWindowsSandbox
+                ? "sandbox_mode=\"danger-full-access\""
+                : "sandbox_mode=\"workspace-write\"");
             arguments.Add(codexSessionId);
         }
 
