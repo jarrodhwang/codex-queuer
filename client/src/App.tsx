@@ -47,6 +47,7 @@ import type {
   MachineKind,
   MachineRateLimits,
   MachinePlatform,
+  RateLimit,
   ModelOption,
   Project,
   QueueAttachment,
@@ -1320,8 +1321,7 @@ function UsageLimitModal({ machines, requests, now, onClose }: { machines: Machi
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
-    void Promise.all(machines.map(async (machine) => {
+    const load = () => void Promise.all(machines.map(async (machine) => {
       try {
         return await api.machineUsage(machine.id)
       } catch (cause) {
@@ -1330,6 +1330,7 @@ function UsageLimitModal({ machines, requests, now, onClose }: { machines: Machi
           machineName: machine.name,
           available: false,
           error: cause instanceof Error ? cause.message : 'Could not read Codex usage.',
+          limits: [],
         }
       }
     })).then((snapshots) => {
@@ -1337,8 +1338,10 @@ function UsageLimitModal({ machines, requests, now, onClose }: { machines: Machi
       setUsage(Object.fromEntries(snapshots.map((snapshot) => [snapshot.machineId, snapshot])))
       setLoading(false)
     })
+    load()
+    const refreshTimer = window.setInterval(load, 30_000)
 
-    return () => { cancelled = true }
+    return () => { cancelled = true; window.clearInterval(refreshTimer) }
   }, [machines])
 
   return (
@@ -1397,19 +1400,27 @@ function MachineUsageSection({ snapshot }: { snapshot?: MachineRateLimits }) {
     return <div className="usage-sidebar-item"><div className="usage-row-head"><span>{snapshot?.machineName ?? 'Machine'}</span><span>unavailable</span></div><div className="meta">{snapshot?.error ?? 'No usage data returned.'}</div></div>
   }
 
-  const windows = [
-    ['Current window', snapshot.primary],
-    ['Secondary window', snapshot.secondary],
-  ] as const
   return <div className="usage-sidebar-item">
     <div className="usage-section-title">{snapshot.machineName}</div>
-    {windows.map(([label, window]) => window && <UsageWindow key={label} label={label} window={window} />)}
-    {!snapshot.primary && !snapshot.secondary && <div className="meta">No active rate-limit windows.</div>}
-    {snapshot.rateLimitReachedType && <div className="meta">Limit reached: {snapshot.rateLimitReachedType}</div>}
+    {snapshot.limits.map((limit) => <RateLimitSection key={limit.id} limit={limit} />)}
+    {snapshot.limits.length === 0 && <div className="meta">No active rate-limit windows.</div>}
   </div>
 }
 
-function UsageWindow({ label, window }: { label: string; window: NonNullable<MachineRateLimits['primary']> }) {
+function RateLimitSection({ limit }: { limit: RateLimit }) {
+  const windows = [
+    ['Current window', limit.primary],
+    ['Secondary window', limit.secondary],
+  ] as const
+  return <>
+    <div className="meta">{limit.name}</div>
+    {windows.map(([label, window]) => window && <UsageWindow key={label} label={label} window={window} />)}
+    {!limit.primary && !limit.secondary && <div className="meta">No active rate-limit windows.</div>}
+    {limit.rateLimitReachedType && <div className="meta">Limit reached: {limit.rateLimitReachedType}</div>}
+  </>
+}
+
+function UsageWindow({ label, window }: { label: string; window: NonNullable<RateLimit['primary']> }) {
   const remaining = Math.max(0, 100 - window.usedPercent)
   const reset = window.resetsAt ? formatDate(new Date(window.resetsAt * 1000).toISOString()) : 'reset time unknown'
   const duration = window.windowDurationMins ? ` · ${formatWindowDuration(window.windowDurationMins)}` : ''
@@ -2768,6 +2779,38 @@ function SegmentedRadio({
   )
 }
 
+function useRequestDetails(summary?: CodexRequest) {
+  const [details, setDetails] = useState<CodexRequest | undefined>()
+  const requestId = summary?.id
+  const requestStatus = summary?.status
+
+  useEffect(() => {
+    if (!requestId || isOptimisticRequest(requestId)) {
+      setDetails(undefined)
+      return
+    }
+
+    let cancelled = false
+    const load = () => {
+      void api.request(requestId)
+        .then((request) => {
+          if (!cancelled) setDetails(request)
+        })
+        .catch(() => undefined)
+    }
+
+    load()
+    const active = requestStatus === 'Running' || requestStatus === 'CancelRequested' || requestStatus === 'UsageLimited'
+    const timer = active ? window.setInterval(load, 2200) : undefined
+    return () => {
+      cancelled = true
+      if (timer !== undefined) window.clearInterval(timer)
+    }
+  }, [requestId, requestStatus])
+
+  return details?.id === summary?.id ? details : summary
+}
+
 function QueueList({
   requests,
   selectedProject,
@@ -2800,7 +2843,8 @@ function QueueList({
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
   const [reorderingRequestId, setReorderingRequestId] = useState<string | null>(null)
   const mobileDragReorder = useMediaQuery('(max-width: 820px)')
-  const selectedRequest = requests.find((request) => request.id === selectedRequestId) ?? requests[0]
+  const selectedRequestSummary = requests.find((request) => request.id === selectedRequestId) ?? requests[0]
+  const selectedRequest = useRequestDetails(selectedRequestSummary)
   const queuedRequestIds = useMemo(
     () => requests
       .filter((request) => request.status === 'Queued' && !isOptimisticRequest(request.id))
@@ -4147,7 +4191,8 @@ function RequestHistory({
   const [showTrash, setShowTrash] = useState(false)
   const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null)
   const visibleRequests = showTrash ? deletedRequests : requests
-  const selectedRequest = visibleRequests.find((request) => request.id === selectedRequestId) ?? visibleRequests[0]
+  const selectedRequestSummary = visibleRequests.find((request) => request.id === selectedRequestId) ?? visibleRequests[0]
+  const selectedRequest = useRequestDetails(selectedRequestSummary)
 
   useEffect(() => {
     if (visibleRequests.length === 0) {

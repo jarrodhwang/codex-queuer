@@ -252,6 +252,12 @@ export type MachineRateLimits = {
   machineName: string
   available: boolean
   error?: string | null
+  limits: RateLimit[]
+}
+
+export type RateLimit = {
+  id: string
+  name: string
   primary?: RateLimitWindow | null
   secondary?: RateLimitWindow | null
   rateLimitReachedType?: string | null

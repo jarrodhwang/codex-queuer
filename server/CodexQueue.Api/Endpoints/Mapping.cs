@@ -38,7 +38,7 @@ public static class Mapping
             project.CreatedAt,
             project.UpdatedAt);
 
-    public static CodexRequestDto ToDto(this CodexRequest request) =>
+    public static CodexRequestDto ToDto(this CodexRequest request, bool includeRunOutput = true) =>
         new(
             request.Id,
             request.ProjectId,
@@ -69,9 +69,9 @@ public static class Mapping
             request.FinishedAt,
             request.ArchivedAt,
             request.DeletedAt,
-            request.Runs.OrderBy(x => x.CreatedAt).Select(x => x.ToDto()).ToArray());
+            request.Runs.OrderBy(x => x.CreatedAt).Select(x => x.ToDto(includeRunOutput)).ToArray());
 
-    public static CodexRunDto ToDto(this CodexRun run) =>
+    public static CodexRunDto ToDto(this CodexRun run, bool includeOutput = true) =>
         new(
             run.Id,
             run.Kind,
@@ -80,7 +80,7 @@ public static class Mapping
             run.ModelSpeed,
             run.Status,
             run.CommandPreview,
-            run.Output,
+            includeOutput ? run.Output : "",
             run.ExitCode,
             run.RetryAfter,
             run.RetryReason,

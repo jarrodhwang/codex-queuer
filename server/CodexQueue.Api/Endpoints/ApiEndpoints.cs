@@ -122,11 +122,11 @@ public static class ApiEndpoints
             {
                 var result = await runner.ReadRateLimitsAsync(machine, cancellationToken);
                 var snapshot = ParseRateLimits(result.Output);
-                return Results.Ok(new MachineRateLimitsDto(machine.Id, machine.Name, snapshot is not null, snapshot is null ? "Codex did not return rate-limit data." : null, snapshot?.Primary, snapshot?.Secondary, snapshot?.RateLimitReachedType));
+                return Results.Ok(new MachineRateLimitsDto(machine.Id, machine.Name, snapshot is not null, snapshot is null ? "Codex did not return rate-limit data." : null, snapshot?.Limits ?? []));
             }
             catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or TimeoutException)
             {
-                return Results.Ok(new MachineRateLimitsDto(machine.Id, machine.Name, false, ex.Message, null, null, null));
+                return Results.Ok(new MachineRateLimitsDto(machine.Id, machine.Name, false, ex.Message, []));
             }
         });
 
@@ -589,7 +589,7 @@ public static class ApiEndpoints
         api.MapMethods("/terminal-sessions/{sessionId:guid}/{sessionToken}/{**targetPath}", new[] { "GET", "POST", "PUT", "DELETE", "OPTIONS" }, async (Guid sessionId, string sessionToken, HttpContext context, ITerminalSessionService terminal) =>
             await terminal.ProxyAsync(sessionId, sessionToken, context));
 
-        api.MapGet("/requests", async (Guid? projectId, bool? includeDeleted, AppDbContext db, CancellationToken cancellationToken) =>
+        api.MapGet("/requests", async (Guid? projectId, bool? includeDeleted, bool? includeOutput, AppDbContext db, CancellationToken cancellationToken) =>
         {
             var query = db.Requests
                 .Include(x => x.Project)
@@ -611,7 +611,7 @@ public static class ApiEndpoints
             return requests
                 .Order(Comparer<CodexRequest>.Create(QueuePriority.CompareForDisplay))
                 .Take(200)
-                .Select(x => x.ToDto())
+                .Select(x => x.ToDto(includeOutput == true))
                 .ToArray();
         });
 
@@ -885,7 +885,7 @@ public static class ApiEndpoints
         });
     }
 
-    private sealed record RateLimitSnapshot(RateLimitWindowDto? Primary, RateLimitWindowDto? Secondary, string? RateLimitReachedType);
+    private sealed record RateLimitSnapshot(IReadOnlyList<RateLimitDto> Limits);
 
     private static RateLimitSnapshot? ParseRateLimits(string output)
     {
@@ -902,12 +902,19 @@ public static class ApiEndpoints
                     continue;
                 }
 
-                return new RateLimitSnapshot(
-                    ParseRateLimitWindow(rateLimits, "primary"),
-                    ParseRateLimitWindow(rateLimits, "secondary"),
-                    rateLimits.TryGetProperty("rateLimitReachedType", out var reachedType) && reachedType.ValueKind == JsonValueKind.String
-                        ? reachedType.GetString()
-                        : null);
+                var limits = new List<RateLimitDto> { ParseRateLimit("codex", rateLimits) };
+                if (result.TryGetProperty("rateLimitsByLimitId", out var byLimitId) && byLimitId.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var limit in byLimitId.EnumerateObject())
+                    {
+                        if (!string.Equals(limit.Name, "codex", StringComparison.OrdinalIgnoreCase) && limit.Value.ValueKind == JsonValueKind.Object)
+                        {
+                            limits.Add(ParseRateLimit(limit.Name, limit.Value));
+                        }
+                    }
+                }
+
+                return new RateLimitSnapshot(limits);
             }
             catch (JsonException)
             {
@@ -916,6 +923,20 @@ public static class ApiEndpoints
         }
 
         return null;
+    }
+
+    private static RateLimitDto ParseRateLimit(string fallbackId, JsonElement rateLimit)
+    {
+        var id = rateLimit.TryGetProperty("limitId", out var idValue) && idValue.ValueKind == JsonValueKind.String
+            ? idValue.GetString() ?? fallbackId
+            : fallbackId;
+        var name = rateLimit.TryGetProperty("limitName", out var nameValue) && nameValue.ValueKind == JsonValueKind.String
+            ? nameValue.GetString() ?? id
+            : string.Equals(id, "codex", StringComparison.OrdinalIgnoreCase) ? "Codex" : id;
+        var reachedType = rateLimit.TryGetProperty("rateLimitReachedType", out var reachedValue) && reachedValue.ValueKind == JsonValueKind.String
+            ? reachedValue.GetString()
+            : null;
+        return new RateLimitDto(id, name, ParseRateLimitWindow(rateLimit, "primary"), ParseRateLimitWindow(rateLimit, "secondary"), reachedType);
     }
 
     private static RateLimitWindowDto? ParseRateLimitWindow(JsonElement rateLimits, string propertyName)

@@ -12,6 +12,9 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
 });
+// Request history includes streamed Codex output, which can be large. Compress
+// API responses so remote browsers can complete polling requests reliably.
+builder.Services.AddResponseCompression(options => options.EnableForHttps = true);
 
 var connectionString = builder.Configuration.GetConnectionString("CodexQueue")
     ?? "Data Source=data/codex-queue.db";
@@ -44,6 +47,7 @@ builder.Services.AddSingleton<IQueueCoordinator>(sp => sp.GetRequiredService<Que
 
 var app = builder.Build();
 
+app.UseResponseCompression();
 app.UseCors("dev");
 app.UseWebSockets();
 app.UseMiddleware<ApiTokenMiddleware>();

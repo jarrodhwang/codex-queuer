@@ -115,6 +115,7 @@ export const api = {
     const query = params.toString()
     return apiFetch<CodexRequest[]>(query ? `/requests?${query}` : '/requests')
   },
+  request: (id: string) => apiFetch<CodexRequest>(`/requests/${id}`),
   createRequest: (request: CreateQueueRequest) =>
     apiFetch<CodexRequest>('/requests', { method: 'POST', body: JSON.stringify(request) }),
   updateRequest: (id: string, request: UpdateQueueRequest) =>

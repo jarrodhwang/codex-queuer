@@ -182,14 +182,19 @@ public sealed record MachineTestDto(bool Success, string Output);
 
 public sealed record RateLimitWindowDto(int UsedPercent, int? WindowDurationMins, long? ResetsAt);
 
+public sealed record RateLimitDto(
+    string Id,
+    string Name,
+    RateLimitWindowDto? Primary,
+    RateLimitWindowDto? Secondary,
+    string? RateLimitReachedType);
+
 public sealed record MachineRateLimitsDto(
     Guid MachineId,
     string MachineName,
     bool Available,
     string? Error,
-    RateLimitWindowDto? Primary,
-    RateLimitWindowDto? Secondary,
-    string? RateLimitReachedType);
+    IReadOnlyList<RateLimitDto> Limits);
 
 public sealed record QueueWorkerDiagnosticsDto(
     DateTimeOffset? LastHeartbeat,

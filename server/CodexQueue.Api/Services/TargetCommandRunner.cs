@@ -69,7 +69,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 static _ => Task.CompletedTask,
                 cancellationToken,
                 firstProcessOutputTimeout: RateLimitsTimeout,
-                standardInput: input);
+                standardInput: input,
+                completionOutputPredicate: static chunk => chunk.Contains("\"id\":2", StringComparison.Ordinal));
         }
 
         var remoteCommand = machine.TargetsWindows()
@@ -82,7 +83,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             static _ => Task.CompletedTask,
             cancellationToken,
             firstProcessOutputTimeout: RateLimitsTimeout,
-            standardInput: input);
+            standardInput: input,
+            completionOutputPredicate: static chunk => chunk.Contains("\"id\":2", StringComparison.Ordinal));
     }
 
     public Task<CommandResult> RunCodexAsync(
@@ -267,7 +269,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         Func<string, Task> onOutput,
         CancellationToken cancellationToken,
         TimeSpan? firstProcessOutputTimeout = null,
-        string? standardInput = null)
+        string? standardInput = null,
+        Func<string, bool>? completionOutputPredicate = null)
     {
         if (string.IsNullOrWhiteSpace(machine.Host))
         {
@@ -302,7 +305,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
         arguments.Add(destination);
         arguments.Add(remoteCommand);
-        return RunProcessAsync("ssh", arguments, null, preview, onOutput, cancellationToken, firstProcessOutputTimeout, standardInput);
+        return RunProcessAsync("ssh", arguments, null, preview, onOutput, cancellationToken, firstProcessOutputTimeout, standardInput, completionOutputPredicate);
     }
 
     private async Task<CommandResult> RunProcessAsync(
@@ -313,7 +316,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         Func<string, Task> onOutput,
         CancellationToken cancellationToken,
         TimeSpan? firstProcessOutputTimeout = null,
-        string? standardInput = null)
+        string? standardInput = null,
+        Func<string, bool>? completionOutputPredicate = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -354,6 +358,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         }
 
         var firstProcessOutput = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completionOutput = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         async Task ReadStreamAsync(StreamReader reader)
         {
@@ -371,6 +376,10 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 if (HasUsefulProcessOutput(chunk))
                 {
                     firstProcessOutput.TrySetResult();
+                }
+                if (completionOutputPredicate?.Invoke(chunk) == true)
+                {
+                    completionOutput.TrySetResult();
                 }
                 await onOutput(chunk);
             }
@@ -399,22 +408,44 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             }
             finally
             {
-                try
+                if (completionOutputPredicate is null)
                 {
-                    process.StandardInput.Close();
-                }
-                catch (IOException) when (process.HasExited)
-                {
-                    // The child process exited before stdin could be closed.
-                }
-                catch (ObjectDisposedException)
-                {
-                    // Standard input may already be disposed after an early process exit.
+                    try
+                    {
+                        process.StandardInput.Close();
+                    }
+                    catch (IOException) when (process.HasExited)
+                    {
+                        // The child process exited before stdin could be closed.
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Standard input may already be disposed after an early process exit.
+                    }
                 }
             }
 
             if (firstProcessOutputTimeout is { } timeout)
             {
+                if (completionOutputPredicate is not null)
+                {
+                    var completionSignal = await Task.WhenAny(completionOutput.Task, waitForExit, Task.Delay(timeout, cancellationToken));
+                    if (completionSignal != completionOutput.Task)
+                    {
+                        if (completionSignal != waitForExit)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            TryKill(process);
+                            throw new TimeoutException("Codex did not return usage data before the request timed out.");
+                        }
+                    }
+                    else
+                    {
+                        TryKill(process);
+                    }
+                }
+                else
+                {
                 var timeoutTask = Task.Delay(timeout, cancellationToken);
                 var firstSignal = await Task.WhenAny(firstProcessOutput.Task, waitForExit, timeoutTask);
                 if (firstSignal == timeoutTask)
@@ -425,6 +456,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                     await onOutput(message);
                     TryKill(process);
                     throw new TimeoutException(message.Trim());
+                }
                 }
             }
 
