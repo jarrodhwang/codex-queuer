@@ -60,10 +60,11 @@ Codex runs over Windows SSH use `danger-full-access` because both native Windows
 ## Queue Behavior
 
 1. A request is queued against a project and model.
-2. The worker runs `codex exec --json` on the project machine.
+2. The worker processes each project's queue in order while running different project queues concurrently.
+3. The worker runs `codex exec --json` on the project machine.
    Prompts are streamed over stdin instead of placed in process arguments, which supports long requests on Windows and avoids exposing prompt text in process listings.
-3. If commit generation is enabled and the request succeeds, a second Codex session runs with the commit model.
-4. Request and commit output are stored as separate runs and displayed together under the request details.
+4. If commit generation is enabled and the request succeeds, a second Codex session runs with the commit model.
+5. Request and commit output are stored as separate runs and displayed together under the request details.
 
 ## Security Notes
 

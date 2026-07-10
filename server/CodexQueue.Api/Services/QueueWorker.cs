@@ -41,11 +41,13 @@ public sealed class QueueWorker(
     private static readonly Regex ModelRegex = new(@"(?i)(gpt-[a-z0-9._-]+)", RegexOptions.Compiled);
     private static readonly Regex CommitCreatedOutputRegex = new(@"(?im)(Commit created:|Created commit\b|commit created\b|\[[^\]\r\n]+\s+[0-9a-f]{7,40}\])", RegexOptions.Compiled);
     private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _activeRequests = new();
-    private readonly SemaphoreSlim _processLock = new(1, 1);
+    private readonly ConcurrentDictionary<Guid, ProjectExecution> _activeProjects = new();
+    private readonly SemaphoreSlim _dispatchLock = new(1, 1);
     private DateTimeOffset? _lastHeartbeat;
     private DateTimeOffset? _lastDispatch;
     private DateTimeOffset? _lastIdle;
     private string? _lastError;
+    private CancellationToken _workerStoppingToken;
 
     public async Task<bool> CancelRequestAsync(Guid requestId, CancellationToken cancellationToken)
     {
@@ -127,7 +129,7 @@ public sealed class QueueWorker(
 
     public Task<bool> KickQueueAsync(CancellationToken cancellationToken)
     {
-        if (!_processLock.Wait(0))
+        if (!_dispatchLock.Wait(0))
         {
             return Task.FromResult(false);
         }
@@ -136,7 +138,7 @@ public sealed class QueueWorker(
         {
             try
             {
-                await ProcessAvailableAsync(CancellationToken.None);
+                await DispatchAvailableProjectsAsync(CancellationToken.None);
             }
             catch (Exception ex)
             {
@@ -145,7 +147,7 @@ public sealed class QueueWorker(
             }
             finally
             {
-                _processLock.Release();
+                _dispatchLock.Release();
             }
         }, CancellationToken.None);
 
@@ -159,167 +161,229 @@ public sealed class QueueWorker(
             _lastIdle,
             _lastError,
             _activeRequests.Keys.ToArray(),
-            _processLock.CurrentCount == 0);
+            !_activeProjects.IsEmpty || _dispatchLock.CurrentCount == 0);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            try
-            {
-                var processed = await ProcessAvailableLockedAsync(stoppingToken);
-                if (!processed)
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
-                }
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                _lastError = ex.Message;
-                logger.LogError(ex, "Queue loop failed.");
-                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
-            }
-        }
-    }
-
-    private async Task<bool> ProcessAvailableLockedAsync(CancellationToken stoppingToken)
-    {
-        await _processLock.WaitAsync(stoppingToken);
+        _workerStoppingToken = stoppingToken;
         try
         {
-            return await ProcessAvailableAsync(stoppingToken);
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                try
+                {
+                    var dispatched = await DispatchAvailableProjectsLockedAsync(stoppingToken);
+                    if (!dispatched)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
+                    }
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _lastError = ex.Message;
+                    logger.LogError(ex, "Queue loop failed.");
+                    await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+                }
+            }
         }
         finally
         {
-            _processLock.Release();
+            await WaitForActiveProjectsAsync();
         }
     }
 
-    private async Task<bool> ProcessAvailableAsync(CancellationToken stoppingToken)
+    private async Task<bool> DispatchAvailableProjectsLockedAsync(CancellationToken stoppingToken)
     {
-        var processedAny = false;
-        while (!stoppingToken.IsCancellationRequested)
+        await _dispatchLock.WaitAsync(stoppingToken);
+        try
         {
-            var processed = await ProcessNextAsync(stoppingToken);
-            if (!processed)
-            {
-                return processedAny;
-            }
-
-            processedAny = true;
+            return await DispatchAvailableProjectsAsync(stoppingToken);
         }
-
-        return processedAny;
+        finally
+        {
+            _dispatchLock.Release();
+        }
     }
 
-    private async Task<bool> ProcessNextAsync(CancellationToken stoppingToken)
+    private async Task<bool> DispatchAvailableProjectsAsync(CancellationToken stoppingToken)
     {
         _lastHeartbeat = DateTimeOffset.UtcNow;
-        CodexRequest? request;
-        RunKind? nextRunKind = null;
-        await using (var scope = scopeFactory.CreateAsyncScope())
+        var dispatches = new List<PendingDispatch>();
+        try
         {
-            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            await ResumeExpiredUsageLimitedRequestsAsync(db, stoppingToken);
-            await ReconcileQueueStateAsync(db, stoppingToken);
-
-            var now = DateTimeOffset.UtcNow;
-            var queuedRequests = await db.Requests
-                .Include(x => x.Runs)
-                .Where(x => x.DeletedAt == null && (x.Status == QueueStatus.Queued || x.Status == QueueStatus.Running))
-                .ToArrayAsync(stoppingToken);
-
-            Guid? nextRequestId = null;
-            Guid? nextRunId = null;
-            foreach (var candidate in queuedRequests.OrderBy(x => x.QueueOrder).ThenBy(x => x.CreatedAt))
+            await using (var scope = scopeFactory.CreateAsyncScope())
             {
-                var candidateRun = NextRunForDispatch(candidate);
-                if (candidateRun is null)
+                var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+                await ResumeExpiredUsageLimitedRequestsAsync(db, stoppingToken);
+                await ReconcileQueueStateAsync(db, stoppingToken);
+
+                var now = DateTimeOffset.UtcNow;
+                var queuedRequests = await db.Requests
+                    .Include(x => x.Project).ThenInclude(x => x!.Machine)
+                    .Include(x => x.Machine)
+                    .Include(x => x.Runs)
+                    .Where(x => x.DeletedAt == null && (x.Status == QueueStatus.Queued || x.Status == QueueStatus.Running))
+                    .ToArrayAsync(stoppingToken);
+                var projectsWithUnclaimedRunningRequests = queuedRequests
+                    .Where(x => x.Status == QueueStatus.Running && !_activeProjects.ContainsKey(x.ProjectId))
+                    .Select(x => x.ProjectId)
+                    .ToHashSet();
+
+                foreach (var candidate in queuedRequests.OrderBy(x => x.QueueOrder).ThenBy(x => x.CreatedAt))
                 {
-                    continue;
+                    if (_activeProjects.ContainsKey(candidate.ProjectId)
+                        || projectsWithUnclaimedRunningRequests.Contains(candidate.ProjectId))
+                    {
+                        continue;
+                    }
+
+                    var candidateRun = NextRunForDispatch(candidate);
+                    if (candidateRun is null)
+                    {
+                        continue;
+                    }
+
+                    var modelLimited = await IsRunModelUsageLimitedAsync(db, candidate.MachineId, candidateRun.Model, now, stoppingToken);
+                    if (modelLimited)
+                    {
+                        continue;
+                    }
+
+                    var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(_workerStoppingToken);
+                    var execution = new ProjectExecution(requestCancellation);
+                    if (!_activeProjects.TryAdd(candidate.ProjectId, execution))
+                    {
+                        requestCancellation.Dispose();
+                        continue;
+                    }
+
+                    if (!_activeRequests.TryAdd(candidate.Id, requestCancellation))
+                    {
+                        _activeProjects.TryRemove(candidate.ProjectId, out _);
+                        requestCancellation.Dispose();
+                        continue;
+                    }
+
+                    candidate.Status = QueueStatus.Running;
+                    candidate.StartedAt ??= DateTimeOffset.UtcNow;
+                    candidateRun.Status = QueueStatus.Running;
+                    candidateRun.StartedAt ??= DateTimeOffset.UtcNow;
+                    candidateRun.Output = TrimOutput(candidateRun.Output + "Dispatching " + candidateRun.Kind.ToString().ToLowerInvariant() + " run on " + (candidate.Machine?.Name ?? candidate.Project?.Machine?.Name ?? "target machine") + "..." + Environment.NewLine);
+                    dispatches.Add(new PendingDispatch(candidate.ProjectId, candidate.Id, candidateRun.Kind, execution));
                 }
 
-                var modelLimited = await IsRunModelUsageLimitedAsync(db, candidate.MachineId, candidateRun.Model, now, stoppingToken);
-                if (!modelLimited)
+                if (dispatches.Count == 0)
                 {
-                    nextRequestId = candidate.Id;
-                    nextRunId = candidateRun.Id;
-                    nextRunKind = candidateRun.Kind;
-                    break;
+                    _lastIdle = DateTimeOffset.UtcNow;
+                    return false;
+                }
+
+                _lastDispatch = DateTimeOffset.UtcNow;
+                _lastError = null;
+                if (!await TrySaveChangesAsync(db, "mark requests running", stoppingToken))
+                {
+                    foreach (var dispatch in dispatches)
+                    {
+                        ReleaseProjectExecution(dispatch);
+                    }
+
+                    return false;
                 }
             }
-
-            if (nextRequestId is null)
+        }
+        catch
+        {
+            foreach (var dispatch in dispatches)
             {
-                _lastIdle = DateTimeOffset.UtcNow;
-                return false;
+                ReleaseProjectExecution(dispatch);
             }
 
-            request = await db.Requests
-                .Include(x => x.Project).ThenInclude(x => x!.Machine)
-                .Include(x => x.Machine)
-                .Include(x => x.Runs)
-                .FirstAsync(x => x.Id == nextRequestId, stoppingToken);
-
-            if (request is null)
-            {
-                return false;
-            }
-
-            request.Status = QueueStatus.Running;
-            request.StartedAt ??= DateTimeOffset.UtcNow;
-            var run = nextRunId.HasValue
-                ? request.Runs.First(x => x.Id == nextRunId.Value)
-                : GetLatestRunOfKind(request.Runs, RunKind.Request) ?? throw new InvalidOperationException("Request run was not found.");
-            run.Status = QueueStatus.Running;
-            run.StartedAt ??= DateTimeOffset.UtcNow;
-            run.Output = TrimOutput(run.Output + "Dispatching " + run.Kind.ToString().ToLowerInvariant() + " run on " + (request.Machine?.Name ?? request.Project?.Machine?.Name ?? "target machine") + "..." + Environment.NewLine);
-            _lastDispatch = DateTimeOffset.UtcNow;
-            _lastError = null;
-            if (!await TrySaveChangesAsync(db, "mark request running", stoppingToken))
-            {
-                return false;
-            }
+            throw;
         }
 
-        if (nextRunKind == RunKind.Commit)
+        foreach (var dispatch in dispatches)
         {
-            await RunCommitAsync(request.Id, stoppingToken);
-        }
-        else
-        {
-            await RunRequestAsync(request.Id, stoppingToken);
+            StartProjectExecution(dispatch);
         }
 
         return true;
     }
 
-    private async Task RunRequestAsync(Guid requestId, CancellationToken stoppingToken)
+    private void StartProjectExecution(PendingDispatch dispatch)
     {
-        using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-        _activeRequests[requestId] = requestCancellation;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (dispatch.RunKind == RunKind.Commit)
+                {
+                    await RunCommitAsync(dispatch.RequestId, dispatch.Execution.Cancellation.Token);
+                }
+                else
+                {
+                    await RunRequestAsync(dispatch.RequestId, dispatch.Execution.Cancellation.Token);
+                }
+            }
+            catch (OperationCanceledException) when (dispatch.Execution.Cancellation.IsCancellationRequested)
+            {
+                // Cancellation state is recorded by the request operation or recovered on restart.
+            }
+            catch (Exception ex)
+            {
+                _lastError = ex.Message;
+                logger.LogError(ex, "Project queue execution failed for project {ProjectId} and request {RequestId}.", dispatch.ProjectId, dispatch.RequestId);
+            }
+            finally
+            {
+                ReleaseProjectExecution(dispatch);
+                if (!_workerStoppingToken.IsCancellationRequested)
+                {
+                    await KickQueueAsync(CancellationToken.None);
+                }
+            }
+        }, CancellationToken.None);
+    }
 
+    private void ReleaseProjectExecution(PendingDispatch dispatch)
+    {
+        _activeRequests.TryRemove(dispatch.RequestId, out _);
+        _activeProjects.TryRemove(dispatch.ProjectId, out _);
+        dispatch.Execution.Cancellation.Dispose();
+        dispatch.Execution.Completion.TrySetResult();
+    }
+
+    private async Task WaitForActiveProjectsAsync()
+    {
+        await _dispatchLock.WaitAsync(CancellationToken.None);
+        Task[] completions;
         try
         {
-            var requestRunSucceeded = await IsRunSucceededAsync(requestId, RunKind.Request, requestCancellation.Token)
-                || await ExecuteRunAsync(requestId, RunKind.Request, requestCancellation.Token);
-            if (!requestRunSucceeded)
-            {
-                return;
-            }
-
-            if (await PrepareCommitRunAfterRequestAsync(requestId, requestCancellation.Token))
-            {
-                await ExecuteRunAsync(requestId, RunKind.Commit, requestCancellation.Token);
-            }
+            completions = _activeProjects.Values.Select(x => x.Completion.Task).ToArray();
         }
         finally
         {
-            _activeRequests.TryRemove(requestId, out _);
+            _dispatchLock.Release();
+        }
+
+        await Task.WhenAll(completions);
+    }
+
+    private async Task RunRequestAsync(Guid requestId, CancellationToken cancellationToken)
+    {
+        var requestRunSucceeded = await IsRunSucceededAsync(requestId, RunKind.Request, cancellationToken)
+            || await ExecuteRunAsync(requestId, RunKind.Request, cancellationToken);
+        if (!requestRunSucceeded)
+        {
+            return;
+        }
+
+        if (await PrepareCommitRunAfterRequestAsync(requestId, cancellationToken))
+        {
+            await ExecuteRunAsync(requestId, RunKind.Commit, cancellationToken);
         }
     }
 
@@ -379,18 +443,9 @@ public sealed class QueueWorker(
         return await TrySaveChangesAsync(db, "prepare immediate commit run", cancellationToken);
     }
 
-    private async Task RunCommitAsync(Guid requestId, CancellationToken stoppingToken)
+    private async Task RunCommitAsync(Guid requestId, CancellationToken cancellationToken)
     {
-        using var commitCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-        _activeRequests[requestId] = commitCancellation;
-        try
-        {
-            await ExecuteRunAsync(requestId, RunKind.Commit, commitCancellation.Token);
-        }
-        finally
-        {
-            _activeRequests.TryRemove(requestId, out _);
-        }
+        await ExecuteRunAsync(requestId, RunKind.Commit, cancellationToken);
     }
 
     private async Task<bool> ExecuteRunAsync(Guid requestId, RunKind kind, CancellationToken cancellationToken)
@@ -1904,6 +1959,18 @@ public sealed class QueueWorker(
         var normalized = type.Replace('.', '_').Replace('-', '_');
         return string.Equals(normalized, suffix, StringComparison.OrdinalIgnoreCase)
                || normalized.EndsWith("_" + suffix, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed record PendingDispatch(
+        Guid ProjectId,
+        Guid RequestId,
+        RunKind RunKind,
+        ProjectExecution Execution);
+
+    private sealed class ProjectExecution(CancellationTokenSource cancellation)
+    {
+        public CancellationTokenSource Cancellation { get; } = cancellation;
+        public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     private static string? ReadString(JsonElement element, string propertyName) =>
