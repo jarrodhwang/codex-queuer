@@ -4599,6 +4599,87 @@
   background: rgba(30, 41, 59, 0.82);
 }
 
+:root[data-theme='dark'] :is(
+  .attachment-preview-card,
+  .attachment-preview-card--image,
+  .attachment-preview-card--json,
+  .attachment-preview-card--csv,
+  .attachment-preview-card--text,
+  .project-detail-summary,
+  .selected-folder,
+  .folder-picker-toolbar,
+  .folder-diagnostic,
+  .model-picker-grid,
+  .git-panel-summary,
+  .git-change-row,
+  .git-action-card,
+  .git-action-output,
+  .git-diff-metric,
+  .git-diff-stat-row,
+  .diagnostics-panel
+) {
+  border-color: var(--line);
+  background: linear-gradient(145deg, rgba(31, 43, 66, 0.9), rgba(13, 22, 39, 0.82));
+  color: var(--text);
+}
+
+:root[data-theme='dark'] :is(.attachment-preview-summary span, .attachment-kind-icon, .attachment-image-preview, .git-stage-state) {
+  border-color: var(--line);
+  background: rgba(2, 6, 23, 0.38);
+  color: var(--muted-strong);
+}
+
+:root[data-theme='dark'] :is(.empty-state--error, .folder-diagnostic--bad, .diagnostics-panel--bad) {
+  border-color: rgba(252, 165, 165, 0.32);
+  background: rgba(127, 29, 29, 0.28);
+  color: #fca5a5;
+}
+
+:root[data-theme='dark'] :is(.folder-diagnostic--ok, .diagnostics-panel--ok) {
+  border-color: rgba(110, 231, 183, 0.3);
+  background: rgba(6, 78, 59, 0.34);
+  color: #a7f3d0;
+}
+
+:root[data-theme='dark'] :is(
+  .completion-summary,
+  .git-action-card--success,
+  .git-action-output--success
+) {
+  border-color: rgba(110, 231, 183, 0.3);
+  background: linear-gradient(145deg, rgba(6, 78, 59, 0.6), rgba(13, 35, 38, 0.86));
+  color: #a7f3d0;
+}
+
+:root[data-theme='dark'] :is(
+  .completion-summary-head,
+  .completion-title,
+  .completion-markdown h1,
+  .completion-markdown h2,
+  .completion-markdown h3,
+  .completion-markdown a,
+  .completion-facts span,
+  .completion-file span:last-child,
+  .git-state-pill--clean,
+  .git-status-chip--added,
+  .git-status-chip--untracked,
+  .git-diff-metric--add strong
+) {
+  color: #6ee7b7;
+}
+
+:root[data-theme='dark'] :is(.completion-facts span, .completion-file span:last-child, .git-state-pill--clean, .git-status-chip--added, .git-status-chip--untracked) {
+  background: rgba(6, 78, 59, 0.44);
+}
+
+:root[data-theme='dark'] :is(.git-status-chip--deleted, .git-diff-metric--delete strong, .kick-worker-button--bad) {
+  color: #fca5a5;
+}
+
+:root[data-theme='dark'] .git-status-chip--renamed {
+  color: #d8b4fe;
+}
+
 :root[data-theme='dark'] :is(.auth-screen, .modal-backdrop) {
   background-color: rgba(2, 6, 23, 0.76);
 }
