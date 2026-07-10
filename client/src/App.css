@@ -4409,3 +4409,171 @@
     0 14px 34px rgba(15, 23, 42, 0.1),
     0 0 28px rgba(182, 115, 255, 0.14);
 }
+
+/* Dark theme overrides the light glass materials while preserving status colors. */
+:root[data-theme='dark'] .app-shell {
+  background:
+    linear-gradient(115deg, rgba(32, 217, 242, 0.1), transparent 30%),
+    linear-gradient(245deg, rgba(182, 115, 255, 0.1), transparent 34%),
+    linear-gradient(135deg, #070b16 0%, #0f172a 48%, #111827 100%);
+}
+
+:root[data-theme='dark'] .sidebar,
+:root[data-theme='dark'] .right-rail {
+  border-color: var(--line);
+  background: linear-gradient(180deg, rgba(17, 24, 39, 0.94), rgba(8, 15, 29, 0.88));
+  box-shadow: inset 0 1px 0 var(--glass-edge), 10px 0 36px rgba(0, 0, 0, 0.22);
+}
+
+:root[data-theme='dark'] .glass-panel,
+:root[data-theme='dark'] .usage-sidebar,
+:root[data-theme='dark'] .queue-detail-panel,
+:root[data-theme='dark'] .modal {
+  border-color: var(--line);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 42%),
+    var(--glass-bg);
+  box-shadow: var(--glass-shadow);
+}
+
+:root[data-theme='dark'] .glass-panel::before {
+  background:
+    linear-gradient(115deg, rgba(255, 255, 255, 0.05), transparent 38%),
+    linear-gradient(285deg, rgba(182, 115, 255, 0.08), transparent 48%);
+}
+
+:root[data-theme='dark'] :is(
+  .glass-button,
+  .glass-field,
+  .project-item,
+  .machine-item,
+  .request-card,
+  .history-row,
+  .file-tab,
+  .tree-row,
+  .modal-item,
+  .commit-toggle,
+  .model-chip,
+  .status-badge,
+  .pending-run-row,
+  .run-detail-card,
+  .completion-summary,
+  .completion-result-box,
+  .request-body-scroll,
+  .attachment-preview-item,
+  .folder-picker,
+  .git-action-card,
+  .detail-inspector-card,
+  .detail-timeline div,
+  .detail-plan-grid div,
+  .run-meta-grid span,
+  .settings-section,
+  .settings-list,
+  .settings-row
+) {
+  border-color: var(--line);
+  background: linear-gradient(145deg, rgba(31, 43, 66, 0.88), rgba(13, 22, 39, 0.78));
+  color: var(--text);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 10px 28px rgba(0, 0, 0, 0.2);
+}
+
+:root[data-theme='dark'] .glass-field::placeholder {
+  color: rgba(148, 163, 184, 0.72);
+}
+
+:root[data-theme='dark'] :is(.glass-button, .glass-button--secondary, .glass-button--ghost):not(:disabled):hover {
+  border-color: var(--accent-line);
+  background: linear-gradient(145deg, rgba(45, 61, 90, 0.96), rgba(22, 34, 56, 0.92));
+  color: var(--text-strong);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 12px 32px rgba(0, 0, 0, 0.3), 0 0 24px rgba(32, 217, 242, 0.12);
+}
+
+:root[data-theme='dark'] :is(.project-item.active, .request-card.active, .history-row.active, .tab-strip button.active) {
+  border-color: rgba(56, 189, 248, 0.88);
+  outline-color: rgba(56, 189, 248, 0.68);
+  background: linear-gradient(145deg, rgba(12, 74, 110, 0.72), rgba(30, 41, 59, 0.92));
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 12px 30px rgba(0, 0, 0, 0.3), 0 0 0 4px rgba(14, 165, 233, 0.12), 0 0 28px rgba(32, 217, 242, 0.18);
+}
+
+:root[data-theme='dark'] .request-card--succeeded,
+:root[data-theme='dark'] .status-badge--succeeded {
+  background: linear-gradient(145deg, rgba(6, 78, 59, 0.72), rgba(13, 35, 38, 0.86));
+  color: #6ee7b7;
+}
+
+:root[data-theme='dark'] :is(.request-card--failed, .request-card--cancelled, .status-badge--failed, .status-badge--cancelled) {
+  background: linear-gradient(145deg, rgba(127, 29, 29, 0.56), rgba(50, 24, 32, 0.86));
+  color: #fca5a5;
+}
+
+:root[data-theme='dark'] :is(.status-badge--queued, .status-badge--cancelrequested, .model-chip--speed-priority) {
+  color: #fcd34d;
+}
+
+:root[data-theme='dark'] :is(.status-badge--running, .status-badge--usagelimited, .model-chip--model) {
+  color: #67e8f9;
+}
+
+:root[data-theme='dark'] :is(.model-chip--effort-high, .glass-select-option.active, .glass-select-arrow) {
+  color: #d8b4fe;
+}
+
+:root[data-theme='dark'] :is(.model-chip--effort-xhigh, .error-text) {
+  color: #fca5a5;
+}
+
+:root[data-theme='dark'] :is(.model-chip--effort-ultra, .warning-text) {
+  color: #fdba74;
+}
+
+:root[data-theme='dark'] .manual-commit-button.glass-button--secondary {
+  border-color: var(--line-strong);
+  background: linear-gradient(145deg, rgba(45, 61, 90, 0.96), rgba(22, 34, 56, 0.92));
+  color: var(--text-strong);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 12px 26px rgba(0, 0, 0, 0.26);
+}
+
+:root[data-theme='dark'] :is(.model-picker-grid, .glass-select-menu) {
+  border-color: rgba(93, 222, 255, 0.24);
+  background: linear-gradient(145deg, rgba(31, 43, 66, 0.98), rgba(13, 22, 39, 0.98));
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 18px 42px rgba(0, 0, 0, 0.38);
+}
+
+:root[data-theme='dark'] :is(.model-picker-grid .glass-field:is(select), .glass-select-button) {
+  background:
+    linear-gradient(135deg, rgba(31, 43, 66, 0.98), rgba(13, 22, 39, 0.96)) padding-box,
+    linear-gradient(135deg, rgba(32, 217, 242, 0.72), rgba(67, 182, 255, 0.58) 48%, rgba(182, 115, 255, 0.66)) border-box;
+  color: var(--text-strong);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 8px 22px rgba(0, 0, 0, 0.26);
+}
+
+:root[data-theme='dark'] .model-picker-grid .glass-field:is(select) option {
+  background: #111827;
+  color: var(--text-strong);
+}
+
+:root[data-theme='dark'] .glass-select-option {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+}
+
+:root[data-theme='dark'] :is(.glass-select-option:hover, .glass-select-option:focus-visible) {
+  background: rgba(51, 65, 85, 0.9);
+  color: var(--text-strong);
+}
+
+:root[data-theme='dark'] .prompt-dropzone .glass-textarea,
+:root[data-theme='dark'] .prompt-dropzone .glass-textarea:focus {
+  border-color: rgba(93, 222, 255, 0.24);
+  background: linear-gradient(145deg, rgba(31, 43, 66, 0.94), rgba(13, 22, 39, 0.88));
+  color: var(--text-strong);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 12px 32px rgba(0, 0, 0, 0.28);
+}
+
+:root[data-theme='dark'] :is(.detail-inspector-card, .detail-timeline div, .detail-plan-grid div, .run-meta-grid span) {
+  background: rgba(30, 41, 59, 0.82);
+}
+
+:root[data-theme='dark'] :is(.auth-screen, .modal-backdrop) {
+  background-color: rgba(2, 6, 23, 0.76);
+}

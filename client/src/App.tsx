@@ -21,12 +21,14 @@ import {
   Image as ImageIcon,
   Menu,
   Monitor,
+  Moon,
   Pencil,
   Play,
   Plus,
   RefreshCcw,
   Server,
   Settings,
+  Sun,
   Square,
   Terminal as TerminalIcon,
   Trash2,
@@ -78,6 +80,7 @@ type ProjectModelDefaults = {
 }
 
 type RightRailView = 'files' | 'git'
+type ColorTheme = 'light' | 'dark'
 type AttachmentKind = 'image' | 'json' | 'csv' | 'text' | 'binary'
 
 type AttachmentInsight = {
@@ -111,6 +114,21 @@ const emptyMachine: SaveMachineRequest = {
   sshKeyPath: '',
   workingRoot: '',
   platform: 'Auto',
+}
+
+const themeStorageKey = 'codex-queue-theme'
+
+function getInitialTheme(): ColorTheme {
+  try {
+    const storedTheme = window.localStorage.getItem(themeStorageKey)
+    if (storedTheme === 'light' || storedTheme === 'dark') {
+      return storedTheme
+    }
+  } catch {
+    // Storage can be unavailable in privacy-restricted browsing contexts.
+  }
+
+  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }
 
 function requestCompletionNotificationPermission() {
@@ -451,6 +469,7 @@ function requestOverrideConfirmed(request: CodexRequest, override: Partial<Codex
 }
 
 function App() {
+  const [theme, setTheme] = useState<ColorTheme>(getInitialTheme)
   const [config, setConfig] = useState<ApiConfig>({ requiresToken: false, models: defaultModels })
   const [machines, setMachines] = useState<Machine[]>([])
   const [projects, setProjects] = useState<Project[]>([])
@@ -469,6 +488,16 @@ function App() {
   const liveRequestSequenceRef = useRef(0)
   const hasLoadedLiveRequestsRef = useRef(false)
   const previousRequestStatusRef = useRef<Map<string, CodexRequest['status']> | null>(null)
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    document.documentElement.style.colorScheme = theme
+    try {
+      window.localStorage.setItem(themeStorageKey, theme)
+    } catch {
+      // The selected theme still applies for this session when storage is unavailable.
+    }
+  }, [theme])
 
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0]
   const activeFile = openFiles.find((file) => file.key === activeFileKey)
@@ -885,6 +914,8 @@ function App() {
   return (
     <div className="app-shell" data-right-open={rightOpen ? 'true' : 'false'}>
       <LeftSidebar
+        theme={theme}
+        onToggleTheme={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
         machines={machines}
         projects={projects}
         requests={requests}
@@ -1030,6 +1061,8 @@ function AuthScreen({ onAuthed }: { onAuthed: () => Promise<void> }) {
 }
 
 function LeftSidebar({
+  theme,
+  onToggleTheme,
   machines,
   projects,
   requests,
@@ -1041,6 +1074,8 @@ function LeftSidebar({
   onChanged,
   onError,
 }: {
+  theme: ColorTheme
+  onToggleTheme: () => void
   machines: Machine[]
   projects: Project[]
   requests: CodexRequest[]
@@ -1140,6 +1175,16 @@ function LeftSidebar({
             </GlassButton>
             <GlassButton variant="ghost" size="icon" onClick={() => setUsageModalOpen(true)} title="Codex usage">
               <Gauge size={16} />
+            </GlassButton>
+            <GlassButton
+              variant="ghost"
+              size="icon"
+              onClick={onToggleTheme}
+              title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+              aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+              aria-pressed={theme === 'dark'}
+            >
+              {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
             </GlassButton>
             <GlassButton variant="ghost" size="icon" onClick={() => setMachineModalOpen(true)} title="Manage machines">
               <Settings size={16} />
