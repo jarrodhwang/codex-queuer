@@ -1,3 +1,4 @@
+import { useId } from 'react'
 import { cn } from '@/lib/utils'
 
 type GaugeProps = {
@@ -7,12 +8,11 @@ type GaugeProps = {
   tone?: 'default' | 'limited'
 }
 
-const radius = 42
-const circumference = 2 * Math.PI * radius
+const radius = 40
 
 export function Gauge({ label, value, className, tone = 'default' }: GaugeProps) {
+  const gradientId = useId().replace(/:/g, '')
   const percentage = value === null ? null : Math.round(Math.max(0, Math.min(100, value)))
-  const progress = percentage === null ? 0 : (percentage / 100) * circumference
   const displayValue = percentage === null ? '—' : `${percentage}%`
 
   return (
@@ -23,20 +23,32 @@ export function Gauge({ label, value, className, tone = 'default' }: GaugeProps)
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={percentage ?? undefined}
+      aria-valuetext={percentage === null ? `${label} percentage unavailable` : `${percentage}% remaining`}
     >
       <svg viewBox="0 0 100 100" aria-hidden="true">
-        <circle className="ein-gauge-track" cx="50" cy="50" r={radius} />
+        <defs>
+          <linearGradient id={gradientId} x1="12%" y1="88%" x2="88%" y2="12%">
+            <stop className="ein-gauge-gradient-start" offset="0%" />
+            <stop className="ein-gauge-gradient-end" offset="100%" />
+          </linearGradient>
+        </defs>
+        <circle className="ein-gauge-track" cx="50" cy="50" r={radius} pathLength="100" />
         {percentage !== null && (
           <circle
             className="ein-gauge-value"
             cx="50"
             cy="50"
             r={radius}
-            strokeDasharray={`${progress} ${circumference - progress}`}
+            pathLength="100"
+            stroke={`url(#${gradientId})`}
+            strokeDasharray={`${percentage} 100`}
           />
         )}
       </svg>
-      <span>{displayValue}</span>
+      <span className="ein-gauge__core">
+        <span className="ein-gauge__value">{displayValue}</span>
+        <span className="ein-gauge__caption">left</span>
+      </span>
     </div>
   )
 }
