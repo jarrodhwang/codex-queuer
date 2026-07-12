@@ -1236,7 +1236,6 @@ function LeftSidebar({
 
       <GlassPanel>
         <div className="section-header">
-          <h2>Projects</h2>
           <div className="sidebar-actions">
             <GlassButton variant="ghost" size="icon" onClick={() => setProjectModalOpen(true)} title="Add project">
               <FolderPlus size={16} />
