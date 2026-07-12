@@ -57,6 +57,7 @@ import type {
   UpdateQueueRequest,
 } from '@/api/types'
 import { FieldLabel, GlassButton, GlassDropdownSelect, GlassInput, GlassPanel, GlassSelect, GlassTextarea } from '@/components/einui/Glass'
+import { ConfirmDialog } from '@/components/einui/ConfirmDialog'
 import { ProgressLine, StatusBadge } from '@/components/einui/Status'
 import { formatDate, shortId } from '@/lib/utils'
 import './App.css'
@@ -691,9 +692,6 @@ function App() {
   }
 
   const removeProject = async (project: Project) => {
-    const confirmed = window.confirm(`Remove "${project.name}" from Codex Queue? This cancels any active queue work and removes its history from this web app, but will not delete files or folders from disk.`)
-    if (!confirmed) return false
-
     setError('')
     try {
       await api.deleteProject(project.id)
@@ -1546,6 +1544,7 @@ function MachineModal({
 }) {
   const [draft, setDraft] = useState<SaveMachineRequest>(emptyMachine)
   const [editingId, setEditingId] = useState<string | undefined>()
+  const [machineToDelete, setMachineToDelete] = useState<Machine | null>(null)
   const [testResults, setTestResults] = useState<Record<string, { testing: boolean; success?: boolean; output: string; checkedAt?: string }>>({})
 
   const selectedMachine = machines.find((machine) => machine.id === editingId)
@@ -1632,6 +1631,7 @@ function MachineModal({
         reset()
       }
       await onChanged()
+      setMachineToDelete(null)
     } catch (cause) {
       onError(cause)
     }
@@ -1695,7 +1695,7 @@ function MachineModal({
                 </GlassButton>
               )}
               {editingId && (
-                <GlassButton variant="danger" size="sm" type="button" onClick={() => remove(editingId)}>
+                <GlassButton variant="danger" size="sm" type="button" onClick={() => setMachineToDelete(selectedMachine ?? null)}>
                   <Trash2 size={13} /> Delete
                 </GlassButton>
               )}
@@ -1768,6 +1768,15 @@ function MachineModal({
           )}
         </form>
       </div>
+      {machineToDelete && (
+        <ConfirmDialog
+          title="Delete machine?"
+          description={<>Delete <strong>{machineToDelete.name}</strong> from Codex Queue? Projects using this machine may no longer be available, but no files or folders will be deleted.</>}
+          confirmLabel="Delete machine"
+          onCancel={() => setMachineToDelete(null)}
+          onConfirm={() => remove(machineToDelete.id)}
+        />
+      )}
     </Modal>
   )
 }
@@ -2148,6 +2157,7 @@ function ProjectDetailsModal({
 }) {
   const [name, setName] = useState(project.name)
   const [saving, setSaving] = useState(false)
+  const [confirmingRemove, setConfirmingRemove] = useState(false)
 
   useEffect(() => {
     setName(project.name)
@@ -2173,8 +2183,9 @@ function ProjectDetailsModal({
   }
 
   return (
-    <Modal title="Project Details" onClose={onClose} icon={<FolderOpen size={18} />}>
-      <form className="form-grid" onSubmit={submit}>
+    <>
+      <Modal title="Project Details" onClose={onClose} icon={<FolderOpen size={18} />}>
+        <form className="form-grid" onSubmit={submit}>
         <FieldLabel label="Project name">
           <div className="project-name-form">
             <GlassInput value={name} onChange={(event) => setName(event.target.value)} autoFocus required />
@@ -2208,12 +2219,22 @@ function ProjectDetailsModal({
             <div className="selected-folder-label">Remove from app</div>
             <div className="meta truncate">Project files and folders stay on disk.</div>
           </div>
-          <GlassButton variant="danger" type="button" onClick={() => onRemove(project)}>
+          <GlassButton variant="danger" type="button" onClick={() => setConfirmingRemove(true)}>
             <Trash2 size={15} /> Remove
           </GlassButton>
         </div>
-      </form>
-    </Modal>
+        </form>
+      </Modal>
+      {confirmingRemove && (
+        <ConfirmDialog
+          title="Remove project?"
+          description={<>Remove <strong>{project.name}</strong> from Codex Queue? This cancels active queue work and removes its history from this web app, but does not delete files or folders from disk.</>}
+          confirmLabel="Remove project"
+          onCancel={() => setConfirmingRemove(false)}
+          onConfirm={() => onRemove(project)}
+        />
+      )}
+    </>
   )
 }
 

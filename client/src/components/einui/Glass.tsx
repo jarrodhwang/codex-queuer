@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { forwardRef, useEffect, useMemo, useRef, useState } from 'react'
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -7,17 +7,16 @@ export function GlassPanel({ className, children }: { className?: string; childr
   return <section className={cn('glass-panel', className)}>{children}</section>
 }
 
-export function GlassButton({
+export const GlassButton = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: 'primary' | 'secondary' | 'ghost' | 'danger'
+  size?: 'sm' | 'md' | 'icon'
+}>(({
   className,
   variant = 'secondary',
   size = 'md',
   ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & {
-  variant?: 'primary' | 'secondary' | 'ghost' | 'danger'
-  size?: 'sm' | 'md' | 'icon'
-}) {
-  return <button className={cn('glass-button', `glass-button--${variant}`, `glass-button--${size}`, className)} {...props} />
-}
+}, ref) => <button ref={ref} className={cn('glass-button', `glass-button--${variant}`, `glass-button--${size}`, className)} {...props} />)
+GlassButton.displayName = 'GlassButton'
 
 export function GlassInput({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
   return <input className={cn('glass-field', className)} {...props} />
