@@ -30,6 +30,11 @@ public interface ITargetCommandRunner
         byte[] content,
         CancellationToken cancellationToken);
 
+    Task DeleteAttachmentDirectoryAsync(
+        TargetMachine machine,
+        string directoryPath,
+        CancellationToken cancellationToken);
+
     Task<CommandResult> RunShellAsync(
         TargetMachine machine,
         string projectPath,
@@ -250,6 +255,49 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         if (!result.Success)
         {
             throw new IOException("Could not transfer an attachment to the target machine: " + StripCommandPreview(result.Output));
+        }
+    }
+
+    public async Task DeleteAttachmentDirectoryAsync(
+        TargetMachine machine,
+        string directoryPath,
+        CancellationToken cancellationToken)
+    {
+        if (machine.Kind == MachineKind.Local)
+        {
+            if (Directory.Exists(directoryPath))
+            {
+                Directory.Delete(directoryPath, recursive: true);
+            }
+
+            return;
+        }
+
+        CommandResult result;
+        if (machine.TargetsWindows())
+        {
+            var command = "if (Test-Path -LiteralPath " + QuotePowerShellValue(directoryPath) + ") { Remove-Item -LiteralPath "
+                + QuotePowerShellValue(directoryPath) + " -Recurse -Force }";
+            result = await RunSshAsync(
+                machine,
+                BuildPowerShellRemoteCommand(command),
+                "ssh " + machine.Host + " remove attachments",
+                static _ => Task.CompletedTask,
+                cancellationToken);
+        }
+        else
+        {
+            result = await RunSshAsync(
+                machine,
+                UnixRemotePathSetup + " rm -rf -- " + Quote(directoryPath),
+                "ssh " + machine.Host + " remove attachments",
+                static _ => Task.CompletedTask,
+                cancellationToken);
+        }
+
+        if (!result.Success)
+        {
+            throw new IOException("Could not remove temporary attachments from the target machine: " + StripCommandPreview(result.Output));
         }
     }
 

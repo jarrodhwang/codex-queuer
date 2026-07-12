@@ -585,6 +585,7 @@ public sealed class QueueWorker(
         var machine = request.Project?.Machine ?? request.Machine ?? throw new InvalidOperationException("Request machine is missing.");
         var project = request.Project ?? throw new InvalidOperationException("Request project is missing.");
         var projectPath = project.Path;
+        var attachmentsCleaned = false;
 
         try
         {
@@ -627,6 +628,11 @@ public sealed class QueueWorker(
                 chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
                 cancellationToken);
 
+            // Remove temporary inputs before evaluating Git state so they cannot be
+            // mistaken for user changes or accidentally included in a commit.
+            await RemoveMaterializedAttachmentsAsync(request, project, machine);
+            attachmentsCleaned = true;
+
             if (TryParseUsageLimit(result, out var usageLimit))
             {
                 await MarkUsageLimitedAsync(request, run, kind, result, usageLimit, cancellationToken);
@@ -657,6 +663,13 @@ public sealed class QueueWorker(
         {
             await MarkFailedAsync(requestId, run.Id, kind, ex, CancellationToken.None);
             return false;
+        }
+        finally
+        {
+            if (kind == RunKind.Request && !attachmentsCleaned && !string.IsNullOrWhiteSpace(request.AttachmentsJson))
+            {
+                await RemoveMaterializedAttachmentsAsync(request, project, machine);
+            }
         }
     }
 
@@ -1701,7 +1714,7 @@ public sealed class QueueWorker(
             var relativePath = ".codex-queue/attachments/" + request.Id.ToString("N") + "/" + attachment.Name;
             var targetPath = CombineTargetPath(attachmentRoot, attachment.Name, machine);
             await runner.WriteAttachmentAsync(machine, targetPath, bytes, cancellationToken);
-            prompt.Add("- " + attachment.Name + " (" + attachment.ContentType + ", " + attachment.Size + " bytes) saved at `" + relativePath + "`.");
+            prompt.Add("- " + attachment.Name + " (" + attachment.ContentType + ", " + attachment.Size + " bytes) available temporarily at `" + relativePath + "`.");
             if (attachment.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
             {
                 imagePaths.Add(targetPath);
@@ -1725,6 +1738,23 @@ public sealed class QueueWorker(
             CombineTargetPath(CombineTargetPath(projectPath, ".codex-queue", machine), "attachments", machine),
             requestId.ToString("N"),
             machine);
+
+    private async Task RemoveMaterializedAttachmentsAsync(CodexRequest request, Project project, TargetMachine machine)
+    {
+        try
+        {
+            await runner.DeleteAttachmentDirectoryAsync(
+                machine,
+                BuildAttachmentRoot(project.Path, request.Id, machine),
+                CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            // A cleanup failure must not replace the result of the user's request, but it
+            // must be visible to operators because it can leave an untracked project file.
+            logger.LogWarning(ex, "Could not remove temporary attachments for request {RequestId}.", request.Id);
+        }
+    }
 
     private static string CombineTargetPath(string parent, string child, TargetMachine machine)
     {
