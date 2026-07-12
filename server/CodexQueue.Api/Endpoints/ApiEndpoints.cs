@@ -1245,19 +1245,13 @@ public static class ApiEndpoints
         }
 
         var normalized = new List<QueueAttachmentDto>();
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var storageNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var attachment in attachments)
         {
             var name = SanitizeAttachmentName(attachment.Name);
             if (string.IsNullOrWhiteSpace(name))
             {
                 error = "Attachment file name is required.";
-                return Array.Empty<QueueAttachmentDto>();
-            }
-
-            if (!names.Add(name))
-            {
-                error = "Attachment file names must be unique.";
                 return Array.Empty<QueueAttachmentDto>();
             }
 
@@ -1286,10 +1280,30 @@ public static class ApiEndpoints
                 name,
                 string.IsNullOrWhiteSpace(attachment.ContentType) ? "application/octet-stream" : attachment.ContentType.Trim(),
                 attachment.Size,
-                attachment.ContentBase64));
+                attachment.ContentBase64,
+                CreateUniqueAttachmentStorageName(name, storageNames)));
         }
 
         return normalized.ToArray();
+    }
+
+    private static string CreateUniqueAttachmentStorageName(string name, ISet<string> names)
+    {
+        if (names.Add(name))
+        {
+            return name;
+        }
+
+        var extension = Path.GetExtension(name);
+        var stem = extension.Length == 0 ? name : name[..^extension.Length];
+        for (var suffix = 2; ; suffix++)
+        {
+            var candidate = $"{stem} ({suffix}){extension}";
+            if (names.Add(candidate))
+            {
+                return candidate;
+            }
+        }
     }
 
     private static string SanitizeAttachmentName(string name)

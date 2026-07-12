@@ -1711,8 +1711,9 @@ public sealed class QueueWorker(
         foreach (var attachment in attachments)
         {
             var bytes = Convert.FromBase64String(attachment.ContentBase64);
-            var relativePath = ".codex-queue/attachments/" + request.Id.ToString("N") + "/" + attachment.Name;
-            var targetPath = CombineTargetPath(attachmentRoot, attachment.Name, machine);
+            var storageName = attachment.StorageName ?? attachment.Name;
+            var relativePath = ".codex-queue/attachments/" + request.Id.ToString("N") + "/" + storageName;
+            var targetPath = CombineTargetPath(attachmentRoot, storageName, machine);
             await runner.WriteAttachmentAsync(machine, targetPath, bytes, cancellationToken);
             prompt.Add("- " + attachment.Name + " (" + attachment.ContentType + ", " + attachment.Size + " bytes) available temporarily at `" + relativePath + "`.");
             if (attachment.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))

@@ -97,7 +97,12 @@ public sealed record UpdateQueueRequest(
 
 public sealed record ReorderQueueRequest(Guid ProjectId, IReadOnlyList<Guid> RequestIds);
 
-public sealed record QueueAttachmentDto(string Name, string ContentType, long Size, string ContentBase64);
+public sealed record QueueAttachmentDto(
+    string Name,
+    string ContentType,
+    long Size,
+    string ContentBase64,
+    string? StorageName = null);
 
 public sealed record RequestAttachmentDto(string Name, string ContentType, long Size);
 
