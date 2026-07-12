@@ -57,6 +57,8 @@ The Docker default machine is `Local Linux`, an SSH target that connects from th
 
 For Linux hosts, make sure SSH is running on the host and the key at `CQ_DEFAULT_SSH_KEY_PATH` is authorized for `CQ_DEFAULT_SSH_USER`. For Windows and macOS SSH targets, set the machine platform in the UI and use that machine's native working root, for example `C:\Users\you` or `/Users/you`.
 
+For a macOS SSH machine, install the Codex CLI for the same account configured as the SSH user. A successful SSH login does not guarantee that `codex` is available: `sshd` normally starts a non-login shell with a reduced `PATH`. The machine check now reports the SSH connection separately from the CLI location and version. It searches the standard macOS Homebrew paths (`/opt/homebrew/bin` and `/usr/local/bin`) plus common per-user npm, Volta, asdf, nvm, Cargo, and pnpm paths. If the check reaches the Mac but reports that Codex is missing, log in as the configured user and run `npm install -g @openai/codex`, then rerun the check. Do not rely on a Codex desktop app installation alone unless its CLI command is available to that SSH user.
+
 For a Windows SSH machine such as `192.168.0.50`, configure the machine as:
 
 - Kind: `SSH`

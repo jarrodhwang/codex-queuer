@@ -39,7 +39,10 @@ public interface ITargetCommandRunner
 
 public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : ITargetCommandRunner
 {
-    private const string UnixRemotePathPrefix = "export PATH=\"$HOME/.local/bin:$HOME/bin:$PATH\";";
+    // sshd commonly supplies a deliberately small, non-login PATH. Include the package-manager
+    // locations used by macOS and Linux without sourcing user shell startup files, which could
+    // be interactive or have side effects in a queued command.
+    public const string UnixRemotePathSetup = "export PATH=\"$HOME/.local/bin:$HOME/bin:$HOME/.npm-global/bin:$HOME/.volta/bin:$HOME/.asdf/shims:$HOME/.cargo/bin:$HOME/.local/share/pnpm:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH\"; for nodeBin in \"$HOME\"/.nvm/versions/node/*/bin; do [ -d \"$nodeBin\" ] && PATH=\"$nodeBin:$PATH\"; done; export PATH;";
     private static readonly TimeSpan CodexFirstOutputTimeout = TimeSpan.FromSeconds(75);
     private static readonly TimeSpan RateLimitsTimeout = TimeSpan.FromSeconds(20);
 
@@ -75,7 +78,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
         var remoteCommand = machine.TargetsWindows()
             ? BuildPowerShellRemoteCommand(BuildPowerShellCodexCommandSetup() + "; & $codexCommand app-server --stdio")
-            : UnixRemotePathPrefix + " codex app-server --stdio";
+            : UnixRemotePathSetup + " codex app-server --stdio";
         return RunSshAsync(
             machine,
             remoteCommand,
@@ -162,7 +165,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
         var remoteCommand = string.Join(" ", new[]
         {
-            UnixRemotePathPrefix,
+            UnixRemotePathSetup,
             "cd",
             Quote(projectPath),
             "&&",
@@ -229,7 +232,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             return RunSshAsync(machine, windowsRemoteCommand, "ssh " + machine.Host + " " + shellCommand, onOutput, cancellationToken);
         }
 
-        var remoteCommand = UnixRemotePathPrefix + " cd " + Quote(projectPath) + " && " + shellCommand;
+        var remoteCommand = UnixRemotePathSetup + " cd " + Quote(projectPath) + " && " + shellCommand;
         return RunSshAsync(machine, remoteCommand, "ssh " + machine.Host + " " + shellCommand, onOutput, cancellationToken);
     }
 
@@ -259,7 +262,15 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             return RunSshAsync(machine, BuildPowerShellRemoteCommand(BuildPowerShellCodexCommandSetup() + "; & $codexCommand --version; Get-Location"), "ssh " + machine.Host + " codex --version", onOutput, cancellationToken);
         }
 
-        return RunSshAsync(machine, UnixRemotePathPrefix + " codex --version && pwd", "ssh " + machine.Host + " codex --version", onOutput, cancellationToken);
+        var unixTestCommand = UnixRemotePathSetup
+            + " printf '%s\\n' 'SSH connection established.'; "
+            + "printf 'Remote OS: '; uname -s; "
+            + "if command -v codex >/dev/null 2>&1; then "
+            + "printf 'Codex CLI: '; codex --version; "
+            + "printf 'Codex path: '; command -v codex; "
+            + "printf 'Working directory: '; pwd; "
+            + "else printf '%s\\n' 'Codex CLI was not found on this SSH session PATH. Install it for this SSH user, or expose its bin directory in PATH.' >&2; exit 127; fi";
+        return RunSshAsync(machine, unixTestCommand, "ssh " + machine.Host + " test Codex CLI", onOutput, cancellationToken);
     }
 
     private Task<CommandResult> RunSshAsync(

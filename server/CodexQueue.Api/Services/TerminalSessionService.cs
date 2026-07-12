@@ -418,7 +418,7 @@ public sealed class TerminalSessionService(ILogger<TerminalSessionService> logge
         string.Join("|", project.Path, machine.Id, machine.Kind, machine.Host, machine.Port, machine.UserName, machine.SshKeyPath, machine.Platform);
 
     private static string BuildInteractiveUnixShellCommand(string projectPath) =>
-        "export PATH=\"$HOME/.local/bin:$HOME/bin:$PATH\"; cd " + QuoteShell(projectPath) + " && exec ${SHELL:-/bin/bash} -l";
+        TargetCommandRunner.UnixRemotePathSetup + " cd " + QuoteShell(projectPath) + " && exec ${SHELL:-/bin/bash} -l";
 
     private static string QuoteShell(string value) => "'" + value.Replace("'", "'\"'\"'", StringComparison.Ordinal) + "'";
 
