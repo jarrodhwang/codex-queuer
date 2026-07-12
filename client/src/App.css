@@ -755,6 +755,7 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  margin-right: 10px;
   min-width: 0;
   color: var(--muted);
   font-size: 11px;
