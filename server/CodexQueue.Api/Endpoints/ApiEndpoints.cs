@@ -1245,12 +1245,19 @@ public static class ApiEndpoints
         }
 
         var normalized = new List<QueueAttachmentDto>();
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var attachment in attachments)
         {
             var name = SanitizeAttachmentName(attachment.Name);
             if (string.IsNullOrWhiteSpace(name))
             {
                 error = "Attachment file name is required.";
+                return Array.Empty<QueueAttachmentDto>();
+            }
+
+            if (!names.Add(name))
+            {
+                error = "Attachment file names must be unique.";
                 return Array.Empty<QueueAttachmentDto>();
             }
 
@@ -1287,13 +1294,19 @@ public static class ApiEndpoints
 
     private static string SanitizeAttachmentName(string name)
     {
-        var fileName = Path.GetFileName(name.Trim());
+        // The request can be sent to a target with a different path separator than
+        // the API host, so normalize both separators before taking the leaf name.
+        var fileName = Path.GetFileName(name.Trim().Replace('\\', '/'));
         foreach (var invalid in Path.GetInvalidFileNameChars())
         {
             fileName = fileName.Replace(invalid, '_');
         }
+        foreach (var invalid in "<>:\"/\\|?*")
+        {
+            fileName = fileName.Replace(invalid, '_');
+        }
 
-        return fileName;
+        return fileName is "." or ".." ? "" : fileName;
     }
 
     private static string? NormalizeOptionalSpeed(string? speed) =>

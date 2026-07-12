@@ -24,6 +24,12 @@ public interface ITargetCommandRunner
         Func<string, Task> onOutput,
         CancellationToken cancellationToken);
 
+    Task WriteAttachmentAsync(
+        TargetMachine machine,
+        string targetPath,
+        byte[] content,
+        CancellationToken cancellationToken);
+
     Task<CommandResult> RunShellAsync(
         TargetMachine machine,
         string projectPath,
@@ -189,6 +195,61 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             cancellationToken,
             firstProcessOutputTimeout: CodexFirstOutputTimeout,
             standardInput: prompt);
+    }
+
+    public async Task WriteAttachmentAsync(
+        TargetMachine machine,
+        string targetPath,
+        byte[] content,
+        CancellationToken cancellationToken)
+    {
+        if (machine.Kind == MachineKind.Local)
+        {
+            var directory = Path.GetDirectoryName(targetPath);
+            if (string.IsNullOrWhiteSpace(directory))
+            {
+                throw new InvalidOperationException("Attachment target path must include a directory.");
+            }
+
+            Directory.CreateDirectory(directory);
+            await File.WriteAllBytesAsync(targetPath, content, cancellationToken);
+            return;
+        }
+
+        var encodedContent = Convert.ToBase64String(content);
+        CommandResult result;
+        if (machine.TargetsWindows())
+        {
+            var command = "$attachmentPath = " + QuotePowerShellValue(targetPath)
+                + "; $attachmentDirectory = Split-Path -Parent -LiteralPath $attachmentPath"
+                + "; New-Item -ItemType Directory -Force -Path $attachmentDirectory | Out-Null"
+                + "; [IO.File]::WriteAllBytes($attachmentPath, [Convert]::FromBase64String([Console]::In.ReadToEnd()))";
+            result = await RunSshAsync(
+                machine,
+                BuildPowerShellRemoteCommand(command),
+                "ssh " + machine.Host + " write attachment",
+                static _ => Task.CompletedTask,
+                cancellationToken,
+                standardInput: encodedContent);
+        }
+        else
+        {
+            var remoteCommand = UnixRemotePathSetup
+                + " mkdir -p -- " + Quote(Path.GetDirectoryName(targetPath) ?? throw new InvalidOperationException("Attachment target path must include a directory."))
+                + " && if base64 --help 2>&1 | grep -q -- '--decode'; then base64 --decode; else base64 -D; fi > " + Quote(targetPath);
+            result = await RunSshAsync(
+                machine,
+                remoteCommand,
+                "ssh " + machine.Host + " write attachment",
+                static _ => Task.CompletedTask,
+                cancellationToken,
+                standardInput: encodedContent);
+        }
+
+        if (!result.Success)
+        {
+            throw new IOException("Could not transfer an attachment to the target machine: " + StripCommandPreview(result.Output));
+        }
     }
 
     public Task<CommandResult> RunShellAsync(
@@ -497,6 +558,12 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         }
 
         return false;
+    }
+
+    private static string StripCommandPreview(string output)
+    {
+        var newline = output.IndexOf(Environment.NewLine, StringComparison.Ordinal);
+        return (newline < 0 ? output : output[(newline + Environment.NewLine.Length)..]).Trim();
     }
 
     private static void TryKill(Process process)

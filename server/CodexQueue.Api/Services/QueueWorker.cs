@@ -1693,30 +1693,18 @@ public sealed class QueueWorker(
             "The following files were attached to this request."
         };
         var imagePaths = new List<string>();
-        var localAttachmentRoot = Path.Combine(project.Path, ".codex-queue", "attachments", request.Id.ToString("N"));
-
-        if (machine.Kind == MachineKind.Local)
-        {
-            Directory.CreateDirectory(localAttachmentRoot);
-        }
+        var attachmentRoot = BuildAttachmentRoot(project.Path, request.Id, machine);
 
         foreach (var attachment in attachments)
         {
             var bytes = Convert.FromBase64String(attachment.ContentBase64);
             var relativePath = ".codex-queue/attachments/" + request.Id.ToString("N") + "/" + attachment.Name;
-            if (machine.Kind == MachineKind.Local)
+            var targetPath = CombineTargetPath(attachmentRoot, attachment.Name, machine);
+            await runner.WriteAttachmentAsync(machine, targetPath, bytes, cancellationToken);
+            prompt.Add("- " + attachment.Name + " (" + attachment.ContentType + ", " + attachment.Size + " bytes) saved at `" + relativePath + "`.");
+            if (attachment.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
             {
-                var targetPath = Path.Combine(localAttachmentRoot, attachment.Name);
-                await File.WriteAllBytesAsync(targetPath, bytes, cancellationToken);
-                prompt.Add("- " + attachment.Name + " (" + attachment.ContentType + ", " + attachment.Size + " bytes) saved at `" + relativePath + "`.");
-                if (attachment.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
-                {
-                    imagePaths.Add(targetPath);
-                }
-            }
-            else
-            {
-                prompt.Add("- " + attachment.Name + " (" + attachment.ContentType + ", " + attachment.Size + " bytes).");
+                imagePaths.Add(targetPath);
             }
 
             var preview = AttachmentTextPreview(attachment, bytes);
@@ -1730,6 +1718,18 @@ public sealed class QueueWorker(
         }
 
         return new MaterializedAttachments(string.Join(Environment.NewLine, prompt), imagePaths);
+    }
+
+    private static string BuildAttachmentRoot(string projectPath, Guid requestId, TargetMachine machine) =>
+        CombineTargetPath(
+            CombineTargetPath(CombineTargetPath(projectPath, ".codex-queue", machine), "attachments", machine),
+            requestId.ToString("N"),
+            machine);
+
+    private static string CombineTargetPath(string parent, string child, TargetMachine machine)
+    {
+        var separator = machine.TargetsWindows() ? '\\' : '/';
+        return parent.TrimEnd('\\', '/') + separator + child;
     }
 
     private static QueueAttachmentDto[] ReadAttachments(string? attachmentsJson)
@@ -1792,9 +1792,12 @@ public sealed class QueueWorker(
 
     private static string BuildRequestPrompt(CodexRequest request)
     {
+        var attachmentBoundary = string.IsNullOrWhiteSpace(request.AttachmentsJson)
+            ? ""
+            : "\n\nDo not modify, stage, or commit `.codex-queue/attachments`; it contains temporary prompt inputs.";
         if (!request.GenerateCommit)
         {
-            return request.Prompt;
+            return request.Prompt + attachmentBoundary;
         }
 
         if (request.SeparateCommitSession)
@@ -1804,7 +1807,7 @@ public sealed class QueueWorker(
 
                 Do not run git commit in this run.
                 Leave file changes for the follow-up Codex commit step.
-                """;
+                """ + attachmentBoundary;
         }
 
         return request.Prompt.TrimEnd()
@@ -1815,7 +1818,7 @@ public sealed class QueueWorker(
             Choose one concise imperative commit message.
             Do not amend existing commits.
             Do not push.
-            """;
+            """ + attachmentBoundary;
     }
 
     private static string BuildProjectScopedPrompt(string projectPath, string userPrompt) =>
