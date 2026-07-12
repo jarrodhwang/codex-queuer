@@ -1503,7 +1503,10 @@ function UsageWindow({ label, window, limited }: { label: string; window: NonNul
     <div className="usage-window-detail">
       <strong>{label}</strong>
       <span>{remaining}% left{duration}</span>
-      <span>Resets {reset}</span>
+      <div className="usage-window-reset">
+        <span>Resets</span>
+        <strong>{reset}</strong>
+      </div>
     </div>
   </div>
 }
