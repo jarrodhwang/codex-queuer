@@ -3718,29 +3718,27 @@
 }
 
 .connection-dot.pending {
-  border-color: rgba(245, 158, 11, 0.68);
-  background: linear-gradient(145deg, rgba(254, 243, 199, 0.96), rgba(245, 158, 11, 0.72));
-  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.84), inset 0 -1px 2px rgba(146, 64, 14, 0.26), 0 0 0 3px rgba(245, 158, 11, 0.14), 0 3px 8px rgba(180, 83, 9, 0.24);
-  animation: connection-dot-pulse 1.3s ease-in-out infinite;
+  border-color: rgba(245, 158, 11, 0.28);
+  border-top-color: rgba(217, 119, 6, 0.92);
+  background: rgba(254, 243, 199, 0.72);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.42), 0 1px 3px rgba(180, 83, 9, 0.18);
+  animation: connection-dot-spin 0.8s linear infinite;
 }
 
 .connection-dot.ok {
   border-color: rgba(16, 185, 129, 0.72);
   background: linear-gradient(145deg, rgba(209, 250, 229, 0.96), rgba(16, 185, 129, 0.76));
-  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.86), inset 0 -1px 2px rgba(6, 78, 59, 0.28), 0 0 0 3px rgba(16, 185, 129, 0.13), 0 3px 8px rgba(5, 150, 105, 0.24);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.86), inset 0 -1px 2px rgba(6, 78, 59, 0.28), 0 2px 4px rgba(5, 150, 105, 0.18);
 }
 
 .connection-dot.bad {
   border-color: rgba(244, 63, 94, 0.72);
   background: linear-gradient(145deg, rgba(255, 228, 230, 0.96), rgba(244, 63, 94, 0.76));
-  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.86), inset 0 -1px 2px rgba(136, 19, 55, 0.28), 0 0 0 3px rgba(244, 63, 94, 0.13), 0 3px 8px rgba(190, 24, 93, 0.24);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.86), inset 0 -1px 2px rgba(136, 19, 55, 0.28), 0 2px 4px rgba(190, 24, 93, 0.18);
 }
 
-@keyframes connection-dot-pulse {
-  50% {
-    transform: scale(0.9);
-    box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.84), inset 0 -1px 2px rgba(146, 64, 14, 0.26), 0 0 0 5px rgba(245, 158, 11, 0.06), 0 3px 8px rgba(180, 83, 9, 0.2);
-  }
+@keyframes connection-dot-spin {
+  to { transform: rotate(360deg); }
 }
 
 @media (prefers-reduced-motion: reduce) {
