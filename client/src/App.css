@@ -860,7 +860,7 @@
   border: 1px solid transparent;
   border-radius: 8px;
   padding: 5px;
-  overflow: hidden;
+  overflow: visible;
   background: transparent;
   color: inherit;
 }
@@ -944,6 +944,9 @@
 }
 
 .project-queue-badge {
+  top: 0;
+  right: 0;
+  transform: translate(40%, -40%);
   background: rgba(254, 243, 199, 0.95);
   color: #92400e;
 }
