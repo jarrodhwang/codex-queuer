@@ -1471,11 +1471,11 @@ function UsageLimitSidebarPanel({ machines, usage, loading, requests, now }: { m
 
 function MachineUsageSection({ snapshot }: { snapshot?: MachineRateLimits }) {
   if (!snapshot || !snapshot.available) {
-    return <section className="usage-machine usage-machine--unavailable"><div className="usage-machine-head"><span>{snapshot?.machineName ?? 'Machine'}</span><span>Unavailable</span></div><div className="meta">{snapshot?.error ?? 'No usage data returned.'}</div></section>
+    return <section className="usage-machine usage-machine--unavailable"><div className="usage-machine-head"><span className="usage-machine-name-chip">{snapshot?.machineName ?? 'Machine'}</span><span>Unavailable</span></div><div className="meta">{snapshot?.error ?? 'No usage data returned.'}</div></section>
   }
 
   return <section className="usage-machine">
-    <div className="usage-machine-head"><span>{snapshot.machineName}</span></div>
+    <div className="usage-machine-head"><span className="usage-machine-name-chip">{snapshot.machineName}</span></div>
     {snapshot.limits.length > 0 ? <div className="usage-limit-grid">{snapshot.limits.map((limit) => <RateLimitSection key={limit.id} limit={limit} />)}</div> : <div className="usage-empty-state">No active limits</div>}
   </section>
 }
@@ -1483,7 +1483,7 @@ function MachineUsageSection({ snapshot }: { snapshot?: MachineRateLimits }) {
 function RateLimitSection({ limit }: { limit: RateLimit }) {
   const windows = [limit.primary, limit.secondary]
   return <section className={`usage-limit ${limit.rateLimitReachedType ? 'usage-limit--limited' : ''}`}>
-    <div className="usage-limit-head"><span>{limit.name}</span>{limit.rateLimitReachedType && <span>Limited</span>}</div>
+    <div className="usage-limit-head"><span className="usage-model-name-chip">{limit.name}</span>{limit.rateLimitReachedType && <span>Limited</span>}</div>
     <div className="usage-window-grid">
       {windows.map((window, index) => window && <UsageWindow key={index} window={window} limited={Boolean(limit.rateLimitReachedType)} />)}
     </div>

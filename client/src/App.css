@@ -617,6 +617,26 @@
   font-weight: 850;
 }
 
+.usage-machine-name-chip,
+.usage-model-name-chip {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.07);
+  color: var(--text-strong);
+  font-size: 18px;
+  font-weight: 850;
+  line-height: 1.2;
+  padding: 5px 10px;
+}
+
+.usage-model-name-chip {
+  overflow-wrap: anywhere;
+}
+
 .usage-machine-head > span:last-child,
 .usage-limit-head > span:last-child {
   border-radius: 999px;
