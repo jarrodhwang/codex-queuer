@@ -2054,10 +2054,10 @@ function MachineFolderTree({
   )
 }
 
-function Modal({ title, icon, children, onClose, wide = false }: { title: string; icon: React.ReactNode; children: React.ReactNode; onClose: () => void; wide?: boolean }) {
+function Modal({ title, icon, children, onClose, wide = false, large = false }: { title: string; icon: React.ReactNode; children: React.ReactNode; onClose: () => void; wide?: boolean; large?: boolean }) {
   return createPortal(
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label={title}>
-      <div className={`modal ${wide ? 'modal--wide' : ''}`}>
+      <div className={`modal ${wide ? 'modal--wide' : ''} ${large ? 'modal--large' : ''}`}>
         <div className="section-header">
           <h2>{title}</h2>
           <div className="inline-row">
@@ -4200,13 +4200,14 @@ function textFromUnknownJson(value: unknown): string | undefined {
 }
 
 function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: number }) {
-  const [showCompletedRunDetails, setShowCompletedRunDetails] = useState(false)
+  const [reportOpen, setReportOpen] = useState(false)
   const separateCommitRun = request ? latestRunOfKind(request.runs, 'Commit') : undefined
   const completionMessage = request?.status === 'Succeeded' ? completionMessageForRequest(request) : null
-  const showRunDetails = !completionMessage || showCompletedRunDetails
+  const showRunDetails = !completionMessage
+  const reportAvailable = request?.status === 'Running' || request?.status === 'Succeeded'
 
   useEffect(() => {
-    setShowCompletedRunDetails(false)
+    setReportOpen(false)
   }, [request?.id])
 
   if (!request) {
@@ -4218,104 +4219,247 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
   }
 
   return (
-    <aside className="queue-detail-panel queue-detail-panel-compact" aria-label="Selected request details">
-      <div className={`detail-expanded-region ${completionMessage && !showRunDetails ? 'detail-expanded-region--completion-only' : ''}`}>
-        <div className="queue-detail-body">
-          <div className="request-body-header">
-            <div className="section-kicker">Request body</div>
-            <ModelChips model={request.model} effort={request.modelEffort} speed={request.modelSpeed} />
-          </div>
-          <AttachmentMetadataChips attachments={request.attachments} />
-          <div className="request-body-scroll">
-            <StructuredBodyView content={request.prompt} />
-          </div>
-        </div>
-
-        {completionMessage && (
-          <div className="completion-summary">
-            <div className="completion-summary-head">
-              <div>
-                <div className="completion-title">Completed</div>
-                <div className="meta">{request.finishedAt ? formatDate(request.finishedAt) : 'Succeeded'}</div>
-              </div>
-              <div className="completion-summary-actions">
-                <GlassButton
-                  variant="secondary"
-                  size="sm"
-                  type="button"
-                  onClick={() => setShowCompletedRunDetails((current) => !current)}
-                  aria-expanded={showCompletedRunDetails}
-                >
-                  <FileText size={13} /> {showCompletedRunDetails ? 'Hide details' : 'Details'}
-                </GlassButton>
-                <StatusBadge status="Succeeded" />
-              </div>
+    <>
+      <aside className="queue-detail-panel queue-detail-panel-compact" aria-label="Selected request details">
+        {reportAvailable && (
+          <div className="queue-detail-report-launch">
+            <div>
+              <div className="queue-detail-compact-label">Work report</div>
+              <strong>{request.status === 'Succeeded' ? 'Final result ready' : 'Live work in progress'}</strong>
+              <div className="meta">Read Codex's formatted results without the raw command log.</div>
             </div>
-            <div className="completion-result-box">
-              <CompletionMarkdown content={completionMessage} />
-            </div>
+            <GlassButton variant="primary" size="sm" type="button" onClick={() => setReportOpen(true)}>
+              <FileText size={13} /> Details
+            </GlassButton>
           </div>
         )}
-
-        {showRunDetails && request.runs.map((run) => (
-          <div key={run.id} className="run-detail-card">
-            <div className="run-detail-head">
-              <div className="run-title-stack">
-                <strong>{run.kind}</strong>
-                <ModelChips model={run.model} effort={run.modelEffort} speed={run.modelSpeed} />
-              </div>
-              <StatusBadge status={run.status} busy={run.status === 'Running'} />
-            </div>
-            {run.commandPreview && <div className="command-preview">$ {run.commandPreview}</div>}
-            {run.status === 'UsageLimited' && (
-              <UsageLimitBanner
-                reason={run.retryReason}
-                retryAfter={run.retryAfter}
-                availableModel={run.availableModel}
-                remaining={run.retryAfter ? formatRemainingTime(run.retryAfter, now) : null}
-              />
-            )}
-            {run.commitSha && (
-              <div className="commit-box">
-                <div><strong>{run.commitSha.slice(0, 12)}</strong></div>
-                <div>{run.commitMessage}</div>
-              </div>
-            )}
-            {run.error && <div className="error-text">{run.error}</div>}
-            <DetailedCodexAnswers output={run.output} />
-            <div className="run-output-head">
-              <span>Run log</span>
-              <span>{run.output.trim() ? `${run.output.length.toLocaleString()} chars` : 'empty'}</span>
-            </div>
-            <StructuredBodyView
-              content={run.output}
-              emptyText={runEmptyText(run, now)}
-              hideJson
-            />
-          </div>
-        ))}
-
-        {showRunDetails && request.runs.length === 0 && (
-          <div className="pending-run-row">
-            <div className="run-title-stack">
-              <strong>Request</strong>
+        <div className={`detail-expanded-region ${completionMessage && !showRunDetails ? 'detail-expanded-region--completion-only' : ''}`}>
+          <div className="queue-detail-body">
+            <div className="request-body-header">
+              <div className="section-kicker">Request body</div>
               <ModelChips model={request.model} effort={request.modelEffort} speed={request.modelSpeed} />
             </div>
-            <StatusBadge status="Queued" />
-          </div>
-        )}
-
-        {showRunDetails && request.generateCommit && request.separateCommitSession && !separateCommitRun && (
-          <div className="pending-run-row">
-            <div className="run-title-stack">
-              <strong>Commit</strong>
-              <ModelChips model={request.commitModel || request.model} effort={request.commitModelEffort || request.modelEffort} speed={request.commitModelSpeed || request.modelSpeed} />
+            <AttachmentMetadataChips attachments={request.attachments} />
+            <div className="request-body-scroll">
+              <StructuredBodyView content={request.prompt} />
             </div>
-            <StatusBadge status="Queued" />
           </div>
-        )}
+
+          {completionMessage && (
+            <div className="completion-summary">
+              <div className="completion-summary-head">
+                <div>
+                  <div className="completion-title">Completed</div>
+                  <div className="meta">{request.finishedAt ? formatDate(request.finishedAt) : 'Succeeded'}</div>
+                </div>
+                <StatusBadge status="Succeeded" />
+              </div>
+              <div className="completion-result-box">
+                <CompletionMarkdown content={completionMessage} />
+              </div>
+            </div>
+          )}
+
+          {showRunDetails && request.runs.map((run) => (
+            <div key={run.id} className="run-detail-card">
+              <div className="run-detail-head">
+                <div className="run-title-stack">
+                  <strong>{run.kind}</strong>
+                  <ModelChips model={run.model} effort={run.modelEffort} speed={run.modelSpeed} />
+                </div>
+                <StatusBadge status={run.status} busy={run.status === 'Running'} />
+              </div>
+              {run.commandPreview && <div className="command-preview">$ {run.commandPreview}</div>}
+              {run.status === 'UsageLimited' && (
+                <UsageLimitBanner
+                  reason={run.retryReason}
+                  retryAfter={run.retryAfter}
+                  availableModel={run.availableModel}
+                  remaining={run.retryAfter ? formatRemainingTime(run.retryAfter, now) : null}
+                />
+              )}
+              {run.commitSha && (
+                <div className="commit-box">
+                  <div><strong>{run.commitSha.slice(0, 12)}</strong></div>
+                  <div>{run.commitMessage}</div>
+                </div>
+              )}
+              {run.error && <div className="error-text">{run.error}</div>}
+              <DetailedCodexAnswers output={run.output} />
+              <div className="run-output-head">
+                <span>Run log</span>
+                <span>{run.output.trim() ? `${run.output.length.toLocaleString()} chars` : 'empty'}</span>
+              </div>
+              <StructuredBodyView
+                content={run.output}
+                emptyText={runEmptyText(run, now)}
+                hideJson
+              />
+            </div>
+          ))}
+
+          {showRunDetails && request.runs.length === 0 && (
+            <div className="pending-run-row">
+              <div className="run-title-stack">
+                <strong>Request</strong>
+                <ModelChips model={request.model} effort={request.modelEffort} speed={request.modelSpeed} />
+              </div>
+              <StatusBadge status="Queued" />
+            </div>
+          )}
+
+          {showRunDetails && request.generateCommit && request.separateCommitSession && !separateCommitRun && (
+            <div className="pending-run-row">
+              <div className="run-title-stack">
+                <strong>Commit</strong>
+                <ModelChips model={request.commitModel || request.model} effort={request.commitModelEffort || request.modelEffort} speed={request.commitModelSpeed || request.modelSpeed} />
+              </div>
+              <StatusBadge status="Queued" />
+            </div>
+          )}
+        </div>
+      </aside>
+      {reportOpen && (
+        <WorkReportDialog request={request} now={now} onClose={() => setReportOpen(false)} />
+      )}
+    </>
+  )
+}
+
+type WorkReportMessage = {
+  kind: RunKind
+  text: string
+}
+
+function reportMessagesForRequest(request: CodexRequest): WorkReportMessage[] {
+  const messages: WorkReportMessage[] = []
+  const seen = new Set<string>()
+  const runs = [...request.runs].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+
+  for (const run of runs) {
+    for (const text of completionMessagesFromOutput(run.output)) {
+      const key = `${run.kind}:${text}`
+      if (!seen.has(key)) {
+        seen.add(key)
+        messages.push({ kind: run.kind, text })
+      }
+    }
+  }
+
+  return messages
+}
+
+function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; now: number; onClose: () => void }) {
+  const messages = useMemo(() => reportMessagesForRequest(request), [request])
+  const finalMessage = request.status === 'Succeeded' ? completionMessageForRequest(request) : null
+  const primaryMessage = finalMessage ?? messages.at(-1)?.text ?? null
+  const supportingMessages = primaryMessage
+    ? messages.filter((message) => message.text !== primaryMessage)
+    : messages
+  const commitRun = latestRunWithCommitMetadata(request.runs)
+  const finishedAt = request.finishedAt ?? (request.status === 'Succeeded' ? request.runs.map((run) => run.finishedAt).filter(Boolean).sort().at(-1) : null)
+  const elapsed = formatDurationBetween(
+    request.startedAt ?? request.createdAt,
+    finishedAt ?? (request.status === 'Running' ? new Date(now).toISOString() : null),
+  )
+
+  return (
+    <Modal title="Codex work report" icon={<ClipboardList size={18} />} onClose={onClose} large>
+      <div className="work-report" aria-live={request.status === 'Running' ? 'polite' : undefined}>
+        <header className={`work-report-hero work-report-hero--${request.status.toLowerCase()}`}>
+          <div className="work-report-title-stack">
+            <div className="section-kicker">{request.status === 'Succeeded' ? 'Completed work' : 'Live work'}</div>
+            <h3>{requestDisplayName(request)}</h3>
+            <p>
+              {request.status === 'Succeeded'
+                ? 'Codex finished this request. The final response and meaningful work notes are collected below.'
+                : 'This report refreshes while Codex works. The finished response will replace the live update when it is ready.'}
+            </p>
+          </div>
+          <StatusBadge status={request.status} busy={request.status === 'Running'} />
+        </header>
+
+        <div className="work-report-layout">
+          <main className="work-report-main">
+            <section className={`work-report-section work-report-primary ${finalMessage ? 'work-report-primary--complete' : ''}`}>
+              <div className="work-report-section-head">
+                <div>
+                  <div className="section-kicker">{finalMessage ? 'Final result' : primaryMessage ? 'Latest Codex update' : 'Result pending'}</div>
+                  <h4>{finalMessage ? 'What Codex delivered' : primaryMessage ? 'What Codex has reported so far' : 'Codex is still working'}</h4>
+                </div>
+                {finalMessage && <Check size={20} aria-hidden="true" />}
+              </div>
+              {primaryMessage ? (
+                <div className="work-report-content">
+                  <CompletionMarkdown content={primaryMessage} />
+                </div>
+              ) : (
+                <div className="work-report-empty">
+                  No formatted Codex response has been published yet. Status and elapsed time will continue to update here.
+                </div>
+              )}
+            </section>
+
+            {supportingMessages.length > 0 && (
+              <section className="work-report-section">
+                <div className="work-report-section-head">
+                  <div>
+                    <div className="section-kicker">Work notes</div>
+                    <h4>Additional Codex updates</h4>
+                  </div>
+                  <span className="work-report-count">{supportingMessages.length}</span>
+                </div>
+                <div className="work-report-notes">
+                  {supportingMessages.map((message, index) => (
+                    <article key={`${message.kind}:${index}`} className="work-report-note">
+                      <span>{message.kind === 'Commit' ? 'Commit work' : 'Request work'}</span>
+                      <CompletionMarkdown content={message.text} />
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
+          </main>
+
+          <aside className="work-report-sidebar" aria-label="Work report summary">
+            <section className="work-report-summary-card">
+              <div className="section-kicker">Summary</div>
+              <dl className="work-report-facts">
+                <div><dt>Project</dt><dd>{request.projectName}</dd></div>
+                <div><dt>Stage</dt><dd>{stageLabel(request)}</dd></div>
+                <div><dt>Elapsed</dt><dd>{elapsed ?? 'Not started'}</dd></div>
+                <div><dt>{finishedAt ? 'Finished' : 'Started'}</dt><dd>{formatDate(finishedAt ?? request.startedAt ?? request.createdAt)}</dd></div>
+              </dl>
+              <ModelChips model={request.model} effort={request.modelEffort} speed={request.modelSpeed} />
+            </section>
+
+            <section className="work-report-summary-card">
+              <div className="section-kicker">Work stages</div>
+              <div className="work-report-stages">
+                {request.runs.map((run) => (
+                  <div key={run.id} className="work-report-stage">
+                    <div>
+                      <strong>{run.kind === 'Commit' ? 'Commit changes' : 'Complete request'}</strong>
+                      <span>{runDurationLabel(run, now) ?? (run.startedAt ? `Started ${formatDate(run.startedAt)}` : 'Waiting to start')}</span>
+                    </div>
+                    <StatusBadge status={run.status} busy={run.status === 'Running'} />
+                  </div>
+                ))}
+                {request.runs.length === 0 && <div className="work-report-empty work-report-empty--compact">Waiting for the worker to start.</div>}
+              </div>
+            </section>
+
+            {(commitRun?.commitMessage || commitRun?.commitSha) && (
+              <section className="work-report-summary-card work-report-commit">
+                <div className="section-kicker">Commit result</div>
+                {commitRun.commitMessage && <strong>{commitRun.commitMessage}</strong>}
+                {commitRun.commitSha && <code title={commitRun.commitSha}>{commitRun.commitSha.slice(0, 12)}</code>}
+              </section>
+            )}
+          </aside>
+        </div>
       </div>
-    </aside>
+    </Modal>
   )
 }
 
