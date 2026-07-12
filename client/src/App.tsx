@@ -22,6 +22,7 @@ import {
   Menu,
   Monitor,
   Moon,
+  Network,
   Pencil,
   Play,
   Plus,
@@ -1251,8 +1252,8 @@ function LeftSidebar({
             >
               {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
             </GlassButton>
-            <GlassButton variant="ghost" size="icon" onClick={() => setMachineModalOpen(true)} title="Manage machines">
-              <Settings size={16} />
+            <GlassButton variant="ghost" size="icon" onClick={() => setMachineModalOpen(true)} title="Manage machine connections">
+              <Network size={16} />
             </GlassButton>
           </div>
         </div>
@@ -1668,7 +1669,7 @@ function MachineModal({
     }
   }
 
-  const test = async (id: string) => {
+  const test = useCallback(async (id: string) => {
     setTestResults((current) => ({
       ...current,
       [id]: { testing: true, output: current[id]?.output ?? '' },
@@ -1691,13 +1692,15 @@ function MachineModal({
       }))
       onError(cause)
     }
-  }
+  }, [onError])
 
-  const testAll = async () => {
-    for (const machine of machines) {
-      await test(machine.id)
-    }
-  }
+  const testAll = useCallback(async () => {
+    await Promise.all(machines.map((machine) => test(machine.id)))
+  }, [machines, test])
+
+  useEffect(() => {
+    void testAll()
+  }, [testAll])
 
   const remove = async (id: string) => {
     try {
@@ -1713,7 +1716,7 @@ function MachineModal({
   }
 
   return (
-    <Modal title="Machines" onClose={onClose} icon={<Monitor size={18} />} wide>
+    <Modal title="Machine connections" onClose={onClose} icon={<Network size={18} />} wide>
       <div className="machine-manager">
         <div className="machine-manager-list">
           <div className="machine-manager-toolbar">
