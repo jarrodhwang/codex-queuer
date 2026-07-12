@@ -47,8 +47,9 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 {
     // sshd commonly supplies a deliberately small, non-login PATH. Include the package-manager
     // locations used by macOS and Linux without sourcing user shell startup files, which could
-    // be interactive or have side effects in a queued command.
-    public const string UnixRemotePathSetup = "export PATH=\"$HOME/.local/bin:$HOME/bin:$HOME/.npm-global/bin:$HOME/.volta/bin:$HOME/.asdf/shims:$HOME/.cargo/bin:$HOME/.local/share/pnpm:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH\"; for nodeBin in \"$HOME\"/.nvm/versions/node/*/bin; do [ -d \"$nodeBin\" ] && PATH=\"$nodeBin:$PATH\"; done; export PATH;";
+    // be interactive or have side effects in a queued command. zsh rejects unmatched nvm globs
+    // by default, so explicitly preserve an unmatched glob when the user has no nvm installation.
+    public const string UnixRemotePathSetup = "export PATH=\"$HOME/.local/bin:$HOME/bin:$HOME/.npm-global/bin:$HOME/.volta/bin:$HOME/.asdf/shims:$HOME/.cargo/bin:$HOME/.local/share/pnpm:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH\"; if [ -n \"${ZSH_VERSION-}\" ]; then setopt nonomatch; fi; for nodeBin in \"$HOME\"/.nvm/versions/node/*/bin; do [ -d \"$nodeBin\" ] && PATH=\"$nodeBin:$PATH\"; done; export PATH;";
     private static readonly TimeSpan CodexFirstOutputTimeout = TimeSpan.FromSeconds(75);
     private static readonly TimeSpan RateLimitsTimeout = TimeSpan.FromSeconds(20);
 
