@@ -1388,23 +1388,26 @@ function UsageLimitModal({ machines, requests, now, onClose }: { machines: Machi
 
   useEffect(() => {
     let cancelled = false
-    const load = () => void Promise.all(machines.map(async (machine) => {
-      try {
-        return await api.machineUsage(machine.id)
-      } catch (cause) {
-        return {
-          machineId: machine.id,
-          machineName: machine.name,
-          available: false,
-          error: cause instanceof Error ? cause.message : 'Could not read Codex usage.',
-          limits: [],
+    const load = () => {
+      setLoading(true)
+      void Promise.all(machines.map(async (machine) => {
+        try {
+          return await api.machineUsage(machine.id)
+        } catch (cause) {
+          return {
+            machineId: machine.id,
+            machineName: machine.name,
+            available: false,
+            error: cause instanceof Error ? cause.message : 'Could not read Codex usage.',
+            limits: [],
+          }
         }
-      }
-    })).then((snapshots) => {
-      if (cancelled) return
-      setUsage(Object.fromEntries(snapshots.map((snapshot) => [snapshot.machineId, snapshot])))
-      setLoading(false)
-    })
+      })).then((snapshots) => {
+        if (cancelled) return
+        setUsage(Object.fromEntries(snapshots.map((snapshot) => [snapshot.machineId, snapshot])))
+        setLoading(false)
+      })
+    }
     load()
     const refreshTimer = window.setInterval(load, 30_000)
 
@@ -1437,7 +1440,7 @@ function UsageLimitSidebarPanel({ machines, usage, loading, requests, now }: { m
         <a href="https://community.openai.com/c/codex/37" target="_blank" rel="noreferrer">Forum</a>
       </div>
       <div className="usage-sidebar-list">
-        {loading && <div className="meta">Reading current Codex limits…</div>}
+        {loading && <div className="usage-sidebar-loading" role="status"><RefreshCcw className="action-spinner" size={14} aria-hidden="true" /><span>Loading Codex usage…</span></div>}
         {!loading && machines.length === 0 && <div className="meta">No machines configured.</div>}
         {!loading && machines.map((machine) => (
           <MachineUsageSection key={machine.id} snapshot={usage[machine.id]} />

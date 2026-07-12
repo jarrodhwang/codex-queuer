@@ -557,6 +557,16 @@
   gap: 8px;
 }
 
+.usage-sidebar-loading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .usage-window {
   display: grid;
   gap: 5px;
