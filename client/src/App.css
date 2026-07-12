@@ -530,6 +530,7 @@
 .project-groups {
   max-height: calc(100vh - 104px);
   overflow: auto;
+  padding-right: 20px;
 }
 
 .usage-sidebar {
@@ -981,9 +982,9 @@
 }
 
 .project-queue-badge {
-  top: 0;
+  top: 50%;
   right: 0;
-  transform: translate(40%, -40%);
+  transform: translate(50%, -50%);
   background: rgba(254, 243, 199, 0.95);
   color: #92400e;
 }
