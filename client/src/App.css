@@ -1497,16 +1497,45 @@
   outline-offset: 1px;
 }
 
-.queue-context-actions {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 4px;
+.queue-tab-context-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 164px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  border-radius: 8px;
+  background: var(--glass-bg);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(20px) saturate(1.22);
+  -webkit-backdrop-filter: blur(20px) saturate(1.22);
 }
 
-.queue-context-actions .glass-button--icon {
-  width: 32px;
-  height: 32px;
+.queue-tab-context-menu button {
+  width: 100%;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-strong);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 8px;
+  text-align: left;
+}
+
+.queue-tab-context-menu button:hover,
+.queue-tab-context-menu button:focus-visible {
+  background: rgba(90, 200, 250, 0.14);
+  outline: 0;
+}
+
+.queue-tab-context-menu button.danger {
+  color: #991b1b;
 }
 
 .queue-mode-toggle {

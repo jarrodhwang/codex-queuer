@@ -2223,10 +2223,11 @@ function QueueWorkspace({
               setEditingRequest(null)
             }}
             onCreate={() => setQueueTabModal('create')}
-            onRename={() => setQueueTabModal('rename')}
-            onDelete={() => {
-              if (activeQueueTab) setQueueTabToDelete(activeQueueTab)
+            onRename={(tab) => {
+              setActiveQueueTabId(tab.id)
+              setQueueTabModal('rename')
             }}
+            onDelete={setQueueTabToDelete}
           />
           {activeTab === 'queue' ? (
             <QueueList
@@ -2324,11 +2325,30 @@ function QueueContextTabs({
   onQueueModeChange: (separate: boolean) => Promise<void>
   onSelect: (tabId: string | null) => void
   onCreate: () => void
-  onRename: () => void
-  onDelete: () => void
+  onRename: (tab: QueueTab) => void
+  onDelete: (tab: QueueTab) => void
 }) {
   const [savingQueueMode, setSavingQueueMode] = useState(false)
+  const [contextMenu, setContextMenu] = useState<{ tab: QueueTab, x: number, y: number } | null>(null)
   const queueModeDisabled = queueModeChangeDisabled || savingQueueMode
+
+  useEffect(() => {
+    if (!contextMenu) return
+
+    const closeMenu = () => setContextMenu(null)
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeMenu()
+    }
+
+    window.addEventListener('click', closeMenu)
+    window.addEventListener('resize', closeMenu)
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      window.removeEventListener('click', closeMenu)
+      window.removeEventListener('resize', closeMenu)
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [contextMenu])
 
   const changeQueueMode = async (separate: boolean) => {
     setSavingQueueMode(true)
@@ -2360,6 +2380,15 @@ function QueueContextTabs({
             aria-selected={activeTabId === tab.id}
             className={activeTabId === tab.id ? 'active' : ''}
             onClick={() => onSelect(tab.id)}
+            onContextMenu={(event) => {
+              event.preventDefault()
+              onSelect(tab.id)
+              setContextMenu({
+                tab,
+                x: Math.max(8, Math.min(event.clientX, window.innerWidth - 172)),
+                y: Math.max(8, Math.min(event.clientY, window.innerHeight - 92)),
+              })
+            }}
           >
             <span className="truncate">{tab.name}</span>
           </button>
@@ -2385,15 +2414,16 @@ function QueueContextTabs({
         <span className="queue-mode-toggle-icon"><Check size={11} /></span>
         <span>{savingQueueMode ? 'Saving…' : 'Separate queues'}</span>
       </label>
-      {activeTabId && (
-        <div className="queue-context-actions">
-          <GlassButton variant="ghost" size="icon" type="button" aria-label="Rename tab" title="Rename tab" onClick={onRename}>
-            <Pencil size={14} />
-          </GlassButton>
-          <GlassButton variant="ghost" size="icon" type="button" aria-label="Delete tab" title="Delete tab" onClick={onDelete}>
-            <Trash2 size={14} />
-          </GlassButton>
-        </div>
+      {contextMenu && createPortal(
+        <div className="queue-tab-context-menu" role="menu" aria-label={`${contextMenu.tab.name} tab actions`} style={{ left: contextMenu.x, top: contextMenu.y }}>
+          <button type="button" role="menuitem" onClick={() => onRename(contextMenu.tab)}>
+            <Pencil size={14} /> Rename tab
+          </button>
+          <button type="button" role="menuitem" className="danger" onClick={() => onDelete(contextMenu.tab)}>
+            <Trash2 size={14} /> Delete tab
+          </button>
+        </div>,
+        document.body,
       )}
     </div>
   )
