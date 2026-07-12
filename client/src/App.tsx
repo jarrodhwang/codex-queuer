@@ -61,6 +61,7 @@ import type {
 import { FieldLabel, GlassButton, GlassDropdownSelect, GlassInput, GlassPanel, GlassSelect, GlassTextarea } from '@/components/einui/Glass'
 import { Gauge } from '@/components/einui/Gauge'
 import { ConfirmDialog } from '@/components/einui/ConfirmDialog'
+import { Sheet } from '@/components/einui/Sheet'
 import { NotificationBadge, ProgressLine, StatusBadge } from '@/components/einui/Status'
 import { formatDate, shortId } from '@/lib/utils'
 import './App.css'
@@ -977,7 +978,7 @@ function App() {
   }
 
   return (
-    <div className="app-shell" data-right-open={rightOpen ? 'true' : 'false'}>
+    <div className="app-shell">
       <LeftSidebar
         theme={theme}
         onToggleTheme={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
@@ -1052,16 +1053,15 @@ function App() {
         />
       )}
 
-      {rightOpen && (
-        <RightRail
-          config={config}
-          view={rightRailView}
-          selectedProject={selectedProject}
-          onOpenFile={openFile}
-          onClose={() => setRightOpen(false)}
-          onError={handleApiError}
-        />
-      )}
+      <RightSheet
+        open={rightOpen}
+        config={config}
+        view={rightRailView}
+        selectedProject={selectedProject}
+        onOpenFile={openFile}
+        onOpenChange={setRightOpen}
+        onError={handleApiError}
+      />
     </div>
   )
 }
@@ -4936,30 +4936,26 @@ function RequestHistory({
   )
 }
 
-function RightRail({
+function RightSheet({
+  open,
   config,
   view,
   selectedProject,
   onOpenFile,
-  onClose,
+  onOpenChange,
   onError,
 }: {
+  open: boolean
   config: ApiConfig
   view: RightRailView
   selectedProject?: Project
   onOpenFile: (project: Project, path: string) => Promise<void>
-  onClose: () => void
+  onOpenChange: (open: boolean) => void
   onError: (cause: unknown) => void
 }) {
   const title = view === 'git' ? 'Git' : 'Files'
   return (
-    <aside className="right-rail">
-      <div className="section-header">
-        <h2>{title}</h2>
-        <GlassButton variant="ghost" size="icon" onClick={onClose} title={`Close ${title.toLowerCase()}`}>
-          <X size={16} />
-        </GlassButton>
-      </div>
+    <Sheet open={open} title={title} onOpenChange={onOpenChange}>
       {selectedProject && view === 'files' ? (
         <DirectoryTree project={selectedProject} onOpenFile={onOpenFile} onError={onError} />
       ) : selectedProject && view === 'git' ? (
@@ -4967,7 +4963,7 @@ function RightRail({
       ) : (
         <span className="muted">Select a project to use this panel.</span>
       )}
-    </aside>
+    </Sheet>
   )
 }
 
