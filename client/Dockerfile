@@ -5,6 +5,8 @@ COPY client/package*.json ./
 RUN npm ci
 
 COPY client/ ./
+ARG VITE_BASE_PATH=/
+ENV VITE_BASE_PATH=$VITE_BASE_PATH
 RUN npm run build
 
 FROM httpd:2.4

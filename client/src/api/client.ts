@@ -22,7 +22,9 @@ import type {
   UpdateQueueRequest,
 } from './types'
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '/api'
+// BASE_URL is supplied by Vite's `base` option. This keeps the API alongside
+// the UI when the app is mounted below a reverse-proxy path such as /codex/.
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? `${import.meta.env.BASE_URL}api`
 const TOKEN_KEY = 'codex-queue-token'
 
 export function apiUrl(path: string) {

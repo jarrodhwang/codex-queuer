@@ -106,6 +106,8 @@ const defaultModels: ModelOption[] = [
   { label: 'GPT-5.3 Codex Spark', model: 'gpt-5.3-codex-spark', supportsPriority: false },
 ]
 
+const appIconUrl = `${import.meta.env.BASE_URL}app-icon.png`
+
 const emptyMachine: SaveMachineRequest = {
   name: '',
   kind: 'Ssh',
@@ -1166,7 +1168,7 @@ function LeftSidebar({
   return (
     <aside className="sidebar">
       <div className="app-brand" aria-label="Codex Queue">
-        <img src="/app-icon.png" alt="" className="app-brand-icon" />
+        <img src={appIconUrl} alt="" className="app-brand-icon" />
         <span className="app-brand-name">Codex Queue</span>
       </div>
 

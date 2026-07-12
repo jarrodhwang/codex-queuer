@@ -4,13 +4,13 @@
   "description": "Codex Queue dashboard for managing project requests, history, and terminal sessions.",
   "icons": [
     {
-      "src": "/app-icon.png",
+      "src": "app-icon.png",
       "sizes": "1024x1024",
       "type": "image/png",
       "purpose": "any maskable"
     }
   ],
-  "start_url": "/",
+  "start_url": ".",
   "display": "standalone",
   "background_color": "#f7f9ff",
   "theme_color": "#2563eb"

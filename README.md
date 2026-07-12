@@ -40,6 +40,19 @@ docker compose up --build
 
 Open `http://localhost:6767`.
 
+### Tailscale Serve path mounts
+
+When using `tailscale serve --set-path=/codex`, set `VITE_BASE_PATH=/codex/`
+in `.env` and rebuild the web image:
+
+```bash
+docker compose up --build -d
+```
+
+The generated UI then requests assets and the API through `/codex/`, which
+Tailscale Serve forwards to the container. Keep `CQ_API_TOKEN` set: a Tailnet
+limits network access, but this application can initiate Codex and SSH work.
+
 The Docker default machine is `Local Linux`, an SSH target that connects from the API container to the host at `host.docker.internal`. This makes the default SSH project paths real host paths such as `/home/jarrod`, and runs the host machine's `codex`, `git`, and project dependencies instead of container-local binaries. The API still mounts `HOST_PROJECT_ROOT` at `CQ_CONTAINER_HOST_MOUNT_ROOT` for direct container-local browsing or fallback setups. If you create a `Local` container machine and leave its working root blank, it uses `CQ_DEFAULT_LOCAL_WORKING_ROOT`, which defaults to `/host/home/jarrod`. SSH keys are mounted from `HOST_SSH_DIR` to `/home/app/.ssh`; machine key paths should use the container path such as `/home/app/.ssh/zbook_fury`.
 
 For Linux hosts, make sure SSH is running on the host and the key at `CQ_DEFAULT_SSH_KEY_PATH` is authorized for `CQ_DEFAULT_SSH_USER`. For Windows and macOS SSH targets, set the machine platform in the UI and use that machine's native working root, for example `C:\Users\you` or `/Users/you`.
