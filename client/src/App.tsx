@@ -1283,15 +1283,17 @@ function LeftSidebar({
                       <button type="button" className="project-item-main" onClick={() => onSelectProject(project.id)}>
                         <div className="project-name-row">
                           <div className="project-name truncate">{project.name}</div>
-                          {running === 0 && queued > 0 && (
-                            <span className="project-queue-chip queued">
-                              <span className="project-queue-dot" aria-hidden="true" />
-                              {`${queued} queued`}
-                            </span>
-                          )}
                         </div>
                         <div className="meta truncate">{project.path}</div>
                       </button>
+                      {running === 0 && queued > 0 && (
+                        <span
+                          className="project-queue-badge"
+                          aria-label={`${queued} queued request${queued === 1 ? '' : 's'}`}
+                        >
+                          {queued}
+                        </span>
+                      )}
                       {running > 0 && (
                         <NotificationBadge
                           count={running}

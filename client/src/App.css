@@ -857,30 +857,23 @@
   min-width: 0;
 }
 
-.project-queue-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
+.project-queue-badge {
+  position: absolute;
+  top: 2px;
+  right: 39px;
+  z-index: 1;
+  display: grid;
+  min-width: 18px;
+  height: 18px;
+  place-items: center;
   border-radius: 999px;
-  padding: 2px 6px;
+  padding: 0 4px;
+  background: rgba(254, 243, 199, 0.95);
+  color: #92400e;
   font-size: 10px;
   font-weight: 850;
   line-height: 1.2;
   white-space: nowrap;
-}
-
-.project-queue-chip.queued {
-  background: rgba(254, 243, 199, 0.95);
-  color: #92400e;
-}
-
-.project-queue-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: currentColor;
-  flex: 0 0 auto;
 }
 
 .notification-badge {
@@ -4770,7 +4763,7 @@
 }
 
 .request-card-meta-row span,
-.project-queue-chip,
+.project-queue-badge,
 .usage-sidebar-pill,
 .queue-index,
 .model-chip--time,
@@ -5514,7 +5507,7 @@
 
 :root[data-theme='dark'] :is(
   .machine-chip,
-  .project-queue-chip.queued,
+  .project-queue-badge,
   .request-stage-chip,
   .usage-sidebar-pill,
   .usage-machine-head > span:last-child,
@@ -5547,7 +5540,7 @@
   stroke: rgba(148, 163, 184, 0.4);
 }
 
-:root[data-theme='dark'] :is(.project-queue-chip.queued, .status-badge--queued, .status-badge--cancelrequested) {
+:root[data-theme='dark'] :is(.project-queue-badge, .status-badge--queued, .status-badge--cancelrequested) {
   border-color: rgba(252, 211, 77, 0.3);
   background: rgba(120, 53, 15, 0.48);
   color: #fde68a;
