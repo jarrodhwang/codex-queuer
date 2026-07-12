@@ -59,7 +59,7 @@ import type {
   UpdateQueueRequest,
 } from '@/api/types'
 import { FieldLabel, GlassButton, GlassDropdownSelect, GlassInput, GlassPanel, GlassSelect, GlassTextarea } from '@/components/einui/Glass'
-import { Gauge } from '@/components/einui/Gauge'
+import { GlassGauge } from '@/components/einui/Gauge'
 import { ConfirmDialog } from '@/components/einui/ConfirmDialog'
 import { Sheet } from '@/components/einui/Sheet'
 import { NotificationBadge, ProgressLine, StatusBadge } from '@/components/einui/Status'
@@ -1499,7 +1499,7 @@ function UsageWindow({ label, window, limited }: { label: string; window: NonNul
   const reset = window.resetsAt ? formatDate(new Date(window.resetsAt * 1000).toISOString()) : 'reset time unknown'
   const duration = window.windowDurationMins ? ` · ${formatWindowDuration(window.windowDurationMins)}` : ''
   return <div className="usage-window">
-    <Gauge label={label} value={remaining} tone={limited ? 'limited' : 'default'} />
+    <GlassGauge label={label} value={remaining} tone={limited ? 'limited' : 'default'} />
     <div className="usage-window-detail">
       <strong>{label}</strong>
       <span>{remaining}% left{duration}</span>
@@ -1516,7 +1516,7 @@ function PausedUsageSection({ buckets }: { buckets: UsageBucket[] }) {
     <div className="usage-paused-grid">
       {buckets.map((bucket) => (
         <div key={bucket.key} className="usage-paused-item">
-          <Gauge label={bucket.label} value={bucket.percentLeft} tone="limited" />
+          <GlassGauge label={bucket.label} value={bucket.percentLeft} tone="limited" />
           <div className="usage-window-detail">
             <strong>{bucket.section ?? bucket.label}</strong>
             <span>{bucket.percentLeft === null ? bucket.status : `${bucket.percentLeft}% left`}</span>

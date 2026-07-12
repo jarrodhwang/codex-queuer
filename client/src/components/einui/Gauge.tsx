@@ -1,16 +1,16 @@
 import { useId } from 'react'
 import { cn } from '@/lib/utils'
 
-type GaugeProps = {
+type GlassGaugeProps = {
   label: string
   value: number | null
   className?: string
   tone?: 'default' | 'limited'
 }
 
-const radius = 40
+const radius = 43
 
-export function Gauge({ label, value, className, tone = 'default' }: GaugeProps) {
+export function GlassGauge({ label, value, className, tone = 'default' }: GlassGaugeProps) {
   const gradientId = useId().replace(/:/g, '')
   const percentage = value === null ? null : Math.round(Math.max(0, Math.min(100, value)))
   const displayValue = percentage === null ? '—' : `${percentage}%`
@@ -47,7 +47,7 @@ export function Gauge({ label, value, className, tone = 'default' }: GaugeProps)
       </svg>
       <span className="ein-gauge__core">
         <span className="ein-gauge__value">{displayValue}</span>
-        <span className="ein-gauge__caption">left</span>
+        <span className="ein-gauge__caption">{label}</span>
       </span>
     </div>
   )

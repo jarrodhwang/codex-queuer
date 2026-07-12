@@ -665,11 +665,11 @@
 .usage-window,
 .usage-paused-item {
   display: grid;
-  grid-template-columns: 76px minmax(0, 1fr);
+  grid-template-columns: 112px minmax(0, 1fr);
   align-items: center;
-  gap: 9px;
-  min-height: 88px;
-  padding: 8px;
+  gap: 12px;
+  min-height: 128px;
+  padding: 12px;
 }
 
 .usage-window-detail {
@@ -698,8 +698,8 @@
 .ein-gauge {
   position: relative;
   display: grid;
-  width: 68px;
-  height: 68px;
+  width: 104px;
+  height: 104px;
   place-items: center;
   color: var(--text-strong);
   font-variant-numeric: tabular-nums;
@@ -716,11 +716,11 @@
 
 .ein-gauge circle {
   fill: none;
-  stroke-width: 10;
+  stroke-width: 7;
 }
 
 .ein-gauge-track {
-  stroke: rgba(30, 64, 175, 0.18);
+  stroke: rgba(30, 64, 175, 0.16);
 }
 
 .ein-gauge-value {
@@ -741,29 +741,31 @@
   position: relative;
   z-index: 1;
   display: grid;
-  width: 45px;
-  height: 45px;
+  width: 76px;
+  height: 76px;
   place-content: center;
   border-radius: 50%;
-  background: radial-gradient(circle at 34% 25%, rgba(255, 255, 255, 0.36), rgba(37, 99, 235, 0.12) 48%, rgba(30, 64, 175, 0.18));
-  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.24), 0 0 18px rgba(32, 217, 242, 0.12);
   text-align: center;
 }
 
 .ein-gauge__value {
   color: var(--text-strong);
-  font-size: 15px;
-  font-weight: 900;
-  letter-spacing: -0.06em;
+  font-size: 21px;
+  font-weight: 800;
+  letter-spacing: -0.045em;
   line-height: 1;
 }
 
 .ein-gauge__caption {
-  margin-top: 2px;
+  max-width: 70px;
+  margin-top: 5px;
+  overflow: hidden;
   color: var(--muted);
-  font-size: 8px;
-  font-weight: 750;
-  line-height: 1;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ein-gauge--limited .ein-gauge-value {
@@ -778,17 +780,9 @@
   stop-color: #d946ef;
 }
 
-.ein-gauge--limited .ein-gauge__core {
-  background: radial-gradient(circle at 34% 25%, rgba(255, 255, 255, 0.34), rgba(126, 34, 206, 0.14) 48%, rgba(88, 28, 135, 0.2));
-}
-
 .ein-gauge--unknown .ein-gauge-track {
   stroke-dasharray: 7 5;
   stroke: rgba(100, 116, 139, 0.32);
-}
-
-.ein-gauge--unknown .ein-gauge__core {
-  background: rgba(100, 116, 139, 0.1);
 }
 
 @keyframes ein-gauge-fill {
