@@ -4408,6 +4408,7 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
     ? messages.filter((message) => message.text !== primaryMessage)
     : messages
   const commitRun = latestRunWithCommitMetadata(request.runs)
+  const reportedFiles = useMemo(() => reportedFileChanges(request, messages, primaryMessage), [messages, primaryMessage, request])
   const finishedAt = request.finishedAt ?? (request.status === 'Succeeded' ? request.runs.map((run) => run.finishedAt).filter(Boolean).sort().at(-1) : null)
   const elapsed = formatDurationBetween(
     request.startedAt ?? request.createdAt,
@@ -4449,6 +4450,36 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
                   No formatted Codex response has been published yet. Status and elapsed time will continue to update here.
                 </div>
               )}
+            </section>
+
+            <section className="work-report-section work-report-procedure">
+              <div className="work-report-section-head">
+                <div>
+                  <div className="section-kicker">Detailed procedure</div>
+                  <h4>How Codex completed the work</h4>
+                </div>
+                <span className="work-report-count">{request.runs.length}</span>
+              </div>
+              <div className="work-report-procedure-scroll" tabIndex={0} aria-label="Scrollable Codex procedure details">
+                {request.runs.length > 0 ? request.runs.map((run) => (
+                  <article key={run.id} className="work-report-procedure-run">
+                    <div className="work-report-procedure-head">
+                      <div>
+                        <strong>{run.kind === 'Commit' ? 'Commit changes' : 'Complete request'}</strong>
+                        <span>{runDurationLabel(run, now) ?? (run.startedAt ? `Started ${formatDate(run.startedAt)}` : 'Waiting to start')}</span>
+                      </div>
+                      <StatusBadge status={run.status} busy={run.status === 'Running'} />
+                    </div>
+                    <StructuredBodyView
+                      content={run.output}
+                      emptyText={runEmptyText(run, now)}
+                      forceExpanded
+                    />
+                  </article>
+                )) : (
+                  <div className="work-report-empty">Codex has not started a procedure yet.</div>
+                )}
+              </div>
             </section>
 
             {supportingMessages.length > 0 && (
@@ -4507,11 +4538,49 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
                 {commitRun.commitSha && <code title={commitRun.commitSha}>{commitRun.commitSha.slice(0, 12)}</code>}
               </section>
             )}
+
+            <section className="work-report-summary-card work-report-files">
+              <div className="work-report-section-head">
+                <div>
+                  <div className="section-kicker">File changes</div>
+                  <h4>{reportedFiles.length > 0 ? `${reportedFiles.length} reported` : 'None reported'}</h4>
+                </div>
+                <Code2 size={18} aria-hidden="true" />
+              </div>
+              {reportedFiles.length > 0 ? (
+                <ul className="work-report-file-list">
+                  {reportedFiles.map((path) => <li key={path} title={path}>{path}</li>)}
+                </ul>
+              ) : (
+                <div className="work-report-empty work-report-empty--compact">No file paths were included in the Codex report.</div>
+              )}
+            </section>
           </aside>
         </div>
       </div>
     </Modal>
   )
+}
+
+function reportedFileChanges(request: CodexRequest, messages: WorkReportMessage[], primaryMessage: string | null) {
+  const paths = new Set<string>()
+
+  for (const run of request.runs) {
+    const parsed = parseBody(run.output)
+    if (parsed.kind === 'events') {
+      for (const event of parsed.events) {
+        for (const change of event.changes) paths.add(change.path)
+      }
+    }
+  }
+
+  const reportText = [...messages.map((message) => message.text), primaryMessage ?? ''].join('\n')
+  const fileReference = /(?:\[[^\]]+\]\(|`)<{0,1}((?!https?:\/\/|\/\/)[^\s`)>]+\.[a-zA-Z0-9]{1,10}(?::\d+)?)(?:>|\)|`)/g
+  for (const match of reportText.matchAll(fileReference)) {
+    paths.add(match[1].replace(/^\.\//, '').replace(/:\d+$/, ''))
+  }
+
+  return [...paths].filter((path) => path && path !== 'unknown path').sort((left, right) => left.localeCompare(right))
 }
 
 function DetailedCodexAnswers({ output }: { output: string }) {
