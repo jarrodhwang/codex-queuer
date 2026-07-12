@@ -1194,32 +1194,30 @@ function LeftSidebar({
   useEffect(() => {
     let cancelled = false
 
-    const checkMachines = async () => {
-      for (const machine of machines) {
+    const checkMachine = async (machine: Machine) => {
+      setMachineStatuses((current) => ({
+        ...current,
+        [machine.id]: { checking: true, success: current[machine.id]?.success, output: current[machine.id]?.output ?? '' },
+      }))
+
+      try {
+        const result = await api.testMachine(machine.id)
+        if (cancelled) return
         setMachineStatuses((current) => ({
           ...current,
-          [machine.id]: { checking: true, success: current[machine.id]?.success, output: current[machine.id]?.output ?? '' },
+          [machine.id]: { checking: false, success: result.success, output: result.output || (result.success ? 'Connection ok' : 'Connection failed') },
         }))
-
-        try {
-          const result = await api.testMachine(machine.id)
-          if (cancelled) return
-          setMachineStatuses((current) => ({
-            ...current,
-            [machine.id]: { checking: false, success: result.success, output: result.output || (result.success ? 'Connection ok' : 'Connection failed') },
-          }))
-        } catch (cause) {
-          if (cancelled) return
-          setMachineStatuses((current) => ({
-            ...current,
-            [machine.id]: { checking: false, success: false, output: cause instanceof Error ? cause.message : 'Connection failed.' },
-          }))
-        }
+      } catch (cause) {
+        if (cancelled) return
+        setMachineStatuses((current) => ({
+          ...current,
+          [machine.id]: { checking: false, success: false, output: cause instanceof Error ? cause.message : 'Connection failed.' },
+        }))
       }
     }
 
     if (machines.length > 0) {
-      void checkMachines()
+      void Promise.all(machines.map(checkMachine))
     }
 
     return () => {
