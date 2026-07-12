@@ -88,7 +88,7 @@ Codex runs over Windows SSH use `danger-full-access` because both native Windows
 - A request in the base queue starts a fresh Codex CLI thread. It does not inherit the browser terminal session or any Codex Desktop chat context.
 - Named tabs persist their own Codex CLI thread ID and reuse it for later requests in that tab. Tabs are isolated by project.
 - Separate commit session means exactly that: the follow-up commit prompt runs in a different Codex session and cannot see the earlier request chat unless you disable separate commit sessions.
-- Deleting an inactive named tab preserves its request records by moving them to the base view. Tabs with active requests must be completed, cancelled, or cleared first.
+- Deleting an inactive named tab retires its saved context and keeps its request records out of the base view. Tabs with active requests must be completed, cancelled, or cleared first.
 
 ## Security Notes
 

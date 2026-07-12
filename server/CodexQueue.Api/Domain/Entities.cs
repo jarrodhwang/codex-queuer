@@ -49,6 +49,7 @@ public sealed class QueueTab
     public string? CodexSessionId { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? DeletedAt { get; set; }
 
     public ICollection<CodexRequest> Requests { get; set; } = new List<CodexRequest>();
 }

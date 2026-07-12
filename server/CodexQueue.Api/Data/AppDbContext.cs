@@ -85,11 +85,15 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         {
             entity.Property(x => x.Name).HasMaxLength(80).UseCollation("NOCASE").IsRequired();
             entity.Property(x => x.CodexSessionId).HasMaxLength(80);
+            entity.Property(x => x.DeletedAt);
             entity.HasOne(x => x.Project)
                 .WithMany(x => x.QueueTabs)
                 .HasForeignKey(x => x.ProjectId)
                 .OnDelete(DeleteBehavior.Cascade);
-            entity.HasIndex(x => new { x.ProjectId, x.Name }).IsUnique();
+            entity.HasIndex(x => new { x.ProjectId, x.Name })
+                .IsUnique()
+                .HasDatabaseName("IX_QueueTabs_ProjectId_ActiveName")
+                .HasFilter("\"DeletedAt\" IS NULL");
         });
 
         modelBuilder.Entity<CodexRun>(entity =>

@@ -158,7 +158,9 @@ public static class ApiEndpoints
 
         api.MapGet("/queue-tabs", async (Guid? projectId, AppDbContext db, CancellationToken cancellationToken) =>
         {
-            var query = db.QueueTabs.AsNoTracking();
+            var query = db.QueueTabs
+                .AsNoTracking()
+                .Where(x => x.DeletedAt == null);
             if (projectId.HasValue)
             {
                 query = query.Where(x => x.ProjectId == projectId.Value);
@@ -186,7 +188,11 @@ public static class ApiEndpoints
             }
 
             var normalizedName = name.ToUpperInvariant();
-            if (await db.QueueTabs.AnyAsync(x => x.ProjectId == input.ProjectId && x.Name.ToUpper() == normalizedName, cancellationToken))
+            if (await db.QueueTabs.AnyAsync(x =>
+                    x.ProjectId == input.ProjectId
+                    && x.DeletedAt == null
+                    && x.Name.ToUpper() == normalizedName,
+                cancellationToken))
             {
                 return Results.Conflict(new { error = "A tab with this name already exists." });
             }
@@ -203,7 +209,7 @@ public static class ApiEndpoints
 
         api.MapPut("/queue-tabs/{id:guid}", async (Guid id, RenameQueueTabRequest input, AppDbContext db, CancellationToken cancellationToken) =>
         {
-            var tab = await db.QueueTabs.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            var tab = await db.QueueTabs.FirstOrDefaultAsync(x => x.Id == id && x.DeletedAt == null, cancellationToken);
             if (tab is null)
             {
                 return Results.NotFound();
@@ -216,7 +222,12 @@ public static class ApiEndpoints
             }
 
             var normalizedName = name.ToUpperInvariant();
-            if (await db.QueueTabs.AnyAsync(x => x.ProjectId == tab.ProjectId && x.Id != tab.Id && x.Name.ToUpper() == normalizedName, cancellationToken))
+            if (await db.QueueTabs.AnyAsync(x =>
+                    x.ProjectId == tab.ProjectId
+                    && x.Id != tab.Id
+                    && x.DeletedAt == null
+                    && x.Name.ToUpper() == normalizedName,
+                cancellationToken))
             {
                 return Results.Conflict(new { error = "A tab with this name already exists." });
             }
@@ -229,7 +240,7 @@ public static class ApiEndpoints
 
         api.MapDelete("/queue-tabs/{id:guid}", async (Guid id, AppDbContext db, CancellationToken cancellationToken) =>
         {
-            var tab = await db.QueueTabs.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            var tab = await db.QueueTabs.FirstOrDefaultAsync(x => x.Id == id && x.DeletedAt == null, cancellationToken);
             if (tab is null)
             {
                 return Results.NotFound();
@@ -249,13 +260,10 @@ public static class ApiEndpoints
                 return Results.Conflict(new { error = "Finish, cancel, or remove active requests before deleting this tab." });
             }
 
-            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
-            await db.Requests
-                .Where(x => x.QueueTabId == id)
-                .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.QueueTabId, (Guid?)null), cancellationToken);
-            db.QueueTabs.Remove(tab);
+            tab.CodexSessionId = null;
+            tab.DeletedAt = DateTimeOffset.UtcNow;
+            tab.UpdatedAt = tab.DeletedAt.Value;
             await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
             return Results.NoContent();
         });
 
@@ -309,8 +317,24 @@ public static class ApiEndpoints
                 return Results.BadRequest(new { error = "Project name and path are required." });
             }
 
+            var normalizedPath = input.Path.Trim();
+            var executionContextChanged = project.MachineId != input.MachineId
+                || !string.Equals(project.Path, normalizedPath, StringComparison.Ordinal);
+            if (executionContextChanged && await db.Requests.AnyAsync(x =>
+                    x.ProjectId == project.Id
+                    && x.DeletedAt == null
+                    && x.ArchivedAt == null
+                    && (x.Status == QueueStatus.Queued
+                        || x.Status == QueueStatus.Running
+                        || x.Status == QueueStatus.CancelRequested
+                        || x.Status == QueueStatus.UsageLimited),
+                cancellationToken))
+            {
+                return Results.Conflict(new { error = "Finish or cancel active requests before changing the project machine or path." });
+            }
+
             project.Name = input.Name.Trim();
-            project.Path = input.Path.Trim();
+            project.Path = normalizedPath;
             project.MachineId = input.MachineId;
             project.DefaultModel = NormalizeOptional(input.DefaultModel);
             project.DefaultModelEffort = NormalizeEffort(input.DefaultModelEffort, input.DefaultModel);
@@ -321,6 +345,16 @@ public static class ApiEndpoints
             project.DefaultGenerateCommit = input.DefaultGenerateCommit ?? true;
             project.DefaultSeparateCommitSession = input.DefaultSeparateCommitSession ?? false;
             project.UpdatedAt = DateTimeOffset.UtcNow;
+            if (executionContextChanged)
+            {
+                await db.QueueTabs
+                    .Where(x => x.ProjectId == project.Id && x.DeletedAt == null && x.CodexSessionId != null)
+                    .ExecuteUpdateAsync(
+                        setters => setters
+                            .SetProperty(x => x.CodexSessionId, (string?)null)
+                            .SetProperty(x => x.UpdatedAt, project.UpdatedAt),
+                        cancellationToken);
+            }
             await db.SaveChangesAsync(cancellationToken);
             await db.Entry(project).Reference(x => x.Machine).LoadAsync(cancellationToken);
             return Results.Ok(project.ToDto());
@@ -709,6 +743,8 @@ public static class ApiEndpoints
                 query = query.Where(x => x.ProjectId == projectId);
             }
 
+            query = query.Where(x => x.QueueTabId == null || x.QueueTab!.DeletedAt == null);
+
             var requests = await query.ToArrayAsync(cancellationToken);
             var orderedRequests = requests
                 .Order(Comparer<CodexRequest>.Create(QueuePriority.CompareForDisplay));
@@ -765,7 +801,9 @@ public static class ApiEndpoints
             if (input.QueueTabId.HasValue)
             {
                 queueTab = await db.QueueTabs.FirstOrDefaultAsync(
-                    x => x.Id == input.QueueTabId.Value && x.ProjectId == project.Id,
+                    x => x.Id == input.QueueTabId.Value
+                        && x.ProjectId == project.Id
+                        && x.DeletedAt == null,
                     cancellationToken);
                 if (queueTab is null)
                 {

@@ -13,6 +13,8 @@ public static class DbInitializer
         var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("DbInitializer");
         await db.Database.EnsureCreatedAsync(cancellationToken);
         await EnsureQueueTabsTableAsync(db, cancellationToken);
+        await EnsureColumnAsync(db, "QueueTabs", "DeletedAt", "ALTER TABLE \"QueueTabs\" ADD COLUMN \"DeletedAt\" TEXT NULL", cancellationToken);
+        await EnsureQueueTabIndexesAsync(db, cancellationToken);
         await EnsureColumnAsync(db, "Machines", "Platform", "ALTER TABLE \"Machines\" ADD COLUMN \"Platform\" TEXT NOT NULL DEFAULT 'Auto'", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "QueueTabId", "ALTER TABLE \"Requests\" ADD COLUMN \"QueueTabId\" TEXT NULL REFERENCES \"QueueTabs\" (\"Id\") ON DELETE SET NULL", cancellationToken);
         await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_Requests_QueueTabId\" ON \"Requests\" (\"QueueTabId\")", cancellationToken);
@@ -226,12 +228,22 @@ public static class DbInitializer
                 "CodexSessionId" TEXT NULL,
                 "CreatedAt" TEXT NOT NULL,
                 "UpdatedAt" TEXT NOT NULL,
+                "DeletedAt" TEXT NULL,
                 CONSTRAINT "FK_QueueTabs_Projects_ProjectId" FOREIGN KEY ("ProjectId") REFERENCES "Projects" ("Id") ON DELETE CASCADE
             )
             """,
             cancellationToken);
+    }
+
+    private static async Task EnsureQueueTabIndexesAsync(AppDbContext db, CancellationToken cancellationToken)
+    {
+        // Create the replacement before dropping the legacy index so uniqueness
+        // remains enforced even if startup is interrupted between schema statements.
         await db.Database.ExecuteSqlRawAsync(
-            "CREATE UNIQUE INDEX IF NOT EXISTS \"IX_QueueTabs_ProjectId_Name\" ON \"QueueTabs\" (\"ProjectId\", \"Name\")",
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"IX_QueueTabs_ProjectId_ActiveName\" ON \"QueueTabs\" (\"ProjectId\", \"Name\") WHERE \"DeletedAt\" IS NULL",
+            cancellationToken);
+        await db.Database.ExecuteSqlRawAsync(
+            "DROP INDEX IF EXISTS \"IX_QueueTabs_ProjectId_Name\"",
             cancellationToken);
     }
 

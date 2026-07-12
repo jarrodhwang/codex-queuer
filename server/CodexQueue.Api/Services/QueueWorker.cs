@@ -139,8 +139,11 @@ public sealed class QueueWorker(
     {
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        var request = await db.Requests.Include(x => x.Runs).FirstOrDefaultAsync(x => x.Id == requestId, cancellationToken);
-        if (request is null)
+        var request = await db.Requests
+            .Include(x => x.QueueTab)
+            .Include(x => x.Runs)
+            .FirstOrDefaultAsync(x => x.Id == requestId, cancellationToken);
+        if (request is null || request.QueueTab?.DeletedAt is not null)
         {
             return false;
         }
@@ -270,9 +273,13 @@ public sealed class QueueWorker(
                 var now = DateTimeOffset.UtcNow;
                 var queuedRequests = await db.Requests
                     .Include(x => x.Project).ThenInclude(x => x!.Machine)
+                    .Include(x => x.QueueTab)
                     .Include(x => x.Machine)
                     .Include(x => x.Runs)
-                    .Where(x => x.DeletedAt == null && (x.Status == QueueStatus.Queued || x.Status == QueueStatus.Running))
+                    .Where(x =>
+                        x.DeletedAt == null
+                        && (x.QueueTabId == null || x.QueueTab!.DeletedAt == null)
+                        && (x.Status == QueueStatus.Queued || x.Status == QueueStatus.Running))
                     .ToArrayAsync(stoppingToken);
                 var projectsWithUnclaimedRunningRequests = queuedRequests
                     .Where(x => x.Status == QueueStatus.Running && !_activeProjects.ContainsKey(x.ProjectId))

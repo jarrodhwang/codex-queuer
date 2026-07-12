@@ -753,9 +753,6 @@ function App() {
     try {
       await api.deleteQueueTab(id)
       setQueueTabs((current) => current.filter((tab) => tab.id !== id))
-      setRequests((current) => current.map((request) => (request.queueTabId === id
-        ? { ...request, queueTabId: null, queueTabName: null }
-        : request)))
       refreshLiveInBackground()
     } catch (cause) {
       handleApiError(cause)
