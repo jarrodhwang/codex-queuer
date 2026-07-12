@@ -569,7 +569,11 @@ public static class ApiEndpoints
             try
             {
                 var session = await terminal.StartAsync(project, cancellationToken);
-                return Results.Redirect(session.EntryPath);
+                // Keep this redirect relative to the terminal-start endpoint. A reverse
+                // proxy mounted below a path (for example Tailscale Serve at /codex)
+                // removes that prefix before forwarding to the API, so a root-relative
+                // Location header would send the browser outside the mounted app.
+                return Results.Redirect("../../../" + session.EntryPath["/api/".Length..]);
             }
             catch (Exception ex) when (ex is InvalidOperationException or IOException or TimeoutException or System.ComponentModel.Win32Exception)
             {
