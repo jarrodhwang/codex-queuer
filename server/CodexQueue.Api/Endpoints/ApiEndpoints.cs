@@ -231,8 +231,28 @@ public static class ApiEndpoints
                 return Results.NotFound();
             }
 
+            var hasActiveRequest = await db.Requests.AnyAsync(x =>
+                x.ProjectId == id &&
+                (x.Status == QueueStatus.Running || x.Status == QueueStatus.CancelRequested),
+                cancellationToken);
+            if (hasActiveRequest)
+            {
+                return Results.BadRequest(new { error = "Cancel the running request before removing this project." });
+            }
+
+            // Explicitly remove dependents instead of relying on database-level cascade
+            // constraints. Existing SQLite databases are initialized with EnsureCreated,
+            // so their foreign key actions may predate the current model configuration.
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            await db.Runs
+                .Where(x => db.Requests.Any(request => request.ProjectId == id && request.Id == x.RequestId))
+                .ExecuteDeleteAsync(cancellationToken);
+            await db.Requests
+                .Where(x => x.ProjectId == id)
+                .ExecuteDeleteAsync(cancellationToken);
             db.Projects.Remove(project);
             await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
             return Results.NoContent();
         });
 

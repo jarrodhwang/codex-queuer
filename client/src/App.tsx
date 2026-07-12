@@ -689,8 +689,8 @@ function App() {
   }
 
   const removeProject = async (project: Project) => {
-    const confirmed = window.confirm(`Remove "${project.name}" from Codex Queue? This only removes the project from this web app. It will not delete files or folders from disk.`)
-    if (!confirmed) return
+    const confirmed = window.confirm(`Remove "${project.name}" from Codex Queue? This removes its queue history from this web app, but will not delete files or folders from disk.`)
+    if (!confirmed) return false
 
     setError('')
     try {
@@ -702,8 +702,10 @@ function App() {
       setOpenFiles(remainingOpenFiles)
       setActiveFileKey((current) => (current?.startsWith(`${project.id}:`) ? remainingOpenFiles.at(-1)?.key ?? null : current))
       await loadLive()
+      return true
     } catch (cause) {
       handleApiError(cause)
+      return false
     }
   }
 
@@ -1085,7 +1087,7 @@ function LeftSidebar({
   selectedProjectId: string
   onSelectProject: (id: string) => void
   onRenameProject: (project: Project, name: string) => Promise<void>
-  onRemoveProject: (project: Project) => Promise<void>
+  onRemoveProject: (project: Project) => Promise<boolean>
   onChanged: () => Promise<void>
   onError: (cause: unknown) => void
 }) {
@@ -1282,8 +1284,9 @@ function LeftSidebar({
           onClose={() => setProjectDetailsId(null)}
           onRename={onRenameProject}
           onRemove={async (project) => {
-            await onRemoveProject(project)
-            setProjectDetailsId(null)
+            if (await onRemoveProject(project)) {
+              setProjectDetailsId(null)
+            }
           }}
           onError={onError}
         />
