@@ -2055,9 +2055,28 @@ function MachineFolderTree({
 }
 
 function Modal({ title, icon, children, onClose, wide = false, large = false }: { title: string; icon: React.ReactNode; children: React.ReactNode; onClose: () => void; wide?: boolean; large?: boolean }) {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose()
+      }
+    }
+
+    document.addEventListener('keydown', closeOnEscape)
+    return () => document.removeEventListener('keydown', closeOnEscape)
+  }, [onClose])
+
   return createPortal(
-    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label={title}>
-      <div className={`modal ${wide ? 'modal--wide' : ''} ${large ? 'modal--large' : ''}`}>
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose()
+        }
+      }}
+    >
+      <div className={`modal ${wide ? 'modal--wide' : ''} ${large ? 'modal--large' : ''}`} role="dialog" aria-modal="true" aria-label={title}>
         <div className="section-header">
           <h2>{title}</h2>
           <div className="inline-row">
