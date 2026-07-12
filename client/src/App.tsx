@@ -59,7 +59,7 @@ import type {
 } from '@/api/types'
 import { FieldLabel, GlassButton, GlassDropdownSelect, GlassInput, GlassPanel, GlassSelect, GlassTextarea } from '@/components/einui/Glass'
 import { ConfirmDialog } from '@/components/einui/ConfirmDialog'
-import { ProgressLine, StatusBadge } from '@/components/einui/Status'
+import { NotificationBadge, ProgressLine, StatusBadge } from '@/components/einui/Status'
 import { formatDate, shortId } from '@/lib/utils'
 import './App.css'
 
@@ -1291,7 +1291,10 @@ function LeftSidebar({
                         <div className="meta truncate">{project.path}</div>
                       </button>
                       {running > 0 && (
-                        <span className="project-running-badge">{running} running</span>
+                        <NotificationBadge
+                          count={running}
+                          label={`${running} running request${running === 1 ? '' : 's'}`}
+                        />
                       )}
                       <button
                         type="button"

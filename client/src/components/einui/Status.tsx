@@ -19,6 +19,10 @@ export function StatusBadge({ status, busy = false }: { status: QueueStatus; bus
   )
 }
 
+export function NotificationBadge({ count, label }: { count: number; label: string }) {
+  return <span className="notification-badge" aria-label={label}>{count}</span>
+}
+
 export function ProgressLine({ status, percent }: { status: QueueStatus; percent: number }) {
   return (
     <div className={`progress-line progress-line--${status.toLowerCase()}`} aria-label={`${statusLabel[status]} ${percent}%`}>
