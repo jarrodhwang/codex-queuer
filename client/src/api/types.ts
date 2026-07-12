@@ -69,8 +69,17 @@ export type SaveProjectRequest = {
   defaultSeparateCommitSession?: boolean | null
 }
 
+export type QueueTab = {
+  id: string
+  projectId: string
+  name: string
+  createdAt: string
+  updatedAt: string
+}
+
 export type CreateQueueRequest = {
   projectId: string
+  queueTabId?: string | null
   prompt: string
   attachments?: QueueAttachment[]
   model: string
@@ -116,6 +125,8 @@ export type CodexRun = {
 export type CodexRequest = {
   id: string
   projectId: string
+  queueTabId?: string | null
+  queueTabName?: string | null
   projectName: string
   projectPath: string
   machineId: string

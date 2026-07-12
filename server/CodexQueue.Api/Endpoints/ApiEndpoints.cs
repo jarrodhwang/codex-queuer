@@ -156,6 +156,109 @@ public static class ApiEndpoints
                 .Select(x => x.ToDto())
                 .ToArrayAsync(cancellationToken));
 
+        api.MapGet("/queue-tabs", async (Guid? projectId, AppDbContext db, CancellationToken cancellationToken) =>
+        {
+            var query = db.QueueTabs.AsNoTracking();
+            if (projectId.HasValue)
+            {
+                query = query.Where(x => x.ProjectId == projectId.Value);
+            }
+
+            var tabs = await query.ToArrayAsync(cancellationToken);
+            return tabs
+                .OrderBy(x => x.CreatedAt)
+                .ThenBy(x => x.Name)
+                .Select(x => x.ToDto())
+                .ToArray();
+        });
+
+        api.MapPost("/queue-tabs", async (CreateQueueTabRequest input, AppDbContext db, CancellationToken cancellationToken) =>
+        {
+            var name = NormalizeQueueTabName(input.Name, out var validationError);
+            if (validationError is not null)
+            {
+                return Results.BadRequest(new { error = validationError });
+            }
+
+            if (!await db.Projects.AnyAsync(x => x.Id == input.ProjectId, cancellationToken))
+            {
+                return Results.BadRequest(new { error = "Project does not exist." });
+            }
+
+            var normalizedName = name.ToUpperInvariant();
+            if (await db.QueueTabs.AnyAsync(x => x.ProjectId == input.ProjectId && x.Name.ToUpper() == normalizedName, cancellationToken))
+            {
+                return Results.Conflict(new { error = "A tab with this name already exists." });
+            }
+
+            var tab = new QueueTab
+            {
+                ProjectId = input.ProjectId,
+                Name = name,
+            };
+            db.QueueTabs.Add(tab);
+            await db.SaveChangesAsync(cancellationToken);
+            return Results.Created($"/api/queue-tabs/{tab.Id}", tab.ToDto());
+        });
+
+        api.MapPut("/queue-tabs/{id:guid}", async (Guid id, RenameQueueTabRequest input, AppDbContext db, CancellationToken cancellationToken) =>
+        {
+            var tab = await db.QueueTabs.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            if (tab is null)
+            {
+                return Results.NotFound();
+            }
+
+            var name = NormalizeQueueTabName(input.Name, out var validationError);
+            if (validationError is not null)
+            {
+                return Results.BadRequest(new { error = validationError });
+            }
+
+            var normalizedName = name.ToUpperInvariant();
+            if (await db.QueueTabs.AnyAsync(x => x.ProjectId == tab.ProjectId && x.Id != tab.Id && x.Name.ToUpper() == normalizedName, cancellationToken))
+            {
+                return Results.Conflict(new { error = "A tab with this name already exists." });
+            }
+
+            tab.Name = name;
+            tab.UpdatedAt = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync(cancellationToken);
+            return Results.Ok(tab.ToDto());
+        });
+
+        api.MapDelete("/queue-tabs/{id:guid}", async (Guid id, AppDbContext db, CancellationToken cancellationToken) =>
+        {
+            var tab = await db.QueueTabs.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            if (tab is null)
+            {
+                return Results.NotFound();
+            }
+
+            var hasActiveRequests = await db.Requests.AnyAsync(x =>
+                x.QueueTabId == id
+                && x.DeletedAt == null
+                && x.ArchivedAt == null
+                && (x.Status == QueueStatus.Queued
+                    || x.Status == QueueStatus.Running
+                    || x.Status == QueueStatus.CancelRequested
+                    || x.Status == QueueStatus.UsageLimited),
+                cancellationToken);
+            if (hasActiveRequests)
+            {
+                return Results.Conflict(new { error = "Finish, cancel, or remove active requests before deleting this tab." });
+            }
+
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            await db.Requests
+                .Where(x => x.QueueTabId == id)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(x => x.QueueTabId, (Guid?)null), cancellationToken);
+            db.QueueTabs.Remove(tab);
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return Results.NoContent();
+        });
+
         api.MapPost("/projects", async (SaveProjectRequest input, AppDbContext db, CancellationToken cancellationToken) =>
         {
             if (string.IsNullOrWhiteSpace(input.Name) || string.IsNullOrWhiteSpace(input.Path))
@@ -591,6 +694,7 @@ public static class ApiEndpoints
         {
             var query = db.Requests
                 .Include(x => x.Project)
+                .Include(x => x.QueueTab)
                 .Include(x => x.Machine)
                 .Include(x => x.Runs)
                 .AsNoTracking();
@@ -635,6 +739,7 @@ public static class ApiEndpoints
         {
             var request = await db.Requests
                 .Include(x => x.Project)
+                .Include(x => x.QueueTab)
                 .Include(x => x.Machine)
                 .Include(x => x.Runs)
                 .AsNoTracking()
@@ -656,6 +761,18 @@ public static class ApiEndpoints
                 return Results.BadRequest(new { error = "Prompt and model are required." });
             }
 
+            QueueTab? queueTab = null;
+            if (input.QueueTabId.HasValue)
+            {
+                queueTab = await db.QueueTabs.FirstOrDefaultAsync(
+                    x => x.Id == input.QueueTabId.Value && x.ProjectId == project.Id,
+                    cancellationToken);
+                if (queueTab is null)
+                {
+                    return Results.BadRequest(new { error = "Queue tab does not exist for this project." });
+                }
+            }
+
             var attachments = NormalizeAttachments(input.Attachments, out var attachmentError);
             if (attachmentError is not null)
             {
@@ -665,6 +782,8 @@ public static class ApiEndpoints
             var request = new CodexRequest
             {
                 ProjectId = project.Id,
+                QueueTabId = queueTab?.Id,
+                QueueTab = queueTab,
                 MachineId = project.MachineId,
                 Prompt = input.Prompt.Trim(),
                 AttachmentsJson = attachments.Length == 0 ? null : JsonSerializer.Serialize(attachments),
@@ -702,6 +821,7 @@ public static class ApiEndpoints
         {
             var request = await db.Requests
                 .Include(x => x.Project)
+                .Include(x => x.QueueTab)
                 .Include(x => x.Machine)
                 .Include(x => x.Runs)
                 .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
@@ -822,6 +942,7 @@ public static class ApiEndpoints
         {
             var request = await db.Requests
                 .Include(x => x.Project)
+                .Include(x => x.QueueTab)
                 .Include(x => x.Machine)
                 .Include(x => x.Runs)
                 .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
@@ -1027,6 +1148,18 @@ public static class ApiEndpoints
 
     private static string? NormalizeOptional(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static string NormalizeQueueTabName(string? value, out string? error)
+    {
+        var name = value?.Trim() ?? "";
+        error = name.Length switch
+        {
+            0 => "Tab name is required.",
+            > 80 => "Tab name must be 80 characters or fewer.",
+            _ => null,
+        };
+        return name;
+    }
 
     private static QueueAttachmentDto[] NormalizeAttachments(IReadOnlyList<QueueAttachmentDto>? attachments, out string? error)
     {

@@ -52,6 +52,7 @@ import type {
   Project,
   QueueAttachment,
   QueueDiagnostics,
+  QueueTab,
   SaveMachineRequest,
   SaveProjectRequest,
   UpdateQueueRequest,
@@ -477,6 +478,7 @@ function App() {
   const [config, setConfig] = useState<ApiConfig>({ requiresToken: false, models: defaultModels })
   const [machines, setMachines] = useState<Machine[]>([])
   const [projects, setProjects] = useState<Project[]>([])
+  const [queueTabs, setQueueTabs] = useState<QueueTab[]>([])
   const [requests, setRequests] = useState<CodexRequest[]>([])
   const [queueDiagnostics, setQueueDiagnostics] = useState<QueueDiagnostics | null>(null)
   const [selectedProjectId, setSelectedProjectId] = useState('')
@@ -523,9 +525,10 @@ function App() {
       setAuthBlocked(true)
       return
     }
-    const [nextMachines, nextProjects] = await Promise.all([api.machines(), api.projects()])
+    const [nextMachines, nextProjects, nextQueueTabs] = await Promise.all([api.machines(), api.projects(), api.queueTabs()])
     setMachines(nextMachines)
     setProjects(nextProjects)
+    setQueueTabs(nextQueueTabs)
     setSelectedProjectId((current) => current || nextProjects[0]?.id || '')
   }, [])
 
@@ -698,6 +701,7 @@ function App() {
       const remainingProjects = projects.filter((item) => item.id !== project.id)
       const remainingOpenFiles = openFiles.filter((file) => file.projectId !== project.id)
       setProjects(remainingProjects)
+      setQueueTabs((current) => current.filter((tab) => tab.projectId !== project.id))
       setSelectedProjectId(remainingProjects[0]?.id ?? '')
       setOpenFiles(remainingOpenFiles)
       setActiveFileKey((current) => (current?.startsWith(`${project.id}:`) ? remainingOpenFiles.at(-1)?.key ?? null : current))
@@ -716,6 +720,46 @@ function App() {
       refreshLiveInBackground()
     } catch (cause) {
       handleApiError(cause)
+    }
+  }
+
+  const createQueueTab = async (projectId: string, name: string) => {
+    setError('')
+    try {
+      const created = await api.createQueueTab(projectId, name)
+      setQueueTabs((current) => [...current.filter((tab) => tab.id !== created.id), created])
+      return created
+    } catch (cause) {
+      handleApiError(cause)
+      throw cause
+    }
+  }
+
+  const renameQueueTab = async (id: string, name: string) => {
+    setError('')
+    try {
+      const updated = await api.renameQueueTab(id, name)
+      setQueueTabs((current) => current.map((tab) => (tab.id === id ? updated : tab)))
+      setRequests((current) => current.map((request) => (request.queueTabId === id ? { ...request, queueTabName: updated.name } : request)))
+      return updated
+    } catch (cause) {
+      handleApiError(cause)
+      throw cause
+    }
+  }
+
+  const deleteQueueTab = async (id: string) => {
+    setError('')
+    try {
+      await api.deleteQueueTab(id)
+      setQueueTabs((current) => current.filter((tab) => tab.id !== id))
+      setRequests((current) => current.map((request) => (request.queueTabId === id
+        ? { ...request, queueTabId: null, queueTabName: null }
+        : request)))
+      refreshLiveInBackground()
+    } catch (cause) {
+      handleApiError(cause)
+      throw cause
     }
   }
 
@@ -953,6 +997,7 @@ function App() {
         <QueueWorkspace
             config={config}
             selectedProject={selectedProject}
+            queueTabs={queueTabs}
             requests={requests}
             diagnostics={queueDiagnostics}
             now={liveNow}
@@ -966,6 +1011,9 @@ function App() {
             onReorderRequests={reorderRequests}
             onDeleteRequest={setDeleteRequestId}
             onUpdateProjectDefaults={updateProjectDefaults}
+            onCreateQueueTab={createQueueTab}
+            onRenameQueueTab={renameQueueTab}
+            onDeleteQueueTab={deleteQueueTab}
             onKickQueue={kickQueue}
             onError={handleApiError}
             error={error}
@@ -2013,6 +2061,7 @@ function Modal({ title, icon, children, onClose, wide = false }: { title: string
 function QueueWorkspace({
   config,
   selectedProject,
+  queueTabs,
   requests,
   diagnostics,
   now,
@@ -2026,6 +2075,9 @@ function QueueWorkspace({
   onReorderRequests,
   onDeleteRequest,
   onUpdateProjectDefaults,
+  onCreateQueueTab,
+  onRenameQueueTab,
+  onDeleteQueueTab,
   onKickQueue,
   onError,
   error,
@@ -2035,6 +2087,7 @@ function QueueWorkspace({
 }: {
   config: ApiConfig
   selectedProject?: Project
+  queueTabs: QueueTab[]
   requests: CodexRequest[]
   diagnostics: QueueDiagnostics | null
   now: number
@@ -2048,6 +2101,9 @@ function QueueWorkspace({
   onReorderRequests: (projectId: string, requestIds: string[]) => Promise<void>
   onDeleteRequest: (id: string) => void
   onUpdateProjectDefaults: (project: Project, defaults: ProjectModelDefaults) => Promise<void>
+  onCreateQueueTab: (projectId: string, name: string) => Promise<QueueTab>
+  onRenameQueueTab: (id: string, name: string) => Promise<QueueTab>
+  onDeleteQueueTab: (id: string) => Promise<void>
   onKickQueue: () => Promise<void>
   onError: (cause: unknown) => void
   error: string
@@ -2056,7 +2112,15 @@ function QueueWorkspace({
   onOpenGit: () => void
 }) {
   const [activeTab, setActiveTab] = useState<'queue' | 'history' | 'terminal'>('queue')
+  const [activeQueueTabId, setActiveQueueTabId] = useState<string | null>(null)
+  const [queueTabModal, setQueueTabModal] = useState<'create' | 'rename' | null>(null)
+  const [queueTabToDelete, setQueueTabToDelete] = useState<QueueTab | null>(null)
   const [editingRequest, setEditingRequest] = useState<CodexRequest | null>(null)
+  const projectQueueTabs = useMemo(() => queueTabs
+    .filter((tab) => tab.projectId === selectedProject?.id)
+    .toSorted((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)),
+  [queueTabs, selectedProject?.id])
+  const activeQueueTab = projectQueueTabs.find((tab) => tab.id === activeQueueTabId) ?? null
   const scopedRequests = useMemo(() => {
     if (!selectedProject) {
       return []
@@ -2067,18 +2131,35 @@ function QueueWorkspace({
       .toSorted((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
   }, [requests, selectedProject])
 
-  const historyRequests = useMemo(() => scopedRequests
-    .filter((request) => !request.deletedAt && request.status === 'Succeeded')
-    .toSorted((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt)),
-  [scopedRequests])
-  const queueRequests = useMemo(() => scopedRequests
+  const projectQueueRequests = useMemo(() => scopedRequests
     .filter((request) => !request.deletedAt && !request.archivedAt)
     .toSorted(compareQueueRequests),
   [scopedRequests])
+  const historyRequests = useMemo(() => scopedRequests
+    .filter((request) => !request.deletedAt && request.status === 'Succeeded' && (request.queueTabId ?? null) === activeQueueTabId)
+    .toSorted((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt)),
+  [activeQueueTabId, scopedRequests])
+  const queueRequests = useMemo(() => projectQueueRequests
+    .filter((request) => (request.queueTabId ?? null) === activeQueueTabId)
+    .toSorted(compareQueueRequests),
+  [activeQueueTabId, projectQueueRequests])
   const deletedRequests = useMemo(() => scopedRequests
-    .filter((request) => request.deletedAt)
+    .filter((request) => request.deletedAt && (request.queueTabId ?? null) === activeQueueTabId)
     .toSorted((left, right) => Date.parse(right.deletedAt ?? right.createdAt) - Date.parse(left.deletedAt ?? left.createdAt)),
-  [scopedRequests])
+  [activeQueueTabId, scopedRequests])
+
+  useEffect(() => {
+    setActiveQueueTabId(null)
+    setEditingRequest(null)
+    setQueueTabModal(null)
+    setQueueTabToDelete(null)
+  }, [selectedProject?.id])
+
+  useEffect(() => {
+    if (activeQueueTabId && !projectQueueTabs.some((tab) => tab.id === activeQueueTabId)) {
+      setActiveQueueTabId(null)
+    }
+  }, [activeQueueTabId, projectQueueTabs])
 
   useEffect(() => {
     if (editingRequest && !queueRequests.some((request) => request.id === editingRequest.id && request.status === 'Queued')) {
@@ -2093,7 +2174,8 @@ function QueueWorkspace({
           <QueueComposer
             config={config}
             selectedProject={selectedProject}
-            requests={queueRequests}
+            queueTabId={activeQueueTabId}
+            requests={projectQueueRequests}
             activeTab={activeTab}
             editingRequest={editingRequest}
             error={error}
@@ -2108,6 +2190,19 @@ function QueueWorkspace({
             onUpdateProjectDefaults={onUpdateProjectDefaults}
             onError={onError}
           />
+          <QueueContextTabs
+            tabs={projectQueueTabs}
+            activeTabId={activeQueueTabId}
+            onSelect={(tabId) => {
+              setActiveQueueTabId(tabId)
+              setEditingRequest(null)
+            }}
+            onCreate={() => setQueueTabModal('create')}
+            onRename={() => setQueueTabModal('rename')}
+            onDelete={() => {
+              if (activeQueueTab) setQueueTabToDelete(activeQueueTab)
+            }}
+          />
           {activeTab === 'queue' ? (
             <QueueList
               requests={queueRequests}
@@ -2119,14 +2214,53 @@ function QueueWorkspace({
               onArchive={onArchiveRequest}
               onArchiveAll={onArchiveRequests}
               onEdit={(request) => setEditingRequest(request)}
-              onReorder={(requestIds) => onReorderRequests(selectedProject.id, requestIds)}
+              onReorder={(requestIds) => {
+                const reorderedVisibleIds = [...requestIds]
+                let visibleIndex = 0
+                const mergedRequestIds = projectQueueRequests
+                  .filter((request) => request.status === 'Queued' && !isOptimisticRequest(request.id))
+                  .toSorted(compareQueueRequests)
+                  .map((request) => (request.queueTabId ?? null) === activeQueueTabId
+                    ? reorderedVisibleIds[visibleIndex++] ?? request.id
+                    : request.id)
+                return onReorderRequests(selectedProject.id, mergedRequestIds)
+              }}
               onDelete={onDeleteRequest}
               onKickQueue={onKickQueue}
             />
           ) : activeTab === 'history' ? (
             <RequestHistory requests={historyRequests} deletedRequests={deletedRequests} now={now} onDelete={onDeleteRequest} />
           ) : (
-            <ProjectTerminal project={selectedProject} requests={queueRequests} now={now} />
+            <ProjectTerminal project={selectedProject} requests={projectQueueRequests} now={now} />
+          )}
+          {queueTabModal && (
+            <QueueTabNameModal
+              mode={queueTabModal}
+              initialName={queueTabModal === 'rename' ? activeQueueTab?.name ?? '' : ''}
+              onCancel={() => setQueueTabModal(null)}
+              onSubmit={async (name) => {
+                if (queueTabModal === 'create') {
+                  const created = await onCreateQueueTab(selectedProject.id, name)
+                  setActiveQueueTabId(created.id)
+                } else if (activeQueueTab) {
+                  await onRenameQueueTab(activeQueueTab.id, name)
+                }
+                setQueueTabModal(null)
+              }}
+            />
+          )}
+          {queueTabToDelete && (
+            <ConfirmDialog
+              title="Delete tab?"
+              description={<strong>{queueTabToDelete.name}</strong>}
+              confirmLabel="Delete"
+              onCancel={() => setQueueTabToDelete(null)}
+              onConfirm={async () => {
+                await onDeleteQueueTab(queueTabToDelete.id)
+                setQueueTabToDelete(null)
+                setActiveQueueTabId(null)
+              }}
+            />
           )}
         </>
       ) : (
@@ -2139,6 +2273,119 @@ function QueueWorkspace({
         </GlassPanel>
       )}
     </div>
+  )
+}
+
+function QueueContextTabs({
+  tabs,
+  activeTabId,
+  onSelect,
+  onCreate,
+  onRename,
+  onDelete,
+}: {
+  tabs: QueueTab[]
+  activeTabId: string | null
+  onSelect: (tabId: string | null) => void
+  onCreate: () => void
+  onRename: () => void
+  onDelete: () => void
+}) {
+  return (
+    <div className="queue-context-toolbar">
+      <div className="queue-context-tabs" role="tablist" aria-label="Queue contexts">
+        <button
+          type="button"
+          role="tab"
+          aria-label="Base queue"
+          aria-selected={activeTabId === null}
+          className={activeTabId === null ? 'active' : ''}
+          onClick={() => onSelect(null)}
+        >
+          <ClipboardList size={15} />
+        </button>
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            aria-selected={activeTabId === tab.id}
+            className={activeTabId === tab.id ? 'active' : ''}
+            onClick={() => onSelect(tab.id)}
+          >
+            <span className="truncate">{tab.name}</span>
+          </button>
+        ))}
+        <button type="button" aria-label="Create tab" title="Create tab" onClick={onCreate}>
+          <Plus size={15} />
+        </button>
+      </div>
+      {activeTabId && (
+        <div className="queue-context-actions">
+          <GlassButton variant="ghost" size="icon" type="button" aria-label="Rename tab" title="Rename tab" onClick={onRename}>
+            <Pencil size={14} />
+          </GlassButton>
+          <GlassButton variant="ghost" size="icon" type="button" aria-label="Delete tab" title="Delete tab" onClick={onDelete}>
+            <Trash2 size={14} />
+          </GlassButton>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function QueueTabNameModal({
+  mode,
+  initialName,
+  onCancel,
+  onSubmit,
+}: {
+  mode: 'create' | 'rename'
+  initialName: string
+  onCancel: () => void
+  onSubmit: (name: string) => Promise<void>
+}) {
+  const [name, setName] = useState(initialName)
+  const [saving, setSaving] = useState(false)
+  const [submitError, setSubmitError] = useState('')
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    const trimmedName = name.trim()
+    if (!trimmedName || saving) return
+
+    setSubmitError('')
+    setSaving(true)
+    try {
+      await onSubmit(trimmedName)
+    } catch (cause) {
+      setSubmitError(cause instanceof Error ? cause.message : 'Request failed.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Modal title={mode === 'create' ? 'New tab' : 'Rename tab'} icon={<Pencil size={18} />} onClose={onCancel}>
+      <form className="form-grid" onSubmit={(event) => void submit(event)}>
+        <GlassInput
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          autoFocus
+          required
+          maxLength={80}
+          aria-label="Tab name"
+        />
+        {submitError && <span className="error-text">{submitError}</span>}
+        <div className="button-row modal-form-actions">
+          <GlassButton variant="ghost" type="button" onClick={onCancel} disabled={saving}>Cancel</GlassButton>
+          <GlassButton variant="primary" type="submit" disabled={saving || !name.trim() || (mode === 'rename' && name.trim() === initialName)}>
+            {mode === 'create' ? <Plus size={14} /> : <Check size={14} />}
+            {mode === 'create' ? 'Create' : 'Rename'}
+          </GlassButton>
+        </div>
+      </form>
+    </Modal>
   )
 }
 
@@ -2241,6 +2488,7 @@ function ProjectDetailsModal({
 function QueueComposer({
   config,
   selectedProject,
+  queueTabId,
   requests,
   activeTab,
   editingRequest,
@@ -2258,6 +2506,7 @@ function QueueComposer({
 }: {
   config: ApiConfig
   selectedProject: Project
+  queueTabId: string | null
   requests: CodexRequest[]
   activeTab: 'queue' | 'history' | 'terminal'
   editingRequest: CodexRequest | null
@@ -2358,6 +2607,7 @@ function QueueComposer({
         const previewRequest: CodexRequest = {
           id: previewId,
           projectId: selectedProject.id,
+          queueTabId,
           projectName: selectedProject.name,
           projectPath: selectedProject.path,
           machineId: selectedProject.machineId,
@@ -2387,6 +2637,7 @@ function QueueComposer({
 
         const createdRequest = await api.createRequest({
           projectId: selectedProject.id,
+          queueTabId,
           ...payload,
           attachments: attachmentPayload(attachments),
         })
@@ -2573,9 +2824,6 @@ function QueueComposer({
                 <span className="commit-toggle-icon"><Check size={12} /></span>
                 <span>Separate commit session</span>
               </label>
-            </div>
-            <div className="meta commit-options-help">
-              New queued requests start a fresh Codex CLI session. Only retries/resumes of the same queued request reuse its prior Codex context; enabling a separate commit session starts another fresh session for the commit step.
             </div>
           </div>
           <div className="button-row">

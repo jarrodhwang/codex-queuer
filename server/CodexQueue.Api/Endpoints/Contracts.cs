@@ -56,8 +56,20 @@ public sealed record SaveProjectRequest(
     bool? DefaultGenerateCommit,
     bool? DefaultSeparateCommitSession);
 
+public sealed record QueueTabDto(
+    Guid Id,
+    Guid ProjectId,
+    string Name,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record CreateQueueTabRequest(Guid ProjectId, string Name);
+
+public sealed record RenameQueueTabRequest(string Name);
+
 public sealed record CreateQueueRequest(
     Guid ProjectId,
+    Guid? QueueTabId,
     string Prompt,
     IReadOnlyList<QueueAttachmentDto>? Attachments,
     string Model,
@@ -110,6 +122,8 @@ public sealed record CodexRunDto(
 public sealed record CodexRequestDto(
     Guid Id,
     Guid ProjectId,
+    Guid? QueueTabId,
+    string? QueueTabName,
     string ProjectName,
     string ProjectPath,
     Guid MachineId,

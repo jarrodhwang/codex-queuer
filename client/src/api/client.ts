@@ -12,6 +12,7 @@ import type {
   MachineTest,
   MachineRateLimits,
   Project,
+  QueueTab,
   QueueDiagnostics,
   SaveMachineRequest,
   SaveProjectRequest,
@@ -110,6 +111,13 @@ export const api = {
       body: JSON.stringify(project),
     }),
   deleteProject: (id: string) => apiFetch<void>(`/projects/${id}`, { method: 'DELETE' }),
+  queueTabs: (projectId?: string) =>
+    apiFetch<QueueTab[]>(projectId ? `/queue-tabs?projectId=${encodeURIComponent(projectId)}` : '/queue-tabs'),
+  createQueueTab: (projectId: string, name: string) =>
+    apiFetch<QueueTab>('/queue-tabs', { method: 'POST', body: JSON.stringify({ projectId, name }) }),
+  renameQueueTab: (id: string, name: string) =>
+    apiFetch<QueueTab>(`/queue-tabs/${id}`, { method: 'PUT', body: JSON.stringify({ name }) }),
+  deleteQueueTab: (id: string) => apiFetch<void>(`/queue-tabs/${id}`, { method: 'DELETE' }),
   requests: (projectId?: string, includeDeleted = false) => {
     const params = new URLSearchParams()
     if (projectId) params.set('projectId', projectId)

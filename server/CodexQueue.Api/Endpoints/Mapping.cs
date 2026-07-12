@@ -38,10 +38,20 @@ public static class Mapping
             project.CreatedAt,
             project.UpdatedAt);
 
+    public static QueueTabDto ToDto(this QueueTab tab) =>
+        new(
+            tab.Id,
+            tab.ProjectId,
+            tab.Name,
+            tab.CreatedAt,
+            tab.UpdatedAt);
+
     public static CodexRequestDto ToDto(this CodexRequest request, bool includeRunOutput = true) =>
         new(
             request.Id,
             request.ProjectId,
+            request.QueueTabId,
+            request.QueueTab?.Name,
             request.Project?.Name ?? "",
             request.Project?.Path ?? "",
             request.MachineId,

@@ -1444,6 +1444,75 @@
   box-shadow: inset 0 1px 0 var(--glass-edge), 0 3px 10px rgba(90, 200, 250, 0.16);
 }
 
+.queue-context-toolbar {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.queue-context-tabs {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.48);
+  border-radius: 8px;
+  background: var(--glass-bg);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 8px 20px rgba(15, 23, 42, 0.06);
+  scrollbar-width: thin;
+}
+
+.queue-context-tabs button {
+  min-width: 32px;
+  min-height: 30px;
+  max-width: 220px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 0 10px;
+}
+
+.queue-context-tabs button.active {
+  background: linear-gradient(145deg, rgba(224, 242, 254, 0.72), rgba(255, 255, 255, 0.58));
+  color: var(--text-strong);
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 3px 10px rgba(90, 200, 250, 0.18);
+}
+
+.queue-context-tabs button:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+}
+
+.queue-context-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.queue-context-actions .glass-button--icon {
+  width: 32px;
+  height: 32px;
+}
+
+.modal-form-actions {
+  justify-content: flex-end;
+}
+
 .queue-workbench {
   min-height: 0;
   flex: 1 1 auto;
@@ -3531,6 +3600,14 @@
     white-space: normal;
   }
 
+  .queue-context-toolbar {
+    align-items: stretch;
+  }
+
+  .queue-context-tabs {
+    flex: 1 1 auto;
+  }
+
   .button-row,
   .sidebar-actions,
   .request-actions,
@@ -4780,6 +4857,7 @@
   .body-hidden-count,
   .segmented-radio,
   .workspace-tabs,
+  .queue-context-tabs,
   .folder-picker,
   .run-usage-limit
 ) {
@@ -4794,6 +4872,7 @@
   .tree-row.selected,
   .file-tab.active,
   .workspace-tabs button.active,
+  .queue-context-tabs button.active,
   .segmented-radio label.active,
   .commit-toggle.active
 ) {

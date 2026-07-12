@@ -121,6 +121,9 @@ public sealed class QueueWorker(
             await db.Requests
                 .Where(x => x.ProjectId == projectId)
                 .ExecuteDeleteAsync(cancellationToken);
+            await db.QueueTabs
+                .Where(x => x.ProjectId == projectId)
+                .ExecuteDeleteAsync(cancellationToken);
             db.Projects.Remove(project);
             await db.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
@@ -500,6 +503,7 @@ public sealed class QueueWorker(
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             request = await db.Requests
                 .Include(x => x.Project).ThenInclude(x => x!.Machine)
+                .Include(x => x.QueueTab)
                 .Include(x => x.Machine)
                 .Include(x => x.Runs)
                 .FirstAsync(x => x.Id == requestId, cancellationToken);
@@ -554,7 +558,7 @@ public sealed class QueueWorker(
                 run.Model,
                 run.ModelEffort,
                 run.ModelSpeed,
-                null,
+                request.QueueTab?.CodexSessionId,
                 attachments.ImagePaths,
                 prompt,
                 request.GenerateCommit && !request.SeparateCommitSession,
@@ -1091,6 +1095,7 @@ public sealed class QueueWorker(
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var request = await db.Requests
             .Include(x => x.Project)
+            .Include(x => x.QueueTab)
             .Include(x => x.Runs)
             .FirstAsync(x => x.Id == requestId, cancellationToken);
         var run = runId == Guid.Empty
@@ -1104,6 +1109,11 @@ public sealed class QueueWorker(
 
         run.CommandPreview = result.CommandPreview;
         run.CodexSessionId = sessionId;
+        if (kind == RunKind.Request && request.QueueTab is not null && !string.IsNullOrWhiteSpace(sessionId))
+        {
+            request.QueueTab.CodexSessionId = sessionId;
+            request.QueueTab.UpdatedAt = DateTimeOffset.UtcNow;
+        }
         run.ExitCode = result.ExitCode;
         run.FinishedAt = DateTimeOffset.UtcNow;
         run.Status = result.Success ? QueueStatus.Succeeded : QueueStatus.Failed;
@@ -1329,12 +1339,18 @@ public sealed class QueueWorker(
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         request = await db.Requests
+            .Include(x => x.QueueTab)
             .Include(x => x.Runs)
             .FirstAsync(x => x.Id == request.Id, cancellationToken);
         run = GetLatestRunOfKind(request.Runs, kind) ?? throw new InvalidOperationException("Request run was not found.");
         var finishedAt = DateTimeOffset.UtcNow;
         run.CommandPreview = result.CommandPreview;
         run.CodexSessionId = result.CodexSessionId ?? run.CodexSessionId;
+        if (kind == RunKind.Request && request.QueueTab is not null && !string.IsNullOrWhiteSpace(run.CodexSessionId))
+        {
+            request.QueueTab.CodexSessionId = run.CodexSessionId;
+            request.QueueTab.UpdatedAt = DateTimeOffset.UtcNow;
+        }
         run.ExitCode = result.ExitCode;
 
         SetUsageLimitedState(request, metadata, finishedAt);

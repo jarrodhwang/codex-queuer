@@ -12,7 +12,10 @@ public static class DbInitializer
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("DbInitializer");
         await db.Database.EnsureCreatedAsync(cancellationToken);
+        await EnsureQueueTabsTableAsync(db, cancellationToken);
         await EnsureColumnAsync(db, "Machines", "Platform", "ALTER TABLE \"Machines\" ADD COLUMN \"Platform\" TEXT NOT NULL DEFAULT 'Auto'", cancellationToken);
+        await EnsureColumnAsync(db, "Requests", "QueueTabId", "ALTER TABLE \"Requests\" ADD COLUMN \"QueueTabId\" TEXT NULL REFERENCES \"QueueTabs\" (\"Id\") ON DELETE SET NULL", cancellationToken);
+        await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_Requests_QueueTabId\" ON \"Requests\" (\"QueueTabId\")", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "ModelEffort", "ALTER TABLE \"Requests\" ADD COLUMN \"ModelEffort\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "ModelSpeed", "ALTER TABLE \"Requests\" ADD COLUMN \"ModelSpeed\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "QueueOrder", "ALTER TABLE \"Requests\" ADD COLUMN \"QueueOrder\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
@@ -210,6 +213,26 @@ public static class DbInitializer
         }
 
         await db.Database.ExecuteSqlRawAsync(alterSql, cancellationToken);
+    }
+
+    private static async Task EnsureQueueTabsTableAsync(AppDbContext db, CancellationToken cancellationToken)
+    {
+        await db.Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS "QueueTabs" (
+                "Id" TEXT NOT NULL CONSTRAINT "PK_QueueTabs" PRIMARY KEY,
+                "ProjectId" TEXT NOT NULL,
+                "Name" TEXT COLLATE NOCASE NOT NULL,
+                "CodexSessionId" TEXT NULL,
+                "CreatedAt" TEXT NOT NULL,
+                "UpdatedAt" TEXT NOT NULL,
+                CONSTRAINT "FK_QueueTabs_Projects_ProjectId" FOREIGN KEY ("ProjectId") REFERENCES "Projects" ("Id") ON DELETE CASCADE
+            )
+            """,
+            cancellationToken);
+        await db.Database.ExecuteSqlRawAsync(
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"IX_QueueTabs_ProjectId_Name\" ON \"QueueTabs\" (\"ProjectId\", \"Name\")",
+            cancellationToken);
     }
 
     private static void ApplyDefaultMachine(TargetMachine machine, TargetMachine defaults)

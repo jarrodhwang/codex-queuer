@@ -13,6 +13,7 @@ type ConfirmDialogProps = {
 
 export function ConfirmDialog({ title, description, confirmLabel, onConfirm, onCancel }: ConfirmDialogProps) {
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
   const cancelRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
@@ -26,9 +27,12 @@ export function ConfirmDialog({ title, description, confirmLabel, onConfirm, onC
 
   const confirm = async () => {
     if (busy) return
+    setError('')
     setBusy(true)
     try {
       await onConfirm()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Request failed.')
     } finally {
       setBusy(false)
     }
@@ -43,6 +47,7 @@ export function ConfirmDialog({ title, description, confirmLabel, onConfirm, onC
         <div className="confirm-dialog-content">
           <h2 id="confirm-dialog-title">{title}</h2>
           <div id="confirm-dialog-description" className="muted">{description}</div>
+          {error && <div className="error-text">{error}</div>}
           <div className="button-row confirm-dialog-actions">
             <GlassButton ref={cancelRef} variant="ghost" type="button" onClick={onCancel} disabled={busy}>Cancel</GlassButton>
             <GlassButton variant="danger" type="button" onClick={() => void confirm()} disabled={busy}>

@@ -37,6 +37,20 @@ public sealed class Project
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 
     public ICollection<CodexRequest> Requests { get; set; } = new List<CodexRequest>();
+    public ICollection<QueueTab> QueueTabs { get; set; } = new List<QueueTab>();
+}
+
+public sealed class QueueTab
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ProjectId { get; set; }
+    public Project? Project { get; set; }
+    public string Name { get; set; } = "";
+    public string? CodexSessionId { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public ICollection<CodexRequest> Requests { get; set; } = new List<CodexRequest>();
 }
 
 public sealed class CodexRequest
@@ -44,6 +58,8 @@ public sealed class CodexRequest
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid ProjectId { get; set; }
     public Project? Project { get; set; }
+    public Guid? QueueTabId { get; set; }
+    public QueueTab? QueueTab { get; set; }
     public Guid MachineId { get; set; }
     public TargetMachine? Machine { get; set; }
     public string Prompt { get; set; } = "";

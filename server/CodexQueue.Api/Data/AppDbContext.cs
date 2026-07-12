@@ -7,6 +7,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
 {
     public DbSet<TargetMachine> Machines => Set<TargetMachine>();
     public DbSet<Project> Projects => Set<Project>();
+    public DbSet<QueueTab> QueueTabs => Set<QueueTab>();
     public DbSet<CodexRequest> Requests => Set<CodexRequest>();
     public DbSet<CodexRun> Runs => Set<CodexRun>();
 
@@ -66,6 +67,10 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
                 .WithMany(x => x.Requests)
                 .HasForeignKey(x => x.ProjectId)
                 .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(x => x.QueueTab)
+                .WithMany(x => x.Requests)
+                .HasForeignKey(x => x.QueueTabId)
+                .OnDelete(DeleteBehavior.SetNull);
             entity.HasOne(x => x.Machine)
                 .WithMany()
                 .HasForeignKey(x => x.MachineId)
@@ -74,6 +79,17 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.HasIndex(x => new { x.ProjectId, x.QueueOrder });
             entity.HasIndex(x => x.Status);
             entity.HasIndex(x => x.DeletedAt);
+        });
+
+        modelBuilder.Entity<QueueTab>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(80).UseCollation("NOCASE").IsRequired();
+            entity.Property(x => x.CodexSessionId).HasMaxLength(80);
+            entity.HasOne(x => x.Project)
+                .WithMany(x => x.QueueTabs)
+                .HasForeignKey(x => x.ProjectId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => new { x.ProjectId, x.Name }).IsUnique();
         });
 
         modelBuilder.Entity<CodexRun>(entity =>

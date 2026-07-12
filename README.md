@@ -76,18 +76,19 @@ Codex runs over Windows SSH use `danger-full-access` because both native Windows
 2. The worker processes each project's queue in order while running different project queues concurrently.
 3. The worker runs `codex exec --json` on the project machine.
    Prompts are streamed over stdin instead of placed in process arguments, which supports long requests on Windows and avoids exposing prompt text in process listings.
-4. If a prior request run for the same queued item produced a Codex `thread_id`, later retries or resumes continue with `codex exec resume`, so that same queued run keeps its Codex conversation context.
-5. The browser terminal is a separate reusable shell session per project and machine. It preserves shell state while the terminal stays open, but it does not automatically attach queued `codex exec` jobs to that terminal chat history.
-6. If commit generation is enabled and the request succeeds, a second Codex session runs with the commit model.
-7. Request and commit output are stored as separate runs and displayed together under the request details.
+4. Requests in the icon-only base tab keep the original behavior and start independent Codex threads.
+5. Named queue tabs keep one Codex thread per project tab. After the first request establishes the thread, later requests in that tab continue it with `codex exec resume`.
+6. The browser terminal is a separate reusable shell session per project and machine. It preserves shell state while the terminal stays open, but it does not automatically attach queued `codex exec` jobs to that terminal chat history.
+7. If commit generation is enabled and the request succeeds, a second Codex session runs with the commit model.
+8. Request and commit output are stored as separate runs and displayed together under the request details.
 
 ## Codex Session Model
 
 - Queued work does not talk to the Codex desktop app session. It launches Codex CLI directly on the target machine.
-- A new queued request starts a fresh Codex CLI thread. It does not inherit the browser terminal session or any Codex Desktop chat context.
-- Only a retry or resume of that same queued request reuses context, and only if an earlier attempt already returned a `thread_id`.
+- A request in the base queue starts a fresh Codex CLI thread. It does not inherit the browser terminal session or any Codex Desktop chat context.
+- Named tabs persist their own Codex CLI thread ID and reuse it for later requests in that tab. Tabs are isolated by project.
 - Separate commit session means exactly that: the follow-up commit prompt runs in a different Codex session and cannot see the earlier request chat unless you disable separate commit sessions.
-- If you need Codex to see earlier discussion, put that context in the queued prompt or resume the same queued request instead of starting a brand new one.
+- Deleting an inactive named tab preserves its request records by moving them to the base view. Tabs with active requests must be completed, cancelled, or cleared first.
 
 ## Security Notes
 
