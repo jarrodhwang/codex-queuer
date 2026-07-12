@@ -6,11 +6,12 @@ type GlassGaugeProps = {
   value: number | null
   className?: string
   tone?: 'default' | 'limited'
+  hideCaption?: boolean
 }
 
 const radius = 43
 
-export function GlassGauge({ label, value, className, tone = 'default' }: GlassGaugeProps) {
+export function GlassGauge({ label, value, className, tone = 'default', hideCaption = false }: GlassGaugeProps) {
   const gradientId = useId().replace(/:/g, '')
   const percentage = value === null ? null : Math.round(Math.max(0, Math.min(100, value)))
   const displayValue = percentage === null ? '—' : `${percentage}%`
@@ -47,7 +48,7 @@ export function GlassGauge({ label, value, className, tone = 'default' }: GlassG
       </svg>
       <span className="ein-gauge__core">
         <span className="ein-gauge__value">{displayValue}</span>
-        <span className="ein-gauge__caption">{label}</span>
+        {!hideCaption && <span className="ein-gauge__caption">{label}</span>}
       </span>
     </div>
   )

@@ -1437,7 +1437,7 @@ function UsageLimitModal({ machines, requests, now, onClose }: { machines: Machi
   }, [machines])
 
   return (
-    <Modal title="Codex usage" icon={<GaugeIcon size={18} />} onClose={onClose}>
+    <Modal title="Codex usage" icon={<GaugeIcon size={18} />} onClose={onClose} wide>
       <div className="usage-modal">
         <UsageLimitSidebarPanel machines={machines} usage={usage} loading={loading} requests={requests} now={now} />
       </div>
@@ -1481,27 +1481,23 @@ function MachineUsageSection({ snapshot }: { snapshot?: MachineRateLimits }) {
 }
 
 function RateLimitSection({ limit }: { limit: RateLimit }) {
-  const windows = [
-    ['Current window', limit.primary],
-    ['Secondary window', limit.secondary],
-  ] as const
+  const windows = [limit.primary, limit.secondary]
   return <section className={`usage-limit ${limit.rateLimitReachedType ? 'usage-limit--limited' : ''}`}>
     <div className="usage-limit-head"><span>{limit.name}</span>{limit.rateLimitReachedType && <span>Limited</span>}</div>
     <div className="usage-window-grid">
-      {windows.map(([label, window]) => window && <UsageWindow key={label} label={label} window={window} limited={Boolean(limit.rateLimitReachedType)} />)}
+      {windows.map((window, index) => window && <UsageWindow key={index} window={window} limited={Boolean(limit.rateLimitReachedType)} />)}
     </div>
     {!limit.primary && !limit.secondary && <div className="usage-empty-state">No active windows</div>}
   </section>
 }
 
-function UsageWindow({ label, window, limited }: { label: string; window: NonNullable<RateLimit['primary']>; limited: boolean }) {
+function UsageWindow({ window, limited }: { window: NonNullable<RateLimit['primary']>; limited: boolean }) {
   const remaining = Math.max(0, 100 - window.usedPercent)
   const reset = window.resetsAt ? formatDate(new Date(window.resetsAt * 1000).toISOString()) : 'reset time unknown'
   const duration = window.windowDurationMins ? ` · ${formatWindowDuration(window.windowDurationMins)}` : ''
   return <div className="usage-window">
-    <GlassGauge label={label} value={remaining} tone={limited ? 'limited' : 'default'} />
+    <GlassGauge label="Usage remaining" value={remaining} tone={limited ? 'limited' : 'default'} hideCaption />
     <div className="usage-window-detail">
-      <strong>{label}</strong>
       <span>{remaining}% left{duration}</span>
       <div className="usage-window-reset">
         <span>Resets</span>
@@ -1532,9 +1528,9 @@ function PausedUsageSection({ buckets }: { buckets: UsageBucket[] }) {
 }
 
 function formatWindowDuration(minutes: number) {
-  if (minutes % 1440 === 0) return `${minutes / 1440}d window`
-  if (minutes % 60 === 0) return `${minutes / 60}h window`
-  return `${minutes}m window`
+  if (minutes % 1440 === 0) return `${minutes / 1440}d`
+  if (minutes % 60 === 0) return `${minutes / 60}h`
+  return `${minutes}m`
 }
 
 type UsageBucket = {
