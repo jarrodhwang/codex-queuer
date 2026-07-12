@@ -620,34 +620,42 @@
 }
 
 .usage-meter {
-  height: 8px;
-  overflow: hidden;
-  border: 1px solid rgba(15, 23, 42, 0.08);
+  --usage-ring: 7px;
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 54px;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: conic-gradient(var(--accent) var(--usage-percent), rgba(15, 23, 42, 0.1) 0);
+  color: var(--text-strong);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 900;
+}
+
+.usage-meter::before {
+  position: absolute;
+  inset: var(--usage-ring);
   border-radius: 999px;
-  background: rgba(15, 23, 42, 0.08);
+  background: var(--panel);
+  content: '';
 }
 
 .usage-meter span {
-  display: block;
-  height: 100%;
-  min-width: 2px;
-  border-radius: inherit;
-  background: linear-gradient(90deg, var(--accent), var(--accent-cool));
+  position: relative;
+  z-index: 1;
 }
 
-.usage-meter.unknown span {
-  width: 100% !important;
-  background: repeating-linear-gradient(
-    90deg,
-    rgba(100, 116, 139, 0.28),
-    rgba(100, 116, 139, 0.28) 5px,
-    rgba(100, 116, 139, 0.12) 5px,
-    rgba(100, 116, 139, 0.12) 10px
+.usage-meter.unknown {
+  background: repeating-conic-gradient(
+    rgba(100, 116, 139, 0.32) 0deg 10deg,
+    rgba(100, 116, 139, 0.12) 10deg 20deg
   );
 }
 
-.usage-sidebar-item.limited .usage-meter span {
-  background: linear-gradient(90deg, var(--accent), var(--accent-cool));
+.usage-sidebar-item.limited .usage-meter {
+  background: conic-gradient(var(--accent-cool) var(--usage-percent), rgba(15, 23, 42, 0.1) 0);
 }
 
 .machine-group {
@@ -4805,7 +4813,6 @@
 }
 
 .progress-line span,
-.usage-meter span,
 .progress-line--queued span,
 .progress-line--running span,
 .progress-line--usagelimited span {
@@ -5528,7 +5535,7 @@
   color: #a7f3d0;
 }
 
-:root[data-theme='dark'] :is(.usage-meter, .git-diff-stat-change) {
+:root[data-theme='dark'] .git-diff-stat-change {
   border-color: rgba(148, 163, 184, 0.22);
   background: rgba(2, 6, 23, 0.48);
 }

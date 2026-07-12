@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ClipboardEvent, DragEvent, FormEvent, ReactNode } from 'react'
+import type { ClipboardEvent, CSSProperties, DragEvent, FormEvent, ReactNode } from 'react'
 import { createPortal, flushSync } from 'react-dom'
 import {
   ArrowDown,
@@ -1398,28 +1398,33 @@ function UsageLimitModal({ machines, requests, now, onClose }: { machines: Machi
 
   useEffect(() => {
     let cancelled = false
-    const load = () => {
+    const load = async () => {
       setLoading(true)
-      void Promise.all(machines.map(async (machine) => {
+      await Promise.allSettled(machines.map(async (machine) => {
         try {
-          return await api.machineUsage(machine.id)
+          const snapshot = await api.machineUsage(machine.id)
+          if (!cancelled) {
+            setUsage((current) => ({ ...current, [machine.id]: snapshot }))
+          }
         } catch (cause) {
-          return {
+          const snapshot: MachineRateLimits = {
             machineId: machine.id,
             machineName: machine.name,
             available: false,
             error: cause instanceof Error ? cause.message : 'Could not read Codex usage.',
             limits: [],
           }
+          if (!cancelled) {
+            setUsage((current) => ({ ...current, [machine.id]: snapshot }))
+          }
         }
-      })).then((snapshots) => {
-        if (cancelled) return
-        setUsage(Object.fromEntries(snapshots.map((snapshot) => [snapshot.machineId, snapshot])))
+      }))
+      if (!cancelled) {
         setLoading(false)
-      })
+      }
     }
-    load()
-    const refreshTimer = window.setInterval(load, 30_000)
+    void load()
+    const refreshTimer = window.setInterval(() => { void load() }, 30_000)
 
     return () => { cancelled = true; window.clearInterval(refreshTimer) }
   }, [machines])
@@ -1430,6 +1435,25 @@ function UsageLimitModal({ machines, requests, now, onClose }: { machines: Machi
         <UsageLimitSidebarPanel machines={machines} usage={usage} loading={loading} requests={requests} now={now} />
       </div>
     </Modal>
+  )
+}
+
+function UsageMeter({ label, percentLeft }: { label: string; percentLeft: number | null }) {
+  const percentage = percentLeft === null ? 0 : Math.round(Math.max(0, Math.min(100, percentLeft)))
+  const value = percentLeft === null ? '—' : `${percentage}%`
+
+  return (
+    <div
+      className={`usage-meter ${percentLeft === null ? 'unknown' : ''}`}
+      role="progressbar"
+      aria-label={`${label} ${percentLeft === null ? 'percentage unavailable' : `${percentage}% left`}`}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={percentLeft === null ? undefined : percentage}
+      style={{ '--usage-percent': `${percentage}%` } as CSSProperties}
+    >
+      <span>{value}</span>
+    </div>
   )
 }
 
@@ -1451,8 +1475,8 @@ function UsageLimitSidebarPanel({ machines, usage, loading, requests, now }: { m
       </div>
       <div className="usage-sidebar-list">
         {loading && <div className="usage-sidebar-loading" role="status"><RefreshCcw className="action-spinner" size={14} aria-hidden="true" /><span>Loading Codex usage…</span></div>}
-        {!loading && machines.length === 0 && <div className="meta">No machines configured.</div>}
-        {!loading && machines.map((machine) => (
+        {machines.length === 0 && <div className="meta">No machines configured.</div>}
+        {machines.map((machine) => usage[machine.id] && (
           <MachineUsageSection key={machine.id} snapshot={usage[machine.id]} />
         ))}
         {active && <div className="usage-section-title">Paused queue requests</div>}
@@ -1463,9 +1487,7 @@ function UsageLimitSidebarPanel({ machines, usage, loading, requests, now }: { m
               <span className="truncate">{bucket.label}</span>
               <span>{bucket.percentLeft === null ? bucket.status : `${bucket.percentLeft}% left`}</span>
             </div>
-            <div className={`usage-meter ${bucket.percentLeft === null ? 'unknown' : ''}`} aria-label={`${bucket.label} ${bucket.percentLeft ?? 'unknown'} percent left`}>
-              <span style={{ width: `${bucket.percentLeft ?? 0}%` }} />
-            </div>
+            <UsageMeter label={bucket.label} percentLeft={bucket.percentLeft} />
             <div className="meta truncate">{bucket.message}</div>
             {bucket.detail && <div className="meta truncate">{bucket.detail}</div>}
           </div>
@@ -1506,7 +1528,7 @@ function UsageWindow({ label, window }: { label: string; window: NonNullable<Rat
   const duration = window.windowDurationMins ? ` · ${formatWindowDuration(window.windowDurationMins)}` : ''
   return <div className="usage-window">
     <div className="usage-row-head"><span>{label}{duration}</span><span>{remaining}% left</span></div>
-    <div className="usage-meter" aria-label={`${label} ${remaining}% left`}><span style={{ width: `${remaining}%` }} /></div>
+    <UsageMeter label={label} percentLeft={remaining} />
     <div className="meta">resets {reset}</div>
   </div>
 }
