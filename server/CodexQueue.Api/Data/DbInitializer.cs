@@ -39,6 +39,7 @@ public static class DbInitializer
         await EnsureColumnAsync(db, "Projects", "DefaultCommitModelSpeed", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultCommitModelSpeed\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Projects", "DefaultGenerateCommit", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultGenerateCommit\" INTEGER NOT NULL DEFAULT 1", cancellationToken);
         await EnsureColumnAsync(db, "Projects", "DefaultSeparateCommitSession", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultSeparateCommitSession\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnAsync(db, "Projects", "SeparateQueuesByTab", "ALTER TABLE \"Projects\" ADD COLUMN \"SeparateQueuesByTab\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "ModelEffort", "ALTER TABLE \"Runs\" ADD COLUMN \"ModelEffort\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "ModelSpeed", "ALTER TABLE \"Runs\" ADD COLUMN \"ModelSpeed\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "CodexSessionId", "ALTER TABLE \"Runs\" ADD COLUMN \"CodexSessionId\" TEXT NULL", cancellationToken);

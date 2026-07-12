@@ -35,6 +35,7 @@ public static class Mapping
             project.DefaultCommitModelSpeed,
             project.DefaultGenerateCommit,
             project.DefaultSeparateCommitSession,
+            project.SeparateQueuesByTab,
             project.CreatedAt,
             project.UpdatedAt);
 

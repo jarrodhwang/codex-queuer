@@ -191,6 +191,7 @@ function projectSavePayload(project: Project, overrides: Partial<SaveProjectRequ
     defaultCommitModelSpeed: project.defaultCommitModelSpeed,
     defaultGenerateCommit: project.defaultGenerateCommit ?? true,
     defaultSeparateCommitSession: project.defaultSeparateCommitSession ?? false,
+    separateQueuesByTab: project.separateQueuesByTab ?? false,
     ...overrides,
   }
 }
@@ -694,6 +695,18 @@ function App() {
     }
   }
 
+  const updateProjectQueueMode = async (project: Project, separateQueuesByTab: boolean) => {
+    setError('')
+    try {
+      const updated = await api.saveProject(projectSavePayload(project, { separateQueuesByTab }), project.id)
+      setProjects((current) => current.map((item) => (item.id === updated.id ? updated : item)))
+      await loadLive()
+    } catch (cause) {
+      handleApiError(cause)
+      throw cause
+    }
+  }
+
   const removeProject = async (project: Project) => {
     setError('')
     try {
@@ -832,8 +845,11 @@ function App() {
 
   const reorderRequests = async (projectId: string, requestIds: string[]) => {
     setError('')
+    const separateQueuesByTab = projects.find((project) => project.id === projectId)?.separateQueuesByTab ?? false
+    const queueTabId = requests.find((request) => request.id === requestIds[0])?.queueTabId ?? null
     const priorityRequests = requests.filter((request) =>
       request.projectId === projectId &&
+      (!separateQueuesByTab || (request.queueTabId ?? null) === queueTabId) &&
       !request.deletedAt &&
       !request.archivedAt &&
       (request.status === 'Queued' || request.status === 'Running' || request.status === 'CancelRequested'),
@@ -908,11 +924,13 @@ function App() {
       finishedAt: null,
     }
     const target = requests.find((request) => request.id === id)
+    const separateQueuesByTab = projects.find((project) => project.id === target?.projectId)?.separateQueuesByTab ?? false
     const priorityRequests = target
       ? requests
           .map((request) => (request.id === id ? { ...request, ...optimisticUpdate } : request))
           .filter((request) =>
             request.projectId === target.projectId &&
+            (!separateQueuesByTab || (request.queueTabId ?? null) === (target.queueTabId ?? null)) &&
             !request.deletedAt &&
             !request.archivedAt &&
             (request.status === 'Queued' || request.status === 'Running' || request.status === 'CancelRequested'),
@@ -1008,6 +1026,7 @@ function App() {
             onReorderRequests={reorderRequests}
             onDeleteRequest={setDeleteRequestId}
             onUpdateProjectDefaults={updateProjectDefaults}
+            onUpdateProjectQueueMode={updateProjectQueueMode}
             onCreateQueueTab={createQueueTab}
             onRenameQueueTab={renameQueueTab}
             onDeleteQueueTab={deleteQueueTab}
@@ -2072,6 +2091,7 @@ function QueueWorkspace({
   onReorderRequests,
   onDeleteRequest,
   onUpdateProjectDefaults,
+  onUpdateProjectQueueMode,
   onCreateQueueTab,
   onRenameQueueTab,
   onDeleteQueueTab,
@@ -2098,6 +2118,7 @@ function QueueWorkspace({
   onReorderRequests: (projectId: string, requestIds: string[]) => Promise<void>
   onDeleteRequest: (id: string) => void
   onUpdateProjectDefaults: (project: Project, defaults: ProjectModelDefaults) => Promise<void>
+  onUpdateProjectQueueMode: (project: Project, separateQueuesByTab: boolean) => Promise<void>
   onCreateQueueTab: (projectId: string, name: string) => Promise<QueueTab>
   onRenameQueueTab: (id: string, name: string) => Promise<QueueTab>
   onDeleteQueueTab: (id: string) => Promise<void>
@@ -2140,6 +2161,10 @@ function QueueWorkspace({
     .filter((request) => (request.queueTabId ?? null) === activeQueueTabId)
     .toSorted(compareQueueRequests),
   [activeQueueTabId, projectQueueRequests])
+  const queueNumberById = useMemo(() => new Map<string, number>(
+    (selectedProject?.separateQueuesByTab ? queueRequests : projectQueueRequests)
+      .map((request, index) => [request.id, index + 1]),
+  ), [projectQueueRequests, queueRequests, selectedProject?.separateQueuesByTab])
   const deletedRequests = useMemo(() => scopedRequests
     .filter((request) => request.deletedAt && (request.queueTabId ?? null) === activeQueueTabId)
     .toSorted((left, right) => Date.parse(right.deletedAt ?? right.createdAt) - Date.parse(left.deletedAt ?? left.createdAt)),
@@ -2190,6 +2215,9 @@ function QueueWorkspace({
           <QueueContextTabs
             tabs={projectQueueTabs}
             activeTabId={activeQueueTabId}
+            separateQueuesByTab={selectedProject.separateQueuesByTab}
+            queueModeChangeDisabled={projectQueueRequests.some((request) => request.status === 'Running' || request.status === 'CancelRequested')}
+            onQueueModeChange={(separate) => onUpdateProjectQueueMode(selectedProject, separate)}
             onSelect={(tabId) => {
               setActiveQueueTabId(tabId)
               setEditingRequest(null)
@@ -2203,6 +2231,7 @@ function QueueWorkspace({
           {activeTab === 'queue' ? (
             <QueueList
               requests={queueRequests}
+              queueNumberById={queueNumberById}
               selectedProject={selectedProject}
               diagnostics={diagnostics}
               now={now}
@@ -2212,6 +2241,10 @@ function QueueWorkspace({
               onArchiveAll={onArchiveRequests}
               onEdit={(request) => setEditingRequest(request)}
               onReorder={(requestIds) => {
+                if (selectedProject.separateQueuesByTab) {
+                  return onReorderRequests(selectedProject.id, requestIds)
+                }
+
                 const reorderedVisibleIds = [...requestIds]
                 let visibleIndex = 0
                 const mergedRequestIds = projectQueueRequests
@@ -2276,6 +2309,9 @@ function QueueWorkspace({
 function QueueContextTabs({
   tabs,
   activeTabId,
+  separateQueuesByTab,
+  queueModeChangeDisabled,
+  onQueueModeChange,
   onSelect,
   onCreate,
   onRename,
@@ -2283,11 +2319,26 @@ function QueueContextTabs({
 }: {
   tabs: QueueTab[]
   activeTabId: string | null
+  separateQueuesByTab: boolean
+  queueModeChangeDisabled: boolean
+  onQueueModeChange: (separate: boolean) => Promise<void>
   onSelect: (tabId: string | null) => void
   onCreate: () => void
   onRename: () => void
   onDelete: () => void
 }) {
+  const [savingQueueMode, setSavingQueueMode] = useState(false)
+  const queueModeDisabled = queueModeChangeDisabled || savingQueueMode
+
+  const changeQueueMode = async (separate: boolean) => {
+    setSavingQueueMode(true)
+    try {
+      await onQueueModeChange(separate)
+    } finally {
+      setSavingQueueMode(false)
+    }
+  }
+
   return (
     <div className="queue-context-toolbar">
       <div className="queue-context-tabs" role="tablist" aria-label="Queue contexts">
@@ -2317,6 +2368,23 @@ function QueueContextTabs({
           <Plus size={15} />
         </button>
       </div>
+      <label
+        className={`queue-mode-toggle ${separateQueuesByTab ? 'active' : ''} ${queueModeDisabled ? 'disabled' : ''}`}
+        title={queueModeChangeDisabled
+          ? 'Finish or cancel running requests before changing queue mode.'
+          : separateQueuesByTab
+            ? 'Each tab runs and numbers its own queue independently.'
+            : 'All tabs run in one project-wide queue order.'}
+      >
+        <input
+          type="checkbox"
+          checked={separateQueuesByTab}
+          disabled={queueModeDisabled}
+          onChange={(event) => { void changeQueueMode(event.target.checked).catch(() => undefined) }}
+        />
+        <span className="queue-mode-toggle-icon"><Check size={11} /></span>
+        <span>{savingQueueMode ? 'Saving…' : 'Separate queues'}</span>
+      </label>
       {activeTabId && (
         <div className="queue-context-actions">
           <GlassButton variant="ghost" size="icon" type="button" aria-label="Rename tab" title="Rename tab" onClick={onRename}>
@@ -3090,6 +3158,7 @@ function useRequestDetails(summary?: CodexRequest) {
 
 function QueueList({
   requests,
+  queueNumberById,
   selectedProject,
   diagnostics,
   now,
@@ -3103,6 +3172,7 @@ function QueueList({
   onKickQueue,
 }: {
   requests: CodexRequest[]
+  queueNumberById: Map<string, number>
   selectedProject?: Project
   diagnostics: QueueDiagnostics | null
   now: number
@@ -3214,7 +3284,7 @@ function QueueList({
               key={request.id}
               request={request}
               now={now}
-              queueNumber={index + 1}
+              queueNumber={queueNumberById.get(request.id) ?? index + 1}
               selected={request.id === selectedRequest?.id}
               onSelect={() => setSelectedRequestId(request.id)}
               onCancel={onCancel}

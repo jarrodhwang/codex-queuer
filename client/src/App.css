@@ -1509,6 +1509,60 @@
   height: 32px;
 }
 
+.queue-mode-toggle {
+  min-height: 32px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.48);
+  border-radius: 999px;
+  background: var(--glass-bg);
+  box-shadow: inset 0 1px 0 var(--glass-edge);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 0 10px;
+  user-select: none;
+}
+
+.queue-mode-toggle.active {
+  border-color: rgba(5, 150, 105, 0.28);
+  color: var(--text-strong);
+}
+
+.queue-mode-toggle.disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.queue-mode-toggle:has(input:focus-visible) {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+}
+
+.queue-mode-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.queue-mode-toggle-icon {
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.08);
+  color: transparent;
+}
+
+.queue-mode-toggle.active .queue-mode-toggle-icon {
+  background: linear-gradient(145deg, #059669, #10b981);
+  color: white;
+}
+
 .modal-form-actions {
   justify-content: flex-end;
 }
@@ -3608,6 +3662,10 @@
     flex: 1 1 auto;
   }
 
+  .queue-mode-toggle {
+    align-self: center;
+  }
+
   .button-row,
   .sidebar-actions,
   .request-actions,
@@ -4613,6 +4671,7 @@
   .tree-row,
   .modal-item,
   .commit-toggle,
+  .queue-mode-toggle,
   .model-chip,
   .status-badge,
   .pending-run-row,
@@ -4874,7 +4933,8 @@
   .workspace-tabs button.active,
   .queue-context-tabs button.active,
   .segmented-radio label.active,
-  .commit-toggle.active
+  .commit-toggle.active,
+  .queue-mode-toggle.active
 ) {
   border-color: var(--accent-line);
   background: linear-gradient(145deg, rgba(8, 95, 130, 0.58), rgba(30, 41, 59, 0.9));

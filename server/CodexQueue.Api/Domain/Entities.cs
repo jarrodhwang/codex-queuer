@@ -31,6 +31,7 @@ public sealed class Project
     public string? DefaultCommitModelSpeed { get; set; }
     public bool DefaultGenerateCommit { get; set; } = true;
     public bool DefaultSeparateCommitSession { get; set; }
+    public bool SeparateQueuesByTab { get; set; }
     public Guid MachineId { get; set; }
     public TargetMachine? Machine { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;

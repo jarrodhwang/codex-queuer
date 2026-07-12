@@ -51,6 +51,7 @@ export type Project = {
   defaultCommitModelSpeed?: string | null
   defaultGenerateCommit?: boolean | null
   defaultSeparateCommitSession?: boolean | null
+  separateQueuesByTab: boolean
   createdAt: string
   updatedAt: string
 }
@@ -67,6 +68,7 @@ export type SaveProjectRequest = {
   defaultCommitModelSpeed?: string | null
   defaultGenerateCommit?: boolean | null
   defaultSeparateCommitSession?: boolean | null
+  separateQueuesByTab?: boolean | null
 }
 
 export type QueueTab = {

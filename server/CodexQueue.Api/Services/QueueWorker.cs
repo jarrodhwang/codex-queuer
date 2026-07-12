@@ -15,7 +15,15 @@ public interface IQueueCoordinator
     Task<bool> RemoveProjectAsync(Guid projectId, CancellationToken cancellationToken);
     Task<bool> ResumeRequestAsync(Guid requestId, CancellationToken cancellationToken);
     Task<bool> KickQueueAsync(CancellationToken cancellationToken);
+    Task<QueueModeChangeResult> ChangeQueueModeAsync(Guid projectId, bool separateQueuesByTab, CancellationToken cancellationToken);
     QueueWorkerDiagnostics GetDiagnostics();
+}
+
+public enum QueueModeChangeResult
+{
+    Updated,
+    ActiveRequests,
+    NotFound
 }
 
 public sealed record QueueWorkerDiagnostics(
@@ -42,7 +50,7 @@ public sealed class QueueWorker(
     private static readonly Regex ModelRegex = new(@"(?i)(gpt-[a-z0-9._-]+)", RegexOptions.Compiled);
     private static readonly Regex CommitCreatedOutputRegex = new(@"(?im)(Commit created:|Created commit\b|commit created\b|\[[^\]\r\n]+\s+[0-9a-f]{7,40}\])", RegexOptions.Compiled);
     private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _activeRequests = new();
-    private readonly ConcurrentDictionary<Guid, ProjectExecution> _activeProjects = new();
+    private readonly ConcurrentDictionary<QueueLaneKey, QueueExecution> _activeQueues = new();
     private readonly SemaphoreSlim _dispatchLock = new(1, 1);
     private DateTimeOffset? _lastHeartbeat;
     private DateTimeOffset? _lastDispatch;
@@ -97,9 +105,16 @@ public sealed class QueueWorker(
         await _dispatchLock.WaitAsync(cancellationToken);
         try
         {
-            if (_activeProjects.TryGetValue(projectId, out var execution))
+            var projectExecutions = _activeQueues
+                .Where(x => x.Key.ProjectId == projectId)
+                .Select(x => x.Value)
+                .ToArray();
+            foreach (var execution in projectExecutions)
             {
                 await execution.Cancellation.CancelAsync();
+            }
+            foreach (var execution in projectExecutions)
+            {
                 await execution.Completion.Task.WaitAsync(cancellationToken);
             }
 
@@ -140,6 +155,7 @@ public sealed class QueueWorker(
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var request = await db.Requests
+            .Include(x => x.Project)
             .Include(x => x.QueueTab)
             .Include(x => x.Runs)
             .FirstOrDefaultAsync(x => x.Id == requestId, cancellationToken);
@@ -158,6 +174,7 @@ public sealed class QueueWorker(
         {
             var projectPriorityRequests = await db.Requests
                 .Where(x => x.ProjectId == request.ProjectId
+                    && (!request.Project!.SeparateQueuesByTab || x.QueueTabId == request.QueueTabId)
                     && (x.Id == request.Id
                         || (x.DeletedAt == null
                             && x.ArchivedAt == null
@@ -203,6 +220,43 @@ public sealed class QueueWorker(
         return Task.FromResult(true);
     }
 
+    public async Task<QueueModeChangeResult> ChangeQueueModeAsync(
+        Guid projectId,
+        bool separateQueuesByTab,
+        CancellationToken cancellationToken)
+    {
+        await _dispatchLock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var project = await db.Projects.FirstOrDefaultAsync(x => x.Id == projectId, cancellationToken);
+            if (project is null)
+            {
+                return QueueModeChangeResult.NotFound;
+            }
+
+            var hasActiveRequests = _activeQueues.Keys.Any(x => x.ProjectId == projectId)
+                || await db.Requests.AnyAsync(x =>
+                    x.ProjectId == projectId
+                    && (x.Status == QueueStatus.Running || x.Status == QueueStatus.CancelRequested),
+                    cancellationToken);
+            if (hasActiveRequests)
+            {
+                return QueueModeChangeResult.ActiveRequests;
+            }
+
+            project.SeparateQueuesByTab = separateQueuesByTab;
+            project.UpdatedAt = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync(cancellationToken);
+            return QueueModeChangeResult.Updated;
+        }
+        finally
+        {
+            _dispatchLock.Release();
+        }
+    }
+
     public QueueWorkerDiagnostics GetDiagnostics() =>
         new(
             _lastHeartbeat,
@@ -210,7 +264,7 @@ public sealed class QueueWorker(
             _lastIdle,
             _lastError,
             _activeRequests.Keys.ToArray(),
-            !_activeProjects.IsEmpty || _dispatchLock.CurrentCount == 0);
+            !_activeQueues.IsEmpty || _dispatchLock.CurrentCount == 0);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -241,7 +295,7 @@ public sealed class QueueWorker(
         }
         finally
         {
-            await WaitForActiveProjectsAsync();
+            await WaitForActiveQueuesAsync();
         }
     }
 
@@ -281,15 +335,16 @@ public sealed class QueueWorker(
                         && (x.QueueTabId == null || x.QueueTab!.DeletedAt == null)
                         && (x.Status == QueueStatus.Queued || x.Status == QueueStatus.Running))
                     .ToArrayAsync(stoppingToken);
-                var projectsWithUnclaimedRunningRequests = queuedRequests
-                    .Where(x => x.Status == QueueStatus.Running && !_activeProjects.ContainsKey(x.ProjectId))
-                    .Select(x => x.ProjectId)
+                var lanesWithUnclaimedRunningRequests = queuedRequests
+                    .Where(x => x.Status == QueueStatus.Running && !_activeQueues.ContainsKey(QueueLaneFor(x)))
+                    .Select(QueueLaneFor)
                     .ToHashSet();
 
                 foreach (var candidate in queuedRequests.OrderBy(x => x.QueueOrder).ThenBy(x => x.CreatedAt))
                 {
-                    if (_activeProjects.ContainsKey(candidate.ProjectId)
-                        || projectsWithUnclaimedRunningRequests.Contains(candidate.ProjectId))
+                    var queueLane = QueueLaneFor(candidate);
+                    if (_activeQueues.ContainsKey(queueLane)
+                        || lanesWithUnclaimedRunningRequests.Contains(queueLane))
                     {
                         continue;
                     }
@@ -307,8 +362,8 @@ public sealed class QueueWorker(
                     }
 
                     var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(_workerStoppingToken);
-                    var execution = new ProjectExecution(requestCancellation);
-                    if (!_activeProjects.TryAdd(candidate.ProjectId, execution))
+                    var execution = new QueueExecution(requestCancellation);
+                    if (!_activeQueues.TryAdd(queueLane, execution))
                     {
                         requestCancellation.Dispose();
                         continue;
@@ -316,7 +371,7 @@ public sealed class QueueWorker(
 
                     if (!_activeRequests.TryAdd(candidate.Id, requestCancellation))
                     {
-                        _activeProjects.TryRemove(candidate.ProjectId, out _);
+                        _activeQueues.TryRemove(queueLane, out _);
                         requestCancellation.Dispose();
                         continue;
                     }
@@ -326,7 +381,7 @@ public sealed class QueueWorker(
                     candidateRun.Status = QueueStatus.Running;
                     candidateRun.StartedAt ??= DateTimeOffset.UtcNow;
                     candidateRun.Output = TrimOutput(candidateRun.Output + "Dispatching " + candidateRun.Kind.ToString().ToLowerInvariant() + " run on " + (candidate.Machine?.Name ?? candidate.Project?.Machine?.Name ?? "target machine") + "..." + Environment.NewLine);
-                    dispatches.Add(new PendingDispatch(candidate.ProjectId, candidate.Id, candidateRun.Kind, execution));
+                    dispatches.Add(new PendingDispatch(queueLane, candidate.Id, candidateRun.Kind, execution));
                 }
 
                 if (dispatches.Count == 0)
@@ -341,7 +396,7 @@ public sealed class QueueWorker(
                 {
                     foreach (var dispatch in dispatches)
                     {
-                        ReleaseProjectExecution(dispatch);
+                        ReleaseQueueExecution(dispatch);
                     }
 
                     return false;
@@ -352,7 +407,7 @@ public sealed class QueueWorker(
         {
             foreach (var dispatch in dispatches)
             {
-                ReleaseProjectExecution(dispatch);
+                ReleaseQueueExecution(dispatch);
             }
 
             throw;
@@ -360,13 +415,13 @@ public sealed class QueueWorker(
 
         foreach (var dispatch in dispatches)
         {
-            StartProjectExecution(dispatch);
+            StartQueueExecution(dispatch);
         }
 
         return true;
     }
 
-    private void StartProjectExecution(PendingDispatch dispatch)
+    private void StartQueueExecution(PendingDispatch dispatch)
     {
         _ = Task.Run(async () =>
         {
@@ -388,11 +443,11 @@ public sealed class QueueWorker(
             catch (Exception ex)
             {
                 _lastError = ex.Message;
-                logger.LogError(ex, "Project queue execution failed for project {ProjectId} and request {RequestId}.", dispatch.ProjectId, dispatch.RequestId);
+                logger.LogError(ex, "Queue execution failed for project {ProjectId}, tab {QueueTabId}, and request {RequestId}.", dispatch.QueueLane.ProjectId, dispatch.QueueLane.QueueTabId, dispatch.RequestId);
             }
             finally
             {
-                ReleaseProjectExecution(dispatch);
+                ReleaseQueueExecution(dispatch);
                 if (!_workerStoppingToken.IsCancellationRequested)
                 {
                     await KickQueueAsync(CancellationToken.None);
@@ -401,21 +456,21 @@ public sealed class QueueWorker(
         }, CancellationToken.None);
     }
 
-    private void ReleaseProjectExecution(PendingDispatch dispatch)
+    private void ReleaseQueueExecution(PendingDispatch dispatch)
     {
         _activeRequests.TryRemove(dispatch.RequestId, out _);
-        _activeProjects.TryRemove(dispatch.ProjectId, out _);
+        _activeQueues.TryRemove(dispatch.QueueLane, out _);
         dispatch.Execution.Cancellation.Dispose();
         dispatch.Execution.Completion.TrySetResult();
     }
 
-    private async Task WaitForActiveProjectsAsync()
+    private async Task WaitForActiveQueuesAsync()
     {
         await _dispatchLock.WaitAsync(CancellationToken.None);
         Task[] completions;
         try
         {
-            completions = _activeProjects.Values.Select(x => x.Completion.Task).ToArray();
+            completions = _activeQueues.Values.Select(x => x.Completion.Task).ToArray();
         }
         finally
         {
@@ -2027,13 +2082,18 @@ public sealed class QueueWorker(
                || normalized.EndsWith("_" + suffix, StringComparison.OrdinalIgnoreCase);
     }
 
+    private static QueueLaneKey QueueLaneFor(CodexRequest request) =>
+        new(request.ProjectId, request.Project?.SeparateQueuesByTab == true ? request.QueueTabId : null);
+
+    private readonly record struct QueueLaneKey(Guid ProjectId, Guid? QueueTabId);
+
     private sealed record PendingDispatch(
-        Guid ProjectId,
+        QueueLaneKey QueueLane,
         Guid RequestId,
         RunKind RunKind,
-        ProjectExecution Execution);
+        QueueExecution Execution);
 
-    private sealed class ProjectExecution(CancellationTokenSource cancellation)
+    private sealed class QueueExecution(CancellationTokenSource cancellation)
     {
         public CancellationTokenSource Cancellation { get; } = cancellation;
         public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);

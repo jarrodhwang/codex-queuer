@@ -40,6 +40,7 @@ public sealed record ProjectDto(
     string? DefaultCommitModelSpeed,
     bool DefaultGenerateCommit,
     bool DefaultSeparateCommitSession,
+    bool SeparateQueuesByTab,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt);
 
@@ -54,7 +55,8 @@ public sealed record SaveProjectRequest(
     string? DefaultCommitModelEffort,
     string? DefaultCommitModelSpeed,
     bool? DefaultGenerateCommit,
-    bool? DefaultSeparateCommitSession);
+    bool? DefaultSeparateCommitSession,
+    bool? SeparateQueuesByTab);
 
 public sealed record QueueTabDto(
     Guid Id,

@@ -38,6 +38,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.DefaultCommitModelSpeed).HasMaxLength(32);
             entity.Property(x => x.DefaultGenerateCommit);
             entity.Property(x => x.DefaultSeparateCommitSession);
+            entity.Property(x => x.SeparateQueuesByTab);
             entity.HasOne(x => x.Machine)
                 .WithMany(x => x.Projects)
                 .HasForeignKey(x => x.MachineId)

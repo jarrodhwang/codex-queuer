@@ -291,7 +291,8 @@ public static class ApiEndpoints
                 DefaultCommitModelEffort = NormalizeEffort(input.DefaultCommitModelEffort, input.DefaultCommitModel ?? input.DefaultModel),
                 DefaultCommitModelSpeed = NormalizeOptionalSpeed(input.DefaultCommitModelSpeed),
                 DefaultGenerateCommit = input.DefaultGenerateCommit ?? true,
-                DefaultSeparateCommitSession = input.DefaultSeparateCommitSession ?? false
+                DefaultSeparateCommitSession = input.DefaultSeparateCommitSession ?? false,
+                SeparateQueuesByTab = input.SeparateQueuesByTab ?? false
             };
             db.Projects.Add(project);
             await db.SaveChangesAsync(cancellationToken);
@@ -299,7 +300,7 @@ public static class ApiEndpoints
             return Results.Created($"/api/projects/{project.Id}", project.ToDto());
         });
 
-        api.MapPut("/projects/{id:guid}", async (Guid id, SaveProjectRequest input, AppDbContext db, CancellationToken cancellationToken) =>
+        api.MapPut("/projects/{id:guid}", async (Guid id, SaveProjectRequest input, AppDbContext db, IQueueCoordinator queue, CancellationToken cancellationToken) =>
         {
             var project = await db.Projects.Include(x => x.Machine).FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
             if (project is null)
@@ -333,6 +334,22 @@ public static class ApiEndpoints
                 return Results.Conflict(new { error = "Finish or cancel active requests before changing the project machine or path." });
             }
 
+            var queueModeChanged = project.SeparateQueuesByTab != (input.SeparateQueuesByTab ?? false);
+            if (queueModeChanged)
+            {
+                var modeChange = await queue.ChangeQueueModeAsync(project.Id, input.SeparateQueuesByTab ?? false, cancellationToken);
+                if (modeChange == QueueModeChangeResult.ActiveRequests)
+                {
+                    return Results.Conflict(new { error = "Finish or cancel running requests before changing the queue mode." });
+                }
+                if (modeChange == QueueModeChangeResult.NotFound)
+                {
+                    return Results.NotFound();
+                }
+
+                await db.Entry(project).ReloadAsync(cancellationToken);
+            }
+
             project.Name = input.Name.Trim();
             project.Path = normalizedPath;
             project.MachineId = input.MachineId;
@@ -344,6 +361,7 @@ public static class ApiEndpoints
             project.DefaultCommitModelSpeed = NormalizeOptionalSpeed(input.DefaultCommitModelSpeed);
             project.DefaultGenerateCommit = input.DefaultGenerateCommit ?? true;
             project.DefaultSeparateCommitSession = input.DefaultSeparateCommitSession ?? false;
+            project.SeparateQueuesByTab = input.SeparateQueuesByTab ?? false;
             project.UpdatedAt = DateTimeOffset.UtcNow;
             if (executionContextChanged)
             {
@@ -943,6 +961,12 @@ public static class ApiEndpoints
                 return Results.BadRequest(new { error = "Request order contains duplicates." });
             }
 
+            var project = await db.Projects.FirstOrDefaultAsync(x => x.Id == input.ProjectId, cancellationToken);
+            if (project is null)
+            {
+                return Results.BadRequest(new { error = "Project does not exist." });
+            }
+
             var submittedRequests = await db.Requests
                 .Where(x => requestIds.Contains(x.Id))
                 .ToArrayAsync(cancellationToken);
@@ -956,8 +980,15 @@ public static class ApiEndpoints
                 return Results.BadRequest(new { error = "Only queued requests can be reordered." });
             }
 
+            var queueTabId = submittedRequests[0].QueueTabId;
+            if (project.SeparateQueuesByTab && submittedRequests.Any(x => x.QueueTabId != queueTabId))
+            {
+                return Results.BadRequest(new { error = "Requests from separate tab queues cannot be reordered together." });
+            }
+
             var projectPriorityRequests = await db.Requests
                 .Where(x => x.ProjectId == input.ProjectId
+                    && (!project.SeparateQueuesByTab || x.QueueTabId == queueTabId)
                     && x.DeletedAt == null
                     && x.ArchivedAt == null
                     && (x.Status == QueueStatus.Queued
