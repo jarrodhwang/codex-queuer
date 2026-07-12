@@ -1385,12 +1385,16 @@ function MachineConnectionStatus({
       : status?.success === false
         ? 'Failed'
         : 'Not checked'
+  const stateClass = status?.checking ? 'pending' : status?.success === true ? 'ok' : status?.success === false ? 'bad' : ''
+  const iconOnly = kind === 'Ssh'
 
   return (
-    <span className="machine-status" title={status?.output || label}>
-      <span className={`connection-dot ${status?.checking ? 'pending' : status?.success === true ? 'ok' : status?.success === false ? 'bad' : ''}`} />
-      <span>{kind}</span>
-      <span className="machine-status-label">{label}</span>
+    <span className={`machine-status${iconOnly ? ' machine-status--icon-only' : ''}`} title={status?.output || label}>
+      <span className={`connection-dot ${stateClass}`} role="img" aria-label={`${kind}: ${label}`} />
+      {!iconOnly && <>
+        <span>{kind}</span>
+        <span className="machine-status-label">{label}</span>
+      </>}
     </span>
   )
 }
