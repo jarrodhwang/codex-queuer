@@ -12,6 +12,7 @@ namespace CodexQueue.Api.Services;
 public interface IQueueCoordinator
 {
     Task<bool> CancelRequestAsync(Guid requestId, CancellationToken cancellationToken);
+    Task<bool> RemoveProjectAsync(Guid projectId, CancellationToken cancellationToken);
     Task<bool> ResumeRequestAsync(Guid requestId, CancellationToken cancellationToken);
     Task<bool> KickQueueAsync(CancellationToken cancellationToken);
     QueueWorkerDiagnostics GetDiagnostics();
@@ -87,6 +88,48 @@ public sealed class QueueWorker(
         }
 
         return true;
+    }
+
+    public async Task<bool> RemoveProjectAsync(Guid projectId, CancellationToken cancellationToken)
+    {
+        // Keep dispatch paused from cancellation through deletion. Otherwise a queued
+        // request for this project could be dispatched after its active request stops.
+        await _dispatchLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_activeProjects.TryGetValue(projectId, out var execution))
+            {
+                await execution.Cancellation.CancelAsync();
+                await execution.Completion.Task.WaitAsync(cancellationToken);
+            }
+
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var project = await db.Projects.FirstOrDefaultAsync(x => x.Id == projectId, cancellationToken);
+            if (project is null)
+            {
+                return false;
+            }
+
+            // Explicitly remove dependents instead of relying on database-level cascade
+            // constraints. Existing SQLite databases are initialized with EnsureCreated,
+            // so their foreign key actions may predate the current model configuration.
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            await db.Runs
+                .Where(x => db.Requests.Any(request => request.ProjectId == projectId && request.Id == x.RequestId))
+                .ExecuteDeleteAsync(cancellationToken);
+            await db.Requests
+                .Where(x => x.ProjectId == projectId)
+                .ExecuteDeleteAsync(cancellationToken);
+            db.Projects.Remove(project);
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return true;
+        }
+        finally
+        {
+            _dispatchLock.Release();
+        }
     }
 
     public async Task<bool> ResumeRequestAsync(Guid requestId, CancellationToken cancellationToken)

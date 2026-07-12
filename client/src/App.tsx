@@ -689,7 +689,7 @@ function App() {
   }
 
   const removeProject = async (project: Project) => {
-    const confirmed = window.confirm(`Remove "${project.name}" from Codex Queue? This removes its queue history from this web app, but will not delete files or folders from disk.`)
+    const confirmed = window.confirm(`Remove "${project.name}" from Codex Queue? This cancels any active queue work and removes its history from this web app, but will not delete files or folders from disk.`)
     if (!confirmed) return false
 
     setError('')
