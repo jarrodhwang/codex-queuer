@@ -1283,15 +1283,18 @@ function LeftSidebar({
                       <button type="button" className="project-item-main" onClick={() => onSelectProject(project.id)}>
                         <div className="project-name-row">
                           <div className="project-name truncate">{project.name}</div>
-                          {hasQueueActivity && (
-                            <span className={`project-queue-chip ${running > 0 ? 'running' : 'queued'}`}>
+                          {running === 0 && queued > 0 && (
+                            <span className="project-queue-chip queued">
                               <span className="project-queue-dot" aria-hidden="true" />
-                              {running > 0 ? `${running} running` : `${queued} queued`}
+                              {`${queued} queued`}
                             </span>
                           )}
                         </div>
                         <div className="meta truncate">{project.path}</div>
                       </button>
+                      {running > 0 && (
+                        <span className="project-running-badge">{running} running</span>
+                      )}
                       <button
                         type="button"
                         className="project-detail-button"
@@ -1303,6 +1306,11 @@ function LeftSidebar({
                       >
                         <Settings size={14} />
                       </button>
+                      {running > 0 && (
+                        <div className="project-running-progress" role="progressbar" aria-label={`${running} running request${running === 1 ? '' : 's'}`}>
+                          <span />
+                        </div>
+                      )}
                     </div>
                   )
                 })
