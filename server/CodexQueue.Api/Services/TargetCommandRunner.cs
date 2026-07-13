@@ -237,14 +237,22 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 + "; $attachmentDirectory = [IO.Path]::GetDirectoryName($attachmentPath)"
                 + "; if ([string]::IsNullOrWhiteSpace($attachmentDirectory)) { throw 'Attachment target path must include a directory.' }"
                 + "; [IO.Directory]::CreateDirectory($attachmentDirectory) | Out-Null"
-                + "; [IO.File]::WriteAllBytes($attachmentPath, [Convert]::FromBase64String([Console]::In.ReadToEnd()))";
+                // Some Windows OpenSSH sessions do not propagate stdin EOF to the remote
+                // PowerShell process. Read one newline-terminated Base64 record instead of
+                // waiting for EOF, then validate it before exposing the attachment to Codex.
+                + "; $attachmentBase64 = [Console]::In.ReadLine()"
+                + "; if ($null -eq $attachmentBase64) { throw 'Attachment data was not received.' }"
+                + "; $attachmentBytes = [Convert]::FromBase64String($attachmentBase64)"
+                + "; if ($attachmentBytes.LongLength -ne " + content.LongLength + ") { throw 'Attachment data was incomplete.' }"
+                + "; [IO.File]::WriteAllBytes($attachmentPath, $attachmentBytes)"
+                + "; if (([IO.FileInfo]::new($attachmentPath)).Length -ne " + content.LongLength + ") { throw 'Attachment file validation failed.' }";
             result = await RunSshAsync(
                 machine,
                 BuildPowerShellRemoteCommand(command),
                 "ssh " + machine.Host + " write attachment",
                 static _ => Task.CompletedTask,
                 cancellationToken,
-                standardInput: encodedContent,
+                standardInput: encodedContent + "\n",
                 executionTimeout: AttachmentTransferTimeout);
         }
         else
@@ -753,6 +761,12 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         arguments.Add(model);
         arguments.Add("--skip-git-repo-check");
 
+        // Approval policy used to be exposed by `codex exec -a`, but newer CLI releases
+        // removed that option. The config override is supported by both new sessions and
+        // `exec resume`, so use one stable representation on every target OS.
+        arguments.Add("-c");
+        arguments.Add("approval_policy=\"" + (permissionMode == PermissionMode.AskForApproval ? "untrusted" : "never") + "\"");
+
         foreach (var imagePath in imagePaths ?? Array.Empty<string>())
         {
             arguments.Add("-i");
@@ -763,15 +777,11 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         {
             arguments.Add("-C");
             arguments.Add(projectPath);
-            arguments.Add("-a");
-            arguments.Add(permissionMode == PermissionMode.AskForApproval ? "untrusted" : "never");
             arguments.Add("-s");
             arguments.Add(permissionMode == PermissionMode.ReadOnly ? "read-only" : permissionMode == PermissionMode.FullAccess || disableWindowsSandbox ? "danger-full-access" : "workspace-write");
         }
         else
         {
-            arguments.Add("-c");
-            arguments.Add("approval_policy=\"" + (permissionMode == PermissionMode.AskForApproval ? "untrusted" : "never") + "\"");
             arguments.Add("-c");
             arguments.Add("sandbox_mode=\"" + (permissionMode == PermissionMode.ReadOnly ? "read-only" : permissionMode == PermissionMode.FullAccess || disableWindowsSandbox ? "danger-full-access" : "workspace-write") + "\"");
             arguments.Add(codexSessionId);
