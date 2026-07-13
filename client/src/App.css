@@ -1045,14 +1045,8 @@
   text-align: left;
 }
 
-.project-item--queued .project-item-main,
-.project-item--running .project-item-main {
-  padding-right: 82px;
-}
-
 .project-name-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  display: flex;
   align-items: start;
   gap: 6px;
   min-width: 0;
@@ -1078,9 +1072,9 @@
 }
 
 .project-queue-badge {
-  top: 4px;
-  right: 4px;
-  display: inline-flex;
+  position: static;
+  display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 3px;
   min-width: 0;
@@ -1183,8 +1177,10 @@
 
 .project-item .project-name {
   position: relative;
+  flex: 1 1 auto;
   overflow: hidden;
   line-height: 1.2;
+  white-space: nowrap;
 }
 
 .project-name__measure {
@@ -1193,23 +1189,16 @@
   pointer-events: none;
 }
 
-.project-name__measure--wrapped {
-  inset: 0;
-  overflow-wrap: anywhere;
-  white-space: normal;
-}
-
 .project-name__measure--single-line {
   width: max-content;
   white-space: nowrap;
 }
 
 .project-name__text {
-  display: -webkit-box;
+  display: block;
   overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .project-name--marquee .project-name__text {
@@ -4336,7 +4325,6 @@
   .request-body-header,
   .folder-picker-toolbar,
   .selected-folder,
-  .project-name-row,
   .git-change-row,
   .git-diff-stat-row {
     grid-template-columns: 1fr;

@@ -1186,11 +1186,10 @@ function AuthScreen({ onAuthed }: { onAuthed: () => Promise<void> }) {
   )
 }
 
-function ProjectTitle({ name }: { name: string }) {
+function ProjectTitle({ name, marqueeEnabled }: { name: string; marqueeEnabled: boolean }) {
   const titleRef = useRef<HTMLDivElement>(null)
-  const wrappedMeasureRef = useRef<HTMLSpanElement>(null)
   const singleLineMeasureRef = useRef<HTMLSpanElement>(null)
-  const [marquee, setMarquee] = useState(false)
+  const [overflows, setOverflows] = useState(false)
   const [scrollDistance, setScrollDistance] = useState(0)
 
   useEffect(() => {
@@ -1200,16 +1199,14 @@ function ProjectTitle({ name }: { name: string }) {
     }
 
     const updateOverflow = () => {
-      const wrappedMeasure = wrappedMeasureRef.current
       const singleLineMeasure = singleLineMeasureRef.current
-      if (!wrappedMeasure || !singleLineMeasure) {
+      if (!singleLineMeasure) {
         return
       }
 
-      const lineHeight = Number.parseFloat(getComputedStyle(wrappedMeasure).lineHeight)
-      const exceedsTwoLines = wrappedMeasure.offsetHeight > (lineHeight * 2) + 1
-      setMarquee(exceedsTwoLines)
-      setScrollDistance(exceedsTwoLines ? Math.max(0, singleLineMeasure.offsetWidth - title.clientWidth) : 0)
+      const distance = Math.max(0, singleLineMeasure.offsetWidth - title.clientWidth)
+      setOverflows(distance > 0)
+      setScrollDistance(distance)
     }
 
     updateOverflow()
@@ -1218,13 +1215,14 @@ function ProjectTitle({ name }: { name: string }) {
     return () => resizeObserver.disconnect()
   }, [name])
 
+  const marquee = marqueeEnabled && overflows
+
   return (
     <div
       ref={titleRef}
       className={`project-name${marquee ? ' project-name--marquee' : ''}`}
       title={name}
     >
-      <span ref={wrappedMeasureRef} className="project-name__measure project-name__measure--wrapped" aria-hidden="true">{name}</span>
       <span ref={singleLineMeasureRef} className="project-name__measure project-name__measure--single-line" aria-hidden="true">{name}</span>
       <span
         className="project-name__text"
@@ -1383,36 +1381,37 @@ function LeftSidebar({
                   const queued = queueState?.queued ?? 0
                   const total = queueState?.total ?? 0
                   const hasQueueActivity = total > 0
+                  const isSelected = project.id === selectedProjectId
                   return (
                     <div
                       key={project.id}
-                      className={`project-item ${project.id === selectedProjectId ? 'active' : ''} ${running > 0 ? 'project-item--running' : hasQueueActivity ? 'project-item--queued' : ''}`}
+                      className={`project-item ${isSelected ? 'active' : ''} ${running > 0 ? 'project-item--running' : hasQueueActivity ? 'project-item--queued' : ''}`}
                     >
                       <button type="button" className="project-item-main" onClick={() => onSelectProject(project.id)}>
                         <div className="project-name-row">
-                          <ProjectTitle name={project.name} />
+                          <ProjectTitle name={project.name} marqueeEnabled={isSelected || running > 0} />
+                          {total > 0 && (
+                            <span
+                              className="project-queue-badge"
+                              aria-label={`${total} queued or running request${total === 1 ? '' : 's'} (${queued} queued, ${running} running)`}
+                            >
+                              {queued > 0 && (
+                                <span className="project-queue-badge__count project-queue-badge__count--queued" aria-hidden="true">
+                                  <ClipboardList size={12} strokeWidth={2.4} />
+                                  <span>{queued}</span>
+                                </span>
+                              )}
+                              {running > 0 && (
+                                <span className="project-queue-badge__count project-queue-badge__count--running" aria-hidden="true">
+                                  <Play size={11} fill="currentColor" strokeWidth={2.4} />
+                                  <span>{running}</span>
+                                </span>
+                              )}
+                            </span>
+                          )}
                         </div>
                         <div className="meta truncate">{project.path}</div>
                       </button>
-                      {total > 0 && (
-                        <span
-                          className="project-queue-badge"
-                          aria-label={`${total} queued or running request${total === 1 ? '' : 's'} (${queued} queued, ${running} running)`}
-                        >
-                          {queued > 0 && (
-                            <span className="project-queue-badge__count project-queue-badge__count--queued" aria-hidden="true">
-                              <ClipboardList size={12} strokeWidth={2.4} />
-                              <span>{queued}</span>
-                            </span>
-                          )}
-                          {running > 0 && (
-                            <span className="project-queue-badge__count project-queue-badge__count--running" aria-hidden="true">
-                              <Play size={11} fill="currentColor" strokeWidth={2.4} />
-                              <span>{running}</span>
-                            </span>
-                          )}
-                        </span>
-                      )}
                       <button
                         type="button"
                         className="project-detail-button"
