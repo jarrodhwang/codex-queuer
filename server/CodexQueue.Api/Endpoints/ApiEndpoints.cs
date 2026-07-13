@@ -710,7 +710,7 @@ public static class ApiEndpoints
             }
         });
 
-        api.MapGet("/projects/{id:guid}/terminal/ttyd", async (Guid id, bool restart, AppDbContext db, ITerminalSessionService terminal, CancellationToken cancellationToken) =>
+        api.MapGet("/projects/{id:guid}/terminal/ttyd", async (Guid id, bool? restart, AppDbContext db, ITerminalSessionService terminal, CancellationToken cancellationToken) =>
         {
             var project = await db.Projects.Include(x => x.Machine).AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
             if (project is null)
@@ -725,7 +725,7 @@ public static class ApiEndpoints
 
             try
             {
-                var session = await terminal.StartAsync(project, restart, cancellationToken);
+                var session = await terminal.StartAsync(project, restart is true, cancellationToken);
                 // Keep this redirect relative to the terminal-start endpoint. A reverse
                 // proxy mounted below a path (for example Tailscale Serve at /codex)
                 // removes that prefix before forwarding to the API, so a root-relative
