@@ -11,7 +11,7 @@ namespace CodexQueue.Api.Services;
 
 public interface ITerminalSessionService
 {
-    Task<TerminalSessionHandle> StartAsync(Project project, CancellationToken cancellationToken);
+    Task<TerminalSessionHandle> StartAsync(Project project, bool restart, CancellationToken cancellationToken);
 
     Task ProxyAsync(Guid sessionId, string sessionToken, HttpContext context);
 }
@@ -25,13 +25,14 @@ public sealed class TerminalSessionService(ILogger<TerminalSessionService> logge
     private readonly ConcurrentDictionary<Guid, TerminalSession> _sessionsByProject = new();
     private readonly ConcurrentDictionary<Guid, TerminalSession> _sessionsById = new();
 
-    public async Task<TerminalSessionHandle> StartAsync(Project project, CancellationToken cancellationToken)
+    public async Task<TerminalSessionHandle> StartAsync(Project project, bool restart, CancellationToken cancellationToken)
     {
         var machine = project.Machine ?? throw new InvalidOperationException("Project machine is missing.");
         var fingerprint = BuildFingerprint(project, machine);
         CleanupExpiredSessions();
 
-        if (_sessionsByProject.TryGetValue(project.Id, out var existing)
+        if (!restart
+            && _sessionsByProject.TryGetValue(project.Id, out var existing)
             && existing.Fingerprint == fingerprint
             && IsProcessAlive(existing.Process))
         {
@@ -39,7 +40,7 @@ public sealed class TerminalSessionService(ILogger<TerminalSessionService> logge
             return new TerminalSessionHandle(existing.EntryPath);
         }
 
-        if (existing is not null)
+        if (_sessionsByProject.TryGetValue(project.Id, out existing))
         {
             RemoveSession(existing);
         }
@@ -140,8 +141,7 @@ public sealed class TerminalSessionService(ILogger<TerminalSessionService> logge
             "--base-path",
             basePath,
             "--max-clients",
-            "4",
-            "--once"
+            "4"
         })
         {
             startInfo.ArgumentList.Add(argument);

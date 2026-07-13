@@ -4695,7 +4695,11 @@ function ProjectTerminal({
   const runningCount = requests.filter((request) => request.status === 'Running').length
   const limitedRequest = requests.find((request) => request.status === 'UsageLimited')
   const limitedRemaining = limitedRequest?.retryAfter ? formatRemainingTime(limitedRequest.retryAfter, now) : null
-  const terminalSrc = useMemo(() => apiUrl(`/projects/${project.id}/terminal/ttyd`), [project.id])
+  const [terminalRevision, setTerminalRevision] = useState(0)
+  const terminalSrc = useMemo(() => {
+    const restartQuery = terminalRevision > 0 ? `?restart=true&revision=${terminalRevision}` : ''
+    return apiUrl(`/projects/${project.id}/terminal/ttyd${restartQuery}`)
+  }, [project.id, terminalRevision])
 
   return (
     <GlassPanel className="terminal-panel">
@@ -4709,9 +4713,18 @@ function ProjectTerminal({
         <span className="terminal-status-ok">
           <strong>ttyd</strong> shell
         </span>
+        <GlassButton
+          variant="secondary"
+          size="sm"
+          type="button"
+          onClick={() => setTerminalRevision((revision) => revision + 1)}
+          title="Reinitialize terminal"
+        >
+          <RefreshCcw size={14} /> Refresh terminal
+        </GlassButton>
       </div>
       <iframe
-        key={project.id}
+        key={`${project.id}:${terminalRevision}`}
         className="terminal-frame"
         src={terminalSrc}
         title={`${project.machineName} terminal for ${project.name}`}
