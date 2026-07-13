@@ -63,7 +63,7 @@ import { FieldLabel, GlassButton, GlassDropdownSelect, GlassInput, GlassPanel, G
 import { GlassGauge } from '@/components/einui/Gauge'
 import { ConfirmDialog } from '@/components/einui/ConfirmDialog'
 import { Sheet } from '@/components/einui/Sheet'
-import { NotificationBadge, ProgressLine, StatusBadge } from '@/components/einui/Status'
+import { ProgressLine, StatusBadge } from '@/components/einui/Status'
 import { formatDate, shortId } from '@/lib/utils'
 import './App.css'
 
@@ -1174,13 +1174,14 @@ function LeftSidebar({
     .toSorted((left, right) => Date.parse(left.retryAfter ?? left.createdAt) - Date.parse(right.retryAfter ?? right.createdAt)),
   [requests])
   const projectQueueStates = useMemo(() => {
-    const states: Record<string, { queued: number; running: number }> = {}
+    const states: Record<string, { queued: number; running: number; total: number }> = {}
     for (const request of requests) {
       if (request.deletedAt || request.archivedAt || (request.status !== 'Queued' && request.status !== 'Running')) {
         continue
       }
 
-      const state = states[request.projectId] ?? { queued: 0, running: 0 }
+      const state = states[request.projectId] ?? { queued: 0, running: 0, total: 0 }
+      state.total += 1
       if (request.status === 'Running') {
         state.running += 1
       } else {
@@ -1280,7 +1281,8 @@ function LeftSidebar({
                   const queueState = projectQueueStates[project.id]
                   const running = queueState?.running ?? 0
                   const queued = queueState?.queued ?? 0
-                  const hasQueueActivity = running > 0 || queued > 0
+                  const total = queueState?.total ?? 0
+                  const hasQueueActivity = total > 0
                   return (
                     <div
                       key={project.id}
@@ -1292,19 +1294,13 @@ function LeftSidebar({
                         </div>
                         <div className="meta truncate">{project.path}</div>
                       </button>
-                      {running === 0 && queued > 0 && (
+                      {total > 0 && (
                         <span
                           className="project-queue-badge"
-                          aria-label={`${queued} queued request${queued === 1 ? '' : 's'}`}
+                          aria-label={`${total} queued or running request${total === 1 ? '' : 's'} (${queued} queued, ${running} running)`}
                         >
-                          {queued}
+                          {total}
                         </span>
-                      )}
-                      {running > 0 && (
-                        <NotificationBadge
-                          count={running}
-                          label={`${running} running request${running === 1 ? '' : 's'}`}
-                        />
                       )}
                       <button
                         type="button"
