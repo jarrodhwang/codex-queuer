@@ -227,8 +227,12 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         if (machine.TargetsWindows())
         {
             var command = "$attachmentPath = " + QuotePowerShellValue(targetPath)
-                + "; $attachmentDirectory = Split-Path -Parent -LiteralPath $attachmentPath"
-                + "; New-Item -ItemType Directory -Force -Path $attachmentDirectory | Out-Null"
+                // Split-Path rejects -Parent with -LiteralPath on Windows PowerShell. Use the
+                // .NET APIs so the target path is always treated literally and no wildcard
+                // expansion or PowerShell parameter-set selection is involved.
+                + "; $attachmentDirectory = [IO.Path]::GetDirectoryName($attachmentPath)"
+                + "; if ([string]::IsNullOrWhiteSpace($attachmentDirectory)) { throw 'Attachment target path must include a directory.' }"
+                + "; [IO.Directory]::CreateDirectory($attachmentDirectory) | Out-Null"
                 + "; [IO.File]::WriteAllBytes($attachmentPath, [Convert]::FromBase64String([Console]::In.ReadToEnd()))";
             result = await RunSshAsync(
                 machine,
