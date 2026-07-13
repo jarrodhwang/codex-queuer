@@ -976,8 +976,8 @@
 
 .project-name-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
   gap: 6px;
   min-width: 0;
 }
@@ -1066,6 +1066,14 @@
   color: var(--text-strong);
   font-weight: 750;
   min-width: 0;
+}
+
+.project-item .project-name {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.2;
 }
 
 .truncate {

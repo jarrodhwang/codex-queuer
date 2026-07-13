@@ -1282,7 +1282,7 @@ function LeftSidebar({
                     >
                       <button type="button" className="project-item-main" onClick={() => onSelectProject(project.id)}>
                         <div className="project-name-row">
-                          <div className="project-name truncate">{project.name}</div>
+                          <div className="project-name" title={project.name}>{project.name}</div>
                         </div>
                         <div className="meta truncate">{project.path}</div>
                       </button>
