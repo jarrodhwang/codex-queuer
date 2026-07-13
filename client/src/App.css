@@ -4355,7 +4355,7 @@
 }
 
 .work-report-procedure-head strong,
-.work-report-procedure-head span {
+.work-report-procedure-head > div > span {
   display: block;
 }
 
