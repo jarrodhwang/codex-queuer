@@ -19,6 +19,7 @@ import {
   GripVertical,
   History,
   Image as ImageIcon,
+  Eye,
   Menu,
   Monitor,
   Moon,
@@ -29,6 +30,9 @@ import {
   RefreshCcw,
   Server,
   Settings,
+  ShieldAlert,
+  ShieldCheck,
+  ShieldQuestion,
   Sun,
   Square,
   Terminal as TerminalIcon,
@@ -3134,10 +3138,10 @@ function QueueComposer({
                   }
                 }}
                 options={[
-                  { value: 'ReadOnly', label: 'Read only' },
-                  { value: 'AskForApproval', label: 'Ask for approval' },
-                  { value: 'ApproveForMe', label: 'Approve for me' },
-                  { value: 'FullAccess', label: 'Full access' },
+                  { value: 'ReadOnly', label: 'Read only', icon: <Eye size={14} /> },
+                  { value: 'AskForApproval', label: 'Ask for approval', icon: <ShieldQuestion size={14} /> },
+                  { value: 'ApproveForMe', label: 'Approve for me', icon: <ShieldCheck size={14} /> },
+                  { value: 'FullAccess', label: 'Full access', icon: <ShieldAlert size={14} /> },
                 ]}
               />
             </div>

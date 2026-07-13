@@ -31,6 +31,7 @@ export function GlassSelect({ className, ...props }: SelectHTMLAttributes<HTMLSe
 }
 
 export type GlassDropdownOption = {
+  icon?: ReactNode
   label: string
   value: string
 }
@@ -104,7 +105,10 @@ export function GlassDropdownSelect({
           }
         }}
       >
-        <span className="glass-select-value truncate">{selected?.label ?? 'Select'}</span>
+        <span className="glass-select-value">
+          {selected?.icon && <span className="glass-select-option-icon" aria-hidden="true">{selected.icon}</span>}
+          <span className="truncate">{selected?.label ?? 'Select'}</span>
+        </span>
         <span className="glass-select-arrow" aria-hidden="true">
           <ChevronDown size={16} />
         </span>
@@ -122,7 +126,10 @@ export function GlassDropdownSelect({
                 aria-selected={active}
                 onClick={() => selectOption(option.value)}
               >
-                <span className="glass-select-option-label truncate">{option.label}</span>
+                <span className="glass-select-option-label">
+                  {option.icon && <span className="glass-select-option-icon" aria-hidden="true">{option.icon}</span>}
+                  <span className="truncate">{option.label}</span>
+                </span>
                 {active && <Check size={14} />}
               </button>
             )
