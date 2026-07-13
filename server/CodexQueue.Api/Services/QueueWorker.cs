@@ -648,7 +648,10 @@ public sealed class QueueWorker(
                     projectPath,
                     result,
                     beforeCommitHead,
-                    commitRequired: false,
+                    // Inline commit is part of this request's contract. A clean
+                    // working tree alone is not enough: Git HEAD must advance so
+                    // the request has a durable, traceable result.
+                    commitRequired: true,
                     cancellationToken);
             }
 
@@ -759,9 +762,13 @@ public sealed class QueueWorker(
             return result;
         }
 
-        var message = string.IsNullOrWhiteSpace(currentStatus)
-            ? "Codex finished without creating a git commit."
-            : "Codex finished without creating a git commit; project changes remain.";
+        var message = commitRequired
+            ? string.IsNullOrWhiteSpace(currentStatus)
+                ? "Codex exited successfully, but inline commit was enabled and Git HEAD did not change. No commit was created."
+                : "Codex exited successfully, but inline commit was enabled and Git HEAD did not change; project changes remain uncommitted."
+            : string.IsNullOrWhiteSpace(currentStatus)
+                ? "Codex finished without creating a git commit."
+                : "Codex finished without creating a git commit; project changes remain.";
         var output = Environment.NewLine + message + Environment.NewLine;
         await AppendOutputAsync(run.Id, output, CancellationToken.None);
         return result with { ExitCode = 12, Output = result.Output.TrimEnd() + output };
