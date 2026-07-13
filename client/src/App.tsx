@@ -1299,7 +1299,18 @@ function LeftSidebar({
                           className="project-queue-badge"
                           aria-label={`${total} queued or running request${total === 1 ? '' : 's'} (${queued} queued, ${running} running)`}
                         >
-                          {total}
+                          {queued > 0 && (
+                            <span className="project-queue-badge__count project-queue-badge__count--queued" aria-hidden="true">
+                              <ClipboardList size={12} strokeWidth={2.4} />
+                              <span>{queued}</span>
+                            </span>
+                          )}
+                          {running > 0 && (
+                            <span className="project-queue-badge__count project-queue-badge__count--running" aria-hidden="true">
+                              <Play size={11} fill="currentColor" strokeWidth={2.4} />
+                              <span>{running}</span>
+                            </span>
+                          )}
                         </span>
                       )}
                       <button

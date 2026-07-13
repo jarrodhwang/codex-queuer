@@ -970,8 +970,9 @@
   text-align: left;
 }
 
+.project-item--queued .project-item-main,
 .project-item--running .project-item-main {
-  padding-right: 34px;
+  padding-right: 82px;
 }
 
 .project-name-row {
@@ -1002,11 +1003,48 @@
 }
 
 .project-queue-badge {
-  top: 50%;
-  right: 0;
-  transform: translate(50%, -50%);
+  top: 4px;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  width: auto;
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  box-shadow: none;
+}
+
+.project-queue-badge__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 28px;
+  height: 24px;
+  box-sizing: border-box;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 12px;
+  font-weight: 850;
+  line-height: 1;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.58), 0 3px 8px rgba(15, 23, 42, 0.1);
+}
+
+.project-queue-badge__count--queued {
+  border-color: rgba(217, 119, 6, 0.25);
   background: rgba(254, 243, 199, 0.95);
   color: #92400e;
+}
+
+.project-queue-badge__count--running {
+  border-color: rgba(14, 165, 233, 0.28);
+  background: rgba(224, 242, 254, 0.96);
+  color: #0369a1;
 }
 
 .notification-badge {
@@ -4916,7 +4954,6 @@
 }
 
 .request-card-meta-row span,
-.project-queue-badge,
 .usage-sidebar-pill,
 .queue-index,
 .model-chip--time,
@@ -5660,7 +5697,6 @@
 
 :root[data-theme='dark'] :is(
   .machine-chip,
-  .project-queue-badge,
   .request-stage-chip,
   .usage-sidebar-pill,
   .usage-machine-head > span:last-child,
@@ -5699,10 +5735,22 @@
   stroke: rgba(148, 163, 184, 0.4);
 }
 
-:root[data-theme='dark'] :is(.project-queue-badge, .status-badge--queued, .status-badge--cancelrequested) {
+:root[data-theme='dark'] :is(.status-badge--queued, .status-badge--cancelrequested) {
   border-color: rgba(252, 211, 77, 0.3);
   background: rgba(120, 53, 15, 0.48);
   color: #fde68a;
+}
+
+:root[data-theme='dark'] .project-queue-badge__count--queued {
+  border-color: rgba(252, 211, 77, 0.3);
+  background: rgba(120, 53, 15, 0.56);
+  color: #fde68a;
+}
+
+:root[data-theme='dark'] .project-queue-badge__count--running {
+  border-color: rgba(103, 232, 249, 0.32);
+  background: rgba(8, 95, 130, 0.52);
+  color: #a5f3fc;
 }
 
 :root[data-theme='dark'] :is(.status-badge--running, .status-badge--usagelimited) {
