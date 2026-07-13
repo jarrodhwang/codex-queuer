@@ -1515,6 +1515,16 @@ function MachineConnectionStatus({
 function UsageLimitModal({ machines, requests, now, onClose }: { machines: Machine[]; requests: CodexRequest[]; now: number; onClose: () => void }) {
   const [usage, setUsage] = useState<Record<string, MachineRateLimits>>({})
   const [loading, setLoading] = useState(true)
+  const [displayNow, setDisplayNow] = useState(now)
+
+  useEffect(() => {
+    setDisplayNow(now)
+  }, [now])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setDisplayNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -1552,7 +1562,7 @@ function UsageLimitModal({ machines, requests, now, onClose }: { machines: Machi
   return (
     <Modal title="Codex usage" icon={<GaugeIcon size={18} />} onClose={onClose} wide>
       <div className="usage-modal">
-        <UsageLimitSidebarPanel machines={machines} usage={usage} loading={loading} requests={requests} now={now} />
+        <UsageLimitSidebarPanel machines={machines} usage={usage} loading={loading} requests={requests} now={displayNow} />
       </div>
     </Modal>
   )
@@ -1574,7 +1584,7 @@ function UsageLimitSidebarPanel({ machines, usage, loading, requests, now }: { m
         {loading && <div className="usage-sidebar-loading" role="status"><RefreshCcw className="action-spinner" size={14} aria-hidden="true" /><span>Loading usage</span></div>}
         {machines.length === 0 && <div className="usage-empty-state">No connections</div>}
         {machines.map((machine) => usage[machine.id] && (
-          <MachineUsageSection key={machine.id} snapshot={usage[machine.id]} />
+          <MachineUsageSection key={machine.id} snapshot={usage[machine.id]} now={now} />
         ))}
         {active && <PausedUsageSection buckets={buckets.filter((bucket) => bucket.limited)} />}
       </div>
@@ -1582,38 +1592,39 @@ function UsageLimitSidebarPanel({ machines, usage, loading, requests, now }: { m
   )
 }
 
-function MachineUsageSection({ snapshot }: { snapshot?: MachineRateLimits }) {
+function MachineUsageSection({ snapshot, now }: { snapshot?: MachineRateLimits; now: number }) {
   if (!snapshot || !snapshot.available) {
     return <section className="usage-machine usage-machine--unavailable"><div className="usage-machine-head"><span className="usage-machine-name-chip">{snapshot?.machineName ?? 'Machine'}</span><span>Unavailable</span></div><div className="meta">{snapshot?.error ?? 'No usage data returned.'}</div></section>
   }
 
   return <section className="usage-machine">
     <div className="usage-machine-head"><span className="usage-machine-name-chip">{snapshot.machineName}</span></div>
-    {snapshot.limits.length > 0 ? <div className="usage-limit-grid">{snapshot.limits.map((limit) => <RateLimitSection key={limit.id} limit={limit} />)}</div> : <div className="usage-empty-state">No active limits</div>}
+    {snapshot.limits.length > 0 ? <div className="usage-limit-grid">{snapshot.limits.map((limit) => <RateLimitSection key={limit.id} limit={limit} now={now} />)}</div> : <div className="usage-empty-state">No active limits</div>}
   </section>
 }
 
-function RateLimitSection({ limit }: { limit: RateLimit }) {
+function RateLimitSection({ limit, now }: { limit: RateLimit; now: number }) {
   const windows = [limit.primary, limit.secondary]
   return <section className={`usage-limit ${limit.rateLimitReachedType ? 'usage-limit--limited' : ''}`}>
     <div className="usage-limit-head"><span className="usage-model-name-chip">{limit.name}</span>{limit.rateLimitReachedType && <span>Limited</span>}</div>
     <div className="usage-window-grid">
-      {windows.map((window, index) => window && <UsageWindow key={index} window={window} limited={Boolean(limit.rateLimitReachedType)} />)}
+      {windows.map((window, index) => window && <UsageWindow key={index} window={window} limited={Boolean(limit.rateLimitReachedType)} now={now} />)}
     </div>
     {!limit.primary && !limit.secondary && <div className="usage-empty-state">No active windows</div>}
   </section>
 }
 
-function UsageWindow({ window, limited }: { window: NonNullable<RateLimit['primary']>; limited: boolean }) {
+function UsageWindow({ window, limited, now }: { window: NonNullable<RateLimit['primary']>; limited: boolean; now: number }) {
   const remaining = Math.max(0, 100 - window.usedPercent)
   const reset = window.resetsAt ? formatDate(new Date(window.resetsAt * 1000).toISOString()) : 'reset time unknown'
+  const resetIn = window.resetsAt ? formatRemainingTime(new Date(window.resetsAt * 1000).toISOString(), now) : null
   const duration = window.windowDurationMins ? ` · ${formatWindowDuration(window.windowDurationMins)}` : ''
   return <div className="usage-window">
     <GlassGauge label="Usage remaining" value={remaining} tone={limited ? 'limited' : 'default'} hideCaption />
     <div className="usage-window-detail">
       <span>{remaining}% left{duration}</span>
       <div className="usage-window-reset">
-        <span>Resets</span>
+        <span>{resetIn ? `Resets in ${resetIn}` : 'Resets'}</span>
         <strong>{reset}</strong>
       </div>
     </div>
