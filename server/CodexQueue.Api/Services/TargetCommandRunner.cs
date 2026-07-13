@@ -20,7 +20,7 @@ public interface ITargetCommandRunner
         string? codexSessionId,
         IReadOnlyList<string>? imagePaths,
         string prompt,
-        bool allowGitWrites,
+        PermissionMode permissionMode,
         Func<string, Task> onOutput,
         CancellationToken cancellationToken);
 
@@ -111,7 +111,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         string? codexSessionId,
         IReadOnlyList<string>? imagePaths,
         string prompt,
-        bool allowGitWrites,
+        PermissionMode permissionMode,
         Func<string, Task> onOutput,
         CancellationToken cancellationToken)
     {
@@ -124,7 +124,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 modelSpeed,
                 codexSessionId,
                 imagePaths,
-                allowGitWrites,
+                permissionMode,
                 disableWindowsSandbox: false);
             if (machine.TargetsWindows())
             {
@@ -162,7 +162,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                     modelSpeed,
                     codexSessionId,
                     imagePaths,
-                    allowGitWrites,
+                    permissionMode,
                     disableWindowsSandbox: true).Select(QuotePowerShellValue));
 
             return RunSshAsync(
@@ -189,7 +189,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 modelSpeed,
                 codexSessionId,
                 imagePaths,
-                allowGitWrites,
+                permissionMode,
                 disableWindowsSandbox: false).Select(Quote))
         });
 
@@ -712,7 +712,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         string? modelSpeed,
         string? codexSessionId,
         IReadOnlyList<string>? imagePaths,
-        bool allowGitWrites,
+        PermissionMode permissionMode,
         bool disableWindowsSandbox)
     {
         var arguments = new List<string> { "exec" };
@@ -744,19 +744,17 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         {
             arguments.Add("-C");
             arguments.Add(projectPath);
-            arguments.Add("-c");
-            arguments.Add("approval_policy=\"never\"");
+            arguments.Add("-a");
+            arguments.Add(permissionMode == PermissionMode.AskForApproval ? "untrusted" : "never");
             arguments.Add("-s");
-            arguments.Add(allowGitWrites || disableWindowsSandbox ? "danger-full-access" : "workspace-write");
+            arguments.Add(permissionMode == PermissionMode.ReadOnly ? "read-only" : permissionMode == PermissionMode.FullAccess || disableWindowsSandbox ? "danger-full-access" : "workspace-write");
         }
         else
         {
             arguments.Add("-c");
-            arguments.Add("approval_policy=\"never\"");
+            arguments.Add("approval_policy=\"" + (permissionMode == PermissionMode.AskForApproval ? "untrusted" : "never") + "\"");
             arguments.Add("-c");
-            arguments.Add(allowGitWrites || disableWindowsSandbox
-                ? "sandbox_mode=\"danger-full-access\""
-                : "sandbox_mode=\"workspace-write\"");
+            arguments.Add("sandbox_mode=\"" + (permissionMode == PermissionMode.ReadOnly ? "read-only" : permissionMode == PermissionMode.FullAccess || disableWindowsSandbox ? "danger-full-access" : "workspace-write") + "\"");
             arguments.Add(codexSessionId);
         }
 

@@ -40,6 +40,7 @@ public sealed record ProjectDto(
     string? DefaultCommitModelSpeed,
     bool DefaultGenerateCommit,
     bool DefaultSeparateCommitSession,
+    PermissionMode DefaultPermissionMode,
     bool SeparateQueuesByTab,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt);
@@ -56,6 +57,7 @@ public sealed record SaveProjectRequest(
     string? DefaultCommitModelSpeed,
     bool? DefaultGenerateCommit,
     bool? DefaultSeparateCommitSession,
+    PermissionMode? DefaultPermissionMode,
     bool? SeparateQueuesByTab);
 
 public sealed record QueueTabDto(
@@ -79,6 +81,7 @@ public sealed record CreateQueueRequest(
     string? ModelSpeed,
     bool GenerateCommit,
     bool SeparateCommitSession,
+    PermissionMode PermissionMode,
     string? CommitModel,
     string? CommitModelEffort,
     string? CommitModelSpeed);
@@ -91,6 +94,7 @@ public sealed record UpdateQueueRequest(
     string? ModelSpeed,
     bool GenerateCommit,
     bool SeparateCommitSession,
+    PermissionMode PermissionMode,
     string? CommitModel,
     string? CommitModelEffort,
     string? CommitModelSpeed);
@@ -145,6 +149,7 @@ public sealed record CodexRequestDto(
     QueueStatus Status,
     bool GenerateCommit,
     bool SeparateCommitSession,
+    PermissionMode PermissionMode,
     string? CommitModel,
     string? CommitModelEffort,
     string? CommitModelSpeed,

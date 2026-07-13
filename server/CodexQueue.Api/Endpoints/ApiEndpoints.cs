@@ -290,8 +290,9 @@ public static class ApiEndpoints
                 DefaultCommitModel = NormalizeOptional(input.DefaultCommitModel),
                 DefaultCommitModelEffort = NormalizeEffort(input.DefaultCommitModelEffort, input.DefaultCommitModel ?? input.DefaultModel),
                 DefaultCommitModelSpeed = NormalizeOptionalSpeed(input.DefaultCommitModelSpeed),
-                DefaultGenerateCommit = input.DefaultGenerateCommit ?? true,
-                DefaultSeparateCommitSession = input.DefaultSeparateCommitSession ?? false,
+                DefaultGenerateCommit = input.DefaultPermissionMode != PermissionMode.ReadOnly && (input.DefaultGenerateCommit ?? true),
+                DefaultSeparateCommitSession = input.DefaultPermissionMode != PermissionMode.ReadOnly && (input.DefaultSeparateCommitSession ?? false),
+                DefaultPermissionMode = input.DefaultPermissionMode ?? PermissionMode.ApproveForMe,
                 SeparateQueuesByTab = input.SeparateQueuesByTab ?? false
             };
             db.Projects.Add(project);
@@ -359,8 +360,9 @@ public static class ApiEndpoints
             project.DefaultCommitModel = NormalizeOptional(input.DefaultCommitModel);
             project.DefaultCommitModelEffort = NormalizeEffort(input.DefaultCommitModelEffort, input.DefaultCommitModel ?? input.DefaultModel);
             project.DefaultCommitModelSpeed = NormalizeOptionalSpeed(input.DefaultCommitModelSpeed);
-            project.DefaultGenerateCommit = input.DefaultGenerateCommit ?? true;
-            project.DefaultSeparateCommitSession = input.DefaultSeparateCommitSession ?? false;
+            project.DefaultGenerateCommit = input.DefaultPermissionMode != PermissionMode.ReadOnly && (input.DefaultGenerateCommit ?? true);
+            project.DefaultSeparateCommitSession = input.DefaultPermissionMode != PermissionMode.ReadOnly && (input.DefaultSeparateCommitSession ?? false);
+            project.DefaultPermissionMode = input.DefaultPermissionMode ?? PermissionMode.ApproveForMe;
             project.SeparateQueuesByTab = input.SeparateQueuesByTab ?? false;
             project.UpdatedAt = DateTimeOffset.UtcNow;
             if (executionContextChanged)
@@ -555,7 +557,7 @@ public static class ApiEndpoints
                     null,
                     null,
                     prompt,
-                    true,
+                    PermissionMode.FullAccess,
                     _ => Task.CompletedTask,
                     cancellationToken);
 
@@ -655,7 +657,7 @@ public static class ApiEndpoints
                     null,
                     null,
                     prompt,
-                    false,
+                    PermissionMode.ReadOnly,
                     _ => Task.CompletedTask,
                     cancellationToken);
 
@@ -846,8 +848,9 @@ public static class ApiEndpoints
                 Model = input.Model.Trim(),
                 ModelEffort = NormalizeEffort(input.ModelEffort, input.Model),
                 ModelSpeed = NormalizeSpeed(input.ModelSpeed),
-                GenerateCommit = input.GenerateCommit,
-                SeparateCommitSession = input.GenerateCommit && input.SeparateCommitSession,
+                GenerateCommit = input.PermissionMode != PermissionMode.ReadOnly && input.GenerateCommit,
+                SeparateCommitSession = input.PermissionMode != PermissionMode.ReadOnly && input.GenerateCommit && input.SeparateCommitSession,
+                PermissionMode = input.PermissionMode,
                 CommitModel = string.IsNullOrWhiteSpace(input.CommitModel) ? null : input.CommitModel.Trim(),
                 CommitModelEffort = NormalizeEffort(input.CommitModelEffort, input.CommitModel ?? input.Model),
                 CommitModelSpeed = NormalizeSpeed(input.CommitModelSpeed),
@@ -911,8 +914,9 @@ public static class ApiEndpoints
             request.Model = input.Model.Trim();
             request.ModelEffort = NormalizeEffort(input.ModelEffort, input.Model);
             request.ModelSpeed = NormalizeSpeed(input.ModelSpeed);
-            request.GenerateCommit = input.GenerateCommit;
-            request.SeparateCommitSession = input.GenerateCommit && input.SeparateCommitSession;
+            request.GenerateCommit = input.PermissionMode != PermissionMode.ReadOnly && input.GenerateCommit;
+            request.SeparateCommitSession = input.PermissionMode != PermissionMode.ReadOnly && input.GenerateCommit && input.SeparateCommitSession;
+            request.PermissionMode = input.PermissionMode;
             request.CommitModel = string.IsNullOrWhiteSpace(input.CommitModel) ? null : input.CommitModel.Trim();
             request.CommitModelEffort = NormalizeEffort(input.CommitModelEffort, input.CommitModel ?? input.Model);
             request.CommitModelSpeed = NormalizeSpeed(input.CommitModelSpeed);

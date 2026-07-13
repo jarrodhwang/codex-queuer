@@ -10,6 +10,7 @@ export type QueueStatus =
   | 'Cancelled'
 
 export type RunKind = 'Request' | 'Commit'
+export type PermissionMode = 'ReadOnly' | 'AskForApproval' | 'ApproveForMe' | 'FullAccess'
 
 export type Machine = {
   id: string
@@ -51,6 +52,7 @@ export type Project = {
   defaultCommitModelSpeed?: string | null
   defaultGenerateCommit?: boolean | null
   defaultSeparateCommitSession?: boolean | null
+  defaultPermissionMode?: PermissionMode | null
   separateQueuesByTab: boolean
   createdAt: string
   updatedAt: string
@@ -68,6 +70,7 @@ export type SaveProjectRequest = {
   defaultCommitModelSpeed?: string | null
   defaultGenerateCommit?: boolean | null
   defaultSeparateCommitSession?: boolean | null
+  defaultPermissionMode?: PermissionMode | null
   separateQueuesByTab?: boolean | null
 }
 
@@ -89,6 +92,7 @@ export type CreateQueueRequest = {
   modelSpeed?: string | null
   generateCommit: boolean
   separateCommitSession: boolean
+  permissionMode: PermissionMode
   commitModel?: string | null
   commitModelEffort?: string | null
   commitModelSpeed?: string | null
@@ -143,6 +147,7 @@ export type CodexRequest = {
   status: QueueStatus
   generateCommit: boolean
   separateCommitSession: boolean
+  permissionMode: PermissionMode
   retryAfter?: string | null
   retryReason?: string | null
   availableModel?: string | null

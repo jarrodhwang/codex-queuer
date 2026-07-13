@@ -51,6 +51,7 @@ import type {
   RateLimit,
   ModelOption,
   Project,
+  PermissionMode,
   QueueAttachment,
   QueueDiagnostics,
   QueueTab,
@@ -83,6 +84,7 @@ type ProjectModelDefaults = {
   commitModel: ModelValue
   generateCommit: boolean
   separateCommitSession: boolean
+  permissionMode: PermissionMode
 }
 
 type RightRailView = 'files' | 'git'
@@ -194,6 +196,7 @@ function projectSavePayload(project: Project, overrides: Partial<SaveProjectRequ
     defaultCommitModelSpeed: project.defaultCommitModelSpeed,
     defaultGenerateCommit: project.defaultGenerateCommit ?? true,
     defaultSeparateCommitSession: project.defaultSeparateCommitSession ?? false,
+    defaultPermissionMode: project.defaultPermissionMode ?? 'ApproveForMe',
     separateQueuesByTab: project.separateQueuesByTab ?? false,
     ...overrides,
   }
@@ -210,11 +213,13 @@ function modelValueFromDefaults(model: string | null | undefined, effort: string
 function projectModelDefaults(project: Project, models: ModelOption[]): ProjectModelDefaults {
   const requestFallback = models[0] ?? defaultModels[0]
   const commitFallback = models[1] ?? requestFallback
+  const permissionMode = project.defaultPermissionMode ?? 'ApproveForMe'
   return {
     requestModel: modelValueFromDefaults(project.defaultModel, project.defaultModelEffort, project.defaultModelSpeed, requestFallback),
     commitModel: modelValueFromDefaults(project.defaultCommitModel, project.defaultCommitModelEffort, project.defaultCommitModelSpeed, commitFallback),
-    generateCommit: project.defaultGenerateCommit ?? true,
-    separateCommitSession: project.defaultSeparateCommitSession ?? false,
+    generateCommit: permissionMode !== 'ReadOnly' && (project.defaultGenerateCommit ?? true),
+    separateCommitSession: permissionMode !== 'ReadOnly' && (project.defaultSeparateCommitSession ?? false),
+    permissionMode,
   }
 }
 
@@ -690,6 +695,7 @@ function App() {
         defaultCommitModelSpeed: defaults.commitModel.speed,
         defaultGenerateCommit: defaults.generateCommit,
         defaultSeparateCommitSession: defaults.separateCommitSession,
+        defaultPermissionMode: defaults.permissionMode,
       }), project.id)
       setProjects((current) => current.map((item) => (item.id === updated.id ? updated : item)))
     } catch (cause) {
@@ -2668,6 +2674,8 @@ function QueueComposer({
   const [commitModel, setCommitModel] = useState<ModelValue>(defaults.commitModel)
   const [generateCommit, setGenerateCommit] = useState(defaults.generateCommit)
   const [separateCommitSession, setSeparateCommitSession] = useState(defaults.separateCommitSession)
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>(defaults.permissionMode)
+  const [approvalDialogOpen, setApprovalDialogOpen] = useState(false)
   const [prompt, setPrompt] = useState('')
   const [attachments, setAttachments] = useState<LocalQueueAttachment[]>([])
   const [attachmentError, setAttachmentError] = useState('')
@@ -2686,6 +2694,7 @@ function QueueComposer({
       })
       setGenerateCommit(editingRequest.generateCommit)
       setSeparateCommitSession(editingRequest.separateCommitSession)
+      setPermissionMode(editingRequest.permissionMode)
       setPrompt(editingRequest.prompt)
       setAttachments([])
       setAttachmentError('')
@@ -2696,6 +2705,7 @@ function QueueComposer({
     setCommitModel(defaults.commitModel)
     setGenerateCommit(defaults.generateCommit)
     setSeparateCommitSession(defaults.separateCommitSession)
+    setPermissionMode(defaults.permissionMode)
   }, [defaults, editingRequest, selectedProject.id])
 
   const defaultsChanged =
@@ -2706,17 +2716,18 @@ function QueueComposer({
     commitModel.effort !== defaults.commitModel.effort ||
     commitModel.speed !== defaults.commitModel.speed ||
     generateCommit !== defaults.generateCommit ||
-    separateCommitSession !== defaults.separateCommitSession
+    separateCommitSession !== defaults.separateCommitSession ||
+    permissionMode !== defaults.permissionMode
 
   const resetModelSelections = () => {
     setRequestModel(defaults.requestModel)
     setCommitModel(defaults.commitModel)
     setGenerateCommit(defaults.generateCommit)
     setSeparateCommitSession(defaults.separateCommitSession)
+    setPermissionMode(defaults.permissionMode)
   }
 
-  const submit = async (event: FormEvent) => {
-    event.preventDefault()
+  const queueRequest = async () => {
     if (!editingRequest) {
       requestCompletionNotificationPermission()
     }
@@ -2731,6 +2742,7 @@ function QueueComposer({
         modelSpeed: requestModel.speed,
         generateCommit,
         separateCommitSession: generateCommit && separateCommitSession,
+        permissionMode,
         commitModel: commitModel.model,
         commitModelEffort: commitModel.effort,
         commitModelSpeed: commitModel.speed,
@@ -2763,6 +2775,7 @@ function QueueComposer({
           status: 'Queued',
           generateCommit,
           separateCommitSession: generateCommit && separateCommitSession,
+          permissionMode,
           commitModel: commitModel.model,
           commitModelEffort: commitModel.effort,
           commitModelSpeed: commitModel.speed,
@@ -2798,6 +2811,15 @@ function QueueComposer({
     } finally {
       setIsQueueing(false)
     }
+  }
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    if (permissionMode === 'AskForApproval') {
+      setApprovalDialogOpen(true)
+      return
+    }
+    void queueRequest()
   }
 
   const addFiles = async (files: FileList | File[]) => {
@@ -2845,7 +2867,7 @@ function QueueComposer({
   const saveDefaults = async () => {
     setSavingDefaults(true)
     try {
-      await onUpdateProjectDefaults(selectedProject, { requestModel, commitModel, generateCommit, separateCommitSession: generateCommit && separateCommitSession })
+      await onUpdateProjectDefaults(selectedProject, { requestModel, commitModel, generateCommit: permissionMode !== 'ReadOnly' && generateCommit, separateCommitSession: permissionMode !== 'ReadOnly' && generateCommit && separateCommitSession, permissionMode })
     } catch (cause) {
       onError(cause)
     } finally {
@@ -2941,10 +2963,11 @@ function QueueComposer({
         <div className="composer-actions-row">
           <div className="commit-options">
             <div className="commit-toggle-group" aria-label="Commit options">
-              <label className={`commit-toggle ${generateCommit ? 'active' : ''}`}>
+              <label className={`commit-toggle ${generateCommit ? 'active' : ''} ${permissionMode === 'ReadOnly' ? 'disabled' : ''}`}>
                 <input
                   type="checkbox"
                   checked={generateCommit}
+                  disabled={permissionMode === 'ReadOnly'}
                   onChange={(event) => {
                     setGenerateCommit(event.target.checked)
                     if (!event.target.checked) {
@@ -2955,16 +2978,35 @@ function QueueComposer({
                 <span className="commit-toggle-icon"><Check size={12} /></span>
                 <span>Generate git commit</span>
               </label>
-              <label className={`commit-toggle ${generateCommit && separateCommitSession ? 'active' : ''} ${!generateCommit ? 'disabled' : ''}`}>
+              <label className={`commit-toggle ${generateCommit && separateCommitSession ? 'active' : ''} ${!generateCommit || permissionMode === 'ReadOnly' ? 'disabled' : ''}`}>
                 <input
                   type="checkbox"
                   checked={generateCommit && separateCommitSession}
-                  disabled={!generateCommit}
+                  disabled={!generateCommit || permissionMode === 'ReadOnly'}
                   onChange={(event) => setSeparateCommitSession(event.target.checked)}
                 />
                 <span className="commit-toggle-icon"><Check size={12} /></span>
                 <span>Separate commit session</span>
               </label>
+              <GlassDropdownSelect
+                label="Codex permission"
+                className="permission-mode-select"
+                value={permissionMode}
+                onChange={(value) => {
+                  const nextMode = value as PermissionMode
+                  setPermissionMode(nextMode)
+                  if (nextMode === 'ReadOnly') {
+                    setGenerateCommit(false)
+                    setSeparateCommitSession(false)
+                  }
+                }}
+                options={[
+                  { value: 'ReadOnly', label: 'Read only' },
+                  { value: 'AskForApproval', label: 'Ask for approval' },
+                  { value: 'ApproveForMe', label: 'Approve for me' },
+                  { value: 'FullAccess', label: 'Full access' },
+                ]}
+              />
             </div>
           </div>
           <div className="button-row">
@@ -2978,6 +3020,18 @@ function QueueComposer({
           </div>
         </div>
       </form>
+      {approvalDialogOpen && (
+        <ConfirmDialog
+          title="Approve queued work?"
+          description={<>This request uses <strong>Ask for approval</strong>. Codex will run in the workspace-write sandbox and stop when it needs an untrusted command. Review the prompt, then approve this queue item to start it.</>}
+          confirmLabel="Approve and queue"
+          onCancel={() => setApprovalDialogOpen(false)}
+          onConfirm={async () => {
+            setApprovalDialogOpen(false)
+            await queueRequest()
+          }}
+        />
+      )}
     </GlassPanel>
   )
 }

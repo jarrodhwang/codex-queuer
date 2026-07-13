@@ -35,6 +35,7 @@ public static class Mapping
             project.DefaultCommitModelSpeed,
             project.DefaultGenerateCommit,
             project.DefaultSeparateCommitSession,
+            project.DefaultPermissionMode,
             project.SeparateQueuesByTab,
             project.CreatedAt,
             project.UpdatedAt);
@@ -67,6 +68,7 @@ public static class Mapping
             request.Status,
             request.GenerateCommit,
             request.SeparateCommitSession,
+            request.PermissionMode,
             request.CommitModel,
             request.CommitModelEffort,
             request.CommitModelSpeed,

@@ -31,6 +31,7 @@ public sealed class Project
     public string? DefaultCommitModelSpeed { get; set; }
     public bool DefaultGenerateCommit { get; set; } = true;
     public bool DefaultSeparateCommitSession { get; set; }
+    public PermissionMode DefaultPermissionMode { get; set; } = PermissionMode.ApproveForMe;
     public bool SeparateQueuesByTab { get; set; }
     public Guid MachineId { get; set; }
     public TargetMachine? Machine { get; set; }
@@ -73,6 +74,7 @@ public sealed class CodexRequest
     public QueueStatus Status { get; set; } = QueueStatus.Queued;
     public bool GenerateCommit { get; set; }
     public bool SeparateCommitSession { get; set; }
+    public PermissionMode PermissionMode { get; set; } = PermissionMode.ApproveForMe;
     public string? CommitModel { get; set; }
     public string? CommitModelEffort { get; set; }
     public string? CommitModelSpeed { get; set; }

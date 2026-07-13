@@ -24,6 +24,7 @@ public static class DbInitializer
         await EnsureColumnAsync(db, "Requests", "CommitModelEffort", "ALTER TABLE \"Requests\" ADD COLUMN \"CommitModelEffort\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "CommitModelSpeed", "ALTER TABLE \"Requests\" ADD COLUMN \"CommitModelSpeed\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "SeparateCommitSession", "ALTER TABLE \"Requests\" ADD COLUMN \"SeparateCommitSession\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnAsync(db, "Requests", "PermissionMode", "ALTER TABLE \"Requests\" ADD COLUMN \"PermissionMode\" TEXT NOT NULL DEFAULT 'ApproveForMe'", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "AttachmentsJson", "ALTER TABLE \"Requests\" ADD COLUMN \"AttachmentsJson\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "RetryAfter", "ALTER TABLE \"Requests\" ADD COLUMN \"RetryAfter\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "RetryReason", "ALTER TABLE \"Requests\" ADD COLUMN \"RetryReason\" TEXT NULL", cancellationToken);
@@ -39,6 +40,7 @@ public static class DbInitializer
         await EnsureColumnAsync(db, "Projects", "DefaultCommitModelSpeed", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultCommitModelSpeed\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Projects", "DefaultGenerateCommit", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultGenerateCommit\" INTEGER NOT NULL DEFAULT 1", cancellationToken);
         await EnsureColumnAsync(db, "Projects", "DefaultSeparateCommitSession", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultSeparateCommitSession\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnAsync(db, "Projects", "DefaultPermissionMode", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultPermissionMode\" TEXT NOT NULL DEFAULT 'ApproveForMe'", cancellationToken);
         await EnsureColumnAsync(db, "Projects", "SeparateQueuesByTab", "ALTER TABLE \"Projects\" ADD COLUMN \"SeparateQueuesByTab\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "ModelEffort", "ALTER TABLE \"Runs\" ADD COLUMN \"ModelEffort\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "ModelSpeed", "ALTER TABLE \"Runs\" ADD COLUMN \"ModelSpeed\" TEXT NULL", cancellationToken);

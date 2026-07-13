@@ -30,3 +30,11 @@ public enum RunKind
     Request,
     Commit
 }
+
+public enum PermissionMode
+{
+    ReadOnly,
+    AskForApproval,
+    ApproveForMe,
+    FullAccess
+}

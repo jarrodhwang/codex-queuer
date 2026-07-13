@@ -38,6 +38,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.DefaultCommitModelSpeed).HasMaxLength(32);
             entity.Property(x => x.DefaultGenerateCommit);
             entity.Property(x => x.DefaultSeparateCommitSession);
+            entity.Property(x => x.DefaultPermissionMode).HasConversion<string>().HasMaxLength(32);
             entity.Property(x => x.SeparateQueuesByTab);
             entity.HasOne(x => x.Machine)
                 .WithMany(x => x.Projects)
@@ -55,6 +56,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.ModelSpeed).HasMaxLength(32);
             entity.Property(x => x.QueueOrder);
             entity.Property(x => x.SeparateCommitSession);
+            entity.Property(x => x.PermissionMode).HasConversion<string>().HasMaxLength(32);
             entity.Property(x => x.CommitModel).HasMaxLength(120);
             entity.Property(x => x.CommitModelEffort).HasMaxLength(32);
             entity.Property(x => x.CommitModelSpeed).HasMaxLength(32);

@@ -624,7 +624,7 @@ public sealed class QueueWorker(
                 request.QueueTab?.CodexSessionId,
                 attachments.ImagePaths,
                 prompt,
-                request.GenerateCommit && !request.SeparateCommitSession,
+                request.PermissionMode,
                 chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
                 cancellationToken);
 
@@ -700,7 +700,7 @@ public sealed class QueueWorker(
             null,
             null,
             prompt,
-            true,
+            request.PermissionMode,
             chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
             cancellationToken);
 

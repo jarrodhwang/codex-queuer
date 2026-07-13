@@ -1582,6 +1582,10 @@
   min-width: 0;
 }
 
+.permission-mode-select {
+  width: min(190px, 100%);
+}
+
 .commit-options {
   display: grid;
   gap: 6px;
