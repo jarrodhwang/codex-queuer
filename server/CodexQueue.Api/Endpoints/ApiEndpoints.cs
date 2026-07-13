@@ -423,7 +423,7 @@ public static class ApiEndpoints
             }
         });
 
-        api.MapGet("/projects/{id:guid}/git/status", async (Guid id, AppDbContext db, ITargetCommandRunner runner, CancellationToken cancellationToken) =>
+        api.MapGet("/projects/{id:guid}/git/status", async (Guid id, AppDbContext db, ITargetCommandRunner runner, CancellationToken cancellationToken, bool summary = false) =>
         {
             var project = await LoadProjectWithMachineAsync(id, db, cancellationToken);
             if (project is null)
@@ -450,16 +450,19 @@ public static class ApiEndpoints
                     return Results.BadRequest(new { error = StripCommandPreview(statusResult.Output).Trim() });
                 }
 
-                var diffStatResult = await runner.RunShellAsync(
-                    project.Machine,
-                    project.Path,
-                    "git diff --stat --no-ext-diff -- .; git diff --cached --stat --no-ext-diff -- .",
-                    _ => Task.CompletedTask,
-                    cancellationToken);
-
                 var statusOutput = StripCommandPreview(statusResult.Output);
                 var changes = ParseGitChanges(statusOutput, out var branch);
-                var diffStat = diffStatResult.Success ? StripCommandPreview(diffStatResult.Output).Trim() : "";
+                var diffStat = "";
+                if (!summary)
+                {
+                    var diffStatResult = await runner.RunShellAsync(
+                        project.Machine,
+                        project.Path,
+                        "git diff --stat --no-ext-diff -- .; git diff --cached --stat --no-ext-diff -- .",
+                        _ => Task.CompletedTask,
+                        cancellationToken);
+                    diffStat = diffStatResult.Success ? StripCommandPreview(diffStatResult.Output).Trim() : "";
+                }
                 return Results.Ok(new GitStatusDto(branch, changes.Count == 0, changes, diffStat, statusOutput.Trim()));
             }
             catch (Exception ex) when (ex is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)

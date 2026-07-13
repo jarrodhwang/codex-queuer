@@ -493,6 +493,7 @@ function App() {
   const [selectedProjectId, setSelectedProjectId] = useState('')
   const [rightOpen, setRightOpen] = useState(false)
   const [rightRailView, setRightRailView] = useState<RightRailView>('files')
+  const [gitChangeCounts, setGitChangeCounts] = useState<Record<string, number>>({})
   const [authBlocked, setAuthBlocked] = useState(false)
   const [error, setError] = useState('')
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([])
@@ -516,6 +517,7 @@ function App() {
   }, [theme])
 
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0]
+  const gitChangeCount = selectedProject ? gitChangeCounts[selectedProject.id] ?? null : null
   const activeFile = openFiles.find((file) => file.key === activeFileKey)
   const hasLiveTimers = useMemo(
     () => requests.some((request) =>
@@ -577,6 +579,10 @@ function App() {
     setError(cause instanceof Error ? cause.message : 'Request failed.')
   }, [])
 
+  const handleGitStatusChange = useCallback((projectId: string, status: GitStatus) => {
+    setGitChangeCounts((current) => ({ ...current, [projectId]: status.changes.length }))
+  }, [])
+
   const refreshLiveInBackground = useCallback(() => {
     void loadLive().catch(handleApiError)
   }, [handleApiError, loadLive])
@@ -627,6 +633,48 @@ function App() {
     }, 2200)
     return () => window.clearInterval(timer)
   }, [authBlocked, handleApiError, loadLive])
+
+  useEffect(() => {
+    const projectId = selectedProject?.id
+    let cancelled = false
+
+    if (authBlocked || !projectId) {
+      return () => {
+        cancelled = true
+      }
+    }
+
+    const loadGitChangeCount = async () => {
+      if (document.visibilityState === 'hidden') {
+        return
+      }
+
+      try {
+        const status = await api.gitStatus(projectId, true)
+        if (!cancelled) {
+          handleGitStatusChange(projectId, status)
+        }
+      } catch {
+        // The Git panel reports status failures when opened; a background badge
+        // check should not disrupt the rest of the workspace.
+      }
+    }
+
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void loadGitChangeCount()
+      }
+    }
+
+    void loadGitChangeCount()
+    const timer = window.setInterval(() => void loadGitChangeCount(), 15_000)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
+  }, [authBlocked, handleGitStatusChange, selectedProject?.id])
 
   useEffect(() => {
     if (!hasLiveTimers) return
@@ -1045,6 +1093,7 @@ function App() {
             onRefresh={refreshAll}
             onToggleFiles={() => toggleRightRail('files')}
             onOpenGit={() => toggleRightRail('git')}
+            gitChangeCount={gitChangeCount}
           />
         )}
       </main>
@@ -1067,6 +1116,7 @@ function App() {
         onOpenFile={openFile}
         onOpenChange={setRightOpen}
         onError={handleApiError}
+        onGitStatusChange={handleGitStatusChange}
       />
     </div>
   )
@@ -2160,6 +2210,7 @@ function QueueWorkspace({
   onRefresh,
   onToggleFiles,
   onOpenGit,
+  gitChangeCount,
 }: {
   config: ApiConfig
   selectedProject?: Project
@@ -2187,6 +2238,7 @@ function QueueWorkspace({
   onRefresh: () => Promise<void>
   onToggleFiles: () => void
   onOpenGit: () => void
+  gitChangeCount: number | null
 }) {
   const [activeTab, setActiveTab] = useState<'queue' | 'history' | 'terminal'>('queue')
   const [activeQueueTabId, setActiveQueueTabId] = useState<string | null>(null)
@@ -2264,6 +2316,7 @@ function QueueWorkspace({
             onRefresh={onRefresh}
             onToggleFiles={onToggleFiles}
             onOpenGit={onOpenGit}
+            gitChangeCount={gitChangeCount}
             onCreated={onCreated}
             onDiscardRequestPreview={onDiscardRequestPreview}
             onUpdateRequest={onUpdateRequest}
@@ -2651,6 +2704,7 @@ function QueueComposer({
   onRefresh,
   onToggleFiles,
   onOpenGit,
+  gitChangeCount,
   onCreated,
   onDiscardRequestPreview,
   onUpdateRequest,
@@ -2669,6 +2723,7 @@ function QueueComposer({
   onRefresh: () => Promise<void>
   onToggleFiles: () => void
   onOpenGit: () => void
+  gitChangeCount: number | null
   onCreated: (request: CodexRequest, replaceId?: string) => void
   onDiscardRequestPreview: (id: string) => void
   onUpdateRequest: (id: string, request: UpdateQueueRequest) => Promise<void>
@@ -2901,9 +2956,20 @@ function QueueComposer({
           <GlassButton variant="ghost" size="icon" onClick={onRefresh} title="Refresh">
             <RefreshCcw size={17} />
           </GlassButton>
-          <GlassButton variant="secondary" size="icon" onClick={onOpenGit} title="Open git panel">
-            <GitBranch size={17} />
-          </GlassButton>
+          <span className="git-panel-trigger">
+            <GlassButton
+              variant="secondary"
+              size="icon"
+              onClick={onOpenGit}
+              title={gitChangeCount && gitChangeCount > 0 ? `Open git panel (${formatFileCount(gitChangeCount)} changed)` : 'Open git panel'}
+              aria-label={gitChangeCount && gitChangeCount > 0 ? `Open git panel; ${formatFileCount(gitChangeCount)} changed` : 'Open git panel'}
+            >
+              <GitBranch size={17} />
+            </GlassButton>
+            {gitChangeCount !== null && gitChangeCount > 0 && (
+              <span className="git-panel-trigger-badge" aria-hidden="true">{gitChangeCount > 99 ? '99+' : gitChangeCount}</span>
+            )}
+          </span>
           <GlassButton variant="secondary" size="icon" onClick={onToggleFiles} title="Toggle project files">
             <Menu size={18} />
           </GlassButton>
@@ -5023,6 +5089,7 @@ function RightSheet({
   onOpenFile,
   onOpenChange,
   onError,
+  onGitStatusChange,
 }: {
   open: boolean
   config: ApiConfig
@@ -5031,6 +5098,7 @@ function RightSheet({
   onOpenFile: (project: Project, path: string) => Promise<void>
   onOpenChange: (open: boolean) => void
   onError: (cause: unknown) => void
+  onGitStatusChange: (projectId: string, status: GitStatus) => void
 }) {
   const title = view === 'git' ? 'Git' : 'Files'
   return (
@@ -5038,7 +5106,7 @@ function RightSheet({
       {selectedProject && view === 'files' ? (
         <DirectoryTree project={selectedProject} onOpenFile={onOpenFile} onError={onError} />
       ) : selectedProject && view === 'git' ? (
-        <GitPanel project={selectedProject} config={config} onError={onError} />
+        <GitPanel project={selectedProject} config={config} onError={onError} onStatusChange={onGitStatusChange} />
       ) : (
         <span className="muted">Select a project to use this panel.</span>
       )}
@@ -5050,10 +5118,12 @@ function GitPanel({
   project,
   config,
   onError,
+  onStatusChange,
 }: {
   project: Project
   config: ApiConfig
   onError: (cause: unknown) => void
+  onStatusChange: (projectId: string, status: GitStatus) => void
 }) {
   const defaults = useMemo(() => projectModelDefaults(project, config.models), [config.models, project])
   const [status, setStatus] = useState<GitStatus | null>(null)
@@ -5069,12 +5139,13 @@ function GitPanel({
     try {
       const nextStatus = await api.gitStatus(project.id)
       setStatus(nextStatus)
+      onStatusChange(project.id, nextStatus)
     } catch (cause) {
       onError(cause)
     } finally {
       setLoading(false)
     }
-  }, [onError, project.id])
+  }, [onError, onStatusChange, project.id])
 
   useEffect(() => {
     setStatus(null)

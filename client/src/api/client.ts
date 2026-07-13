@@ -148,7 +148,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ command }),
     }),
-  gitStatus: (projectId: string) => apiFetch<GitStatus>(`/projects/${projectId}/git/status`),
+  gitStatus: (projectId: string, summary = false) =>
+    apiFetch<GitStatus>(`/projects/${projectId}/git/status${summary ? '?summary=true' : ''}`),
   gitCommit: (projectId: string, request: GitCommitRequest) =>
     apiFetch<GitCommitResult>(`/projects/${projectId}/git/commit`, {
       method: 'POST',
