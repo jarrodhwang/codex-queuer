@@ -62,7 +62,6 @@ import type {
 import { FieldLabel, GlassButton, GlassDropdownSelect, GlassInput, GlassPanel, GlassSelect, GlassTextarea } from '@/components/einui/Glass'
 import { GlassGauge } from '@/components/einui/Gauge'
 import { ConfirmDialog } from '@/components/einui/ConfirmDialog'
-import { Sheet } from '@/components/einui/Sheet'
 import { ProgressLine, StatusBadge } from '@/components/einui/Status'
 import { formatDate, shortId } from '@/lib/utils'
 import './App.css'
@@ -1032,7 +1031,7 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${rightOpen ? 'app-shell--right-open' : ''}`}>
       <LeftSidebar
         theme={theme}
         onToggleTheme={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
@@ -1108,13 +1107,14 @@ function App() {
         />
       )}
 
-      <RightSheet
+      <RightRail
         open={rightOpen}
         config={config}
         view={rightRailView}
         selectedProject={selectedProject}
         onOpenFile={openFile}
         onOpenChange={setRightOpen}
+        onViewChange={setRightRailView}
         onError={handleApiError}
         onGitStatusChange={handleGitStatusChange}
       />
@@ -5131,13 +5131,14 @@ function RequestHistory({
   )
 }
 
-function RightSheet({
+function RightRail({
   open,
   config,
   view,
   selectedProject,
   onOpenFile,
   onOpenChange,
+  onViewChange,
   onError,
   onGitStatusChange,
 }: {
@@ -5147,20 +5148,47 @@ function RightSheet({
   selectedProject?: Project
   onOpenFile: (project: Project, path: string) => Promise<void>
   onOpenChange: (open: boolean) => void
+  onViewChange: (view: RightRailView) => void
   onError: (cause: unknown) => void
   onGitStatusChange: (projectId: string, status: GitStatus) => void
 }) {
-  const title = view === 'git' ? 'Git' : 'Files'
+  if (!open) return null
+
   return (
-    <Sheet open={open} title={title} onOpenChange={onOpenChange}>
-      {selectedProject && view === 'files' ? (
-        <DirectoryTree project={selectedProject} onOpenFile={onOpenFile} onError={onError} />
-      ) : selectedProject && view === 'git' ? (
-        <GitPanel project={selectedProject} config={config} onError={onError} onStatusChange={onGitStatusChange} />
-      ) : (
-        <span className="muted">Select a project to use this panel.</span>
-      )}
-    </Sheet>
+    <aside className="right-rail" aria-label="Project tools">
+      <header className="right-rail__header">
+        <div className="right-rail__tabs" aria-label="Project tools">
+          <button
+            type="button"
+            className={view === 'files' ? 'active' : ''}
+            aria-pressed={view === 'files'}
+            onClick={() => onViewChange('files')}
+          >
+            Files
+          </button>
+          <button
+            type="button"
+            className={view === 'git' ? 'active' : ''}
+            aria-pressed={view === 'git'}
+            onClick={() => onViewChange('git')}
+          >
+            Git
+          </button>
+        </div>
+        <GlassButton variant="ghost" size="icon" type="button" onClick={() => onOpenChange(false)} aria-label="Close project tools">
+          <X size={16} />
+        </GlassButton>
+      </header>
+      <div className="right-rail__body">
+        {selectedProject && view === 'files' ? (
+          <DirectoryTree project={selectedProject} onOpenFile={onOpenFile} onError={onError} />
+        ) : selectedProject && view === 'git' ? (
+          <GitPanel project={selectedProject} config={config} onError={onError} onStatusChange={onGitStatusChange} />
+        ) : (
+          <span className="muted">Select a project to use this panel.</span>
+        )}
+      </div>
+    </aside>
   )
 }
 
