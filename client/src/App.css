@@ -1107,11 +1107,53 @@
 }
 
 .project-item .project-name {
-  overflow: visible;
-  text-overflow: clip;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  position: relative;
+  overflow: hidden;
   line-height: 1.2;
+}
+
+.project-name__measure {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.project-name__measure--wrapped {
+  inset: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.project-name__measure--single-line {
+  width: max-content;
+  white-space: nowrap;
+}
+
+.project-name__text {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+
+.project-name--marquee .project-name__text {
+  display: block;
+  width: max-content;
+  max-width: none;
+  overflow: visible;
+  white-space: nowrap;
+  animation: project-name-marquee 8s ease-in-out infinite alternate;
+}
+
+@keyframes project-name-marquee {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(calc(-1 * var(--project-name-scroll-distance)));
+  }
 }
 
 .truncate {
@@ -2315,6 +2357,10 @@
   .project-running-progress span {
     animation: none;
     transform: translateX(70%);
+  }
+
+  .project-name--marquee .project-name__text {
+    animation: none;
   }
 }
 

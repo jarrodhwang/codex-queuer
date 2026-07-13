@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ClipboardEvent, DragEvent, FormEvent, ReactNode } from 'react'
+import type { ClipboardEvent, CSSProperties, DragEvent, FormEvent, ReactNode } from 'react'
 import { createPortal, flushSync } from 'react-dom'
 import {
   ArrowDown,
@@ -1186,6 +1186,56 @@ function AuthScreen({ onAuthed }: { onAuthed: () => Promise<void> }) {
   )
 }
 
+function ProjectTitle({ name }: { name: string }) {
+  const titleRef = useRef<HTMLDivElement>(null)
+  const wrappedMeasureRef = useRef<HTMLSpanElement>(null)
+  const singleLineMeasureRef = useRef<HTMLSpanElement>(null)
+  const [marquee, setMarquee] = useState(false)
+  const [scrollDistance, setScrollDistance] = useState(0)
+
+  useEffect(() => {
+    const title = titleRef.current
+    if (!title) {
+      return
+    }
+
+    const updateOverflow = () => {
+      const wrappedMeasure = wrappedMeasureRef.current
+      const singleLineMeasure = singleLineMeasureRef.current
+      if (!wrappedMeasure || !singleLineMeasure) {
+        return
+      }
+
+      const lineHeight = Number.parseFloat(getComputedStyle(wrappedMeasure).lineHeight)
+      const exceedsTwoLines = wrappedMeasure.offsetHeight > (lineHeight * 2) + 1
+      setMarquee(exceedsTwoLines)
+      setScrollDistance(exceedsTwoLines ? Math.max(0, singleLineMeasure.offsetWidth - title.clientWidth) : 0)
+    }
+
+    updateOverflow()
+    const resizeObserver = new ResizeObserver(updateOverflow)
+    resizeObserver.observe(title)
+    return () => resizeObserver.disconnect()
+  }, [name])
+
+  return (
+    <div
+      ref={titleRef}
+      className={`project-name${marquee ? ' project-name--marquee' : ''}`}
+      title={name}
+    >
+      <span ref={wrappedMeasureRef} className="project-name__measure project-name__measure--wrapped" aria-hidden="true">{name}</span>
+      <span ref={singleLineMeasureRef} className="project-name__measure project-name__measure--single-line" aria-hidden="true">{name}</span>
+      <span
+        className="project-name__text"
+        style={{ '--project-name-scroll-distance': `${scrollDistance}px` } as CSSProperties}
+      >
+        {name}
+      </span>
+    </div>
+  )
+}
+
 function LeftSidebar({
   theme,
   onToggleTheme,
@@ -1340,7 +1390,7 @@ function LeftSidebar({
                     >
                       <button type="button" className="project-item-main" onClick={() => onSelectProject(project.id)}>
                         <div className="project-name-row">
-                          <div className="project-name" title={project.name}>{project.name}</div>
+                          <ProjectTitle name={project.name} />
                         </div>
                         <div className="meta truncate">{project.path}</div>
                       </button>
