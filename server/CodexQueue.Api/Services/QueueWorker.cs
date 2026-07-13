@@ -444,6 +444,7 @@ public sealed class QueueWorker(
             {
                 _lastError = ex.Message;
                 logger.LogError(ex, "Queue execution failed for project {ProjectId}, tab {QueueTabId}, and request {RequestId}.", dispatch.QueueLane.ProjectId, dispatch.QueueLane.QueueTabId, dispatch.RequestId);
+                await RecordUnhandledExecutionFailureAsync(dispatch.RequestId, dispatch.RunKind, ex);
             }
             finally
             {
@@ -605,7 +606,7 @@ public sealed class QueueWorker(
 
             await AppendOutputAsync(run.Id, "Preparing Codex request..." + Environment.NewLine, CancellationToken.None);
             var prompt = BuildProjectScopedPrompt(projectPath, BuildRequestPrompt(request));
-            var attachments = await MaterializeAttachmentsAsync(request, project, machine, cancellationToken);
+            var attachments = await MaterializeAttachmentsAsync(request, run.Id, project, machine, cancellationToken);
             if (!string.IsNullOrWhiteSpace(attachments.PromptSection))
             {
                 prompt += Environment.NewLine + Environment.NewLine + attachments.PromptSection;
@@ -1613,6 +1614,50 @@ public sealed class QueueWorker(
         await TrySaveChangesAsync(db, "mark failed", cancellationToken);
     }
 
+    private async Task RecordUnhandledExecutionFailureAsync(Guid requestId, RunKind kind, Exception exception)
+    {
+        // ExecuteRunAsync normally records failures itself. This is a final safety net
+        // for failures before its guarded section or while persisting that result; a
+        // released queue lane must never leave its request permanently "Running".
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var request = await db.Requests.Include(x => x.Runs).FirstOrDefaultAsync(x => x.Id == requestId);
+            if (request is null || request.Status is QueueStatus.Succeeded or QueueStatus.Failed or QueueStatus.Cancelled or QueueStatus.UsageLimited)
+            {
+                return;
+            }
+
+            if (request.Status == QueueStatus.CancelRequested)
+            {
+                MarkRequestCancelled(request, "Cancelled by user.");
+            }
+            else
+            {
+                var run = GetLatestRunOfKind(request.Runs, kind);
+                if (run is not null && run.Status is QueueStatus.Queued or QueueStatus.Running or QueueStatus.CancelRequested)
+                {
+                    run.Status = QueueStatus.Failed;
+                    run.FinishedAt = DateTimeOffset.UtcNow;
+                    run.Error = exception.Message;
+                    run.Output = TrimOutput(run.Output + Environment.NewLine + "Run failed: " + exception.Message + Environment.NewLine);
+                }
+
+                request.Status = QueueStatus.Failed;
+                request.FinishedAt = DateTimeOffset.UtcNow;
+                request.Error = kind == RunKind.Commit ? "Commit run failed: " + exception.Message : exception.Message;
+            }
+
+            await TrySaveChangesAsync(db, "record unhandled queue execution failure", CancellationToken.None);
+        }
+        catch (Exception persistenceException)
+        {
+            _lastError = persistenceException.Message;
+            logger.LogError(persistenceException, "Could not record the failure for queue request {RequestId}.", requestId);
+        }
+    }
+
     private async Task ResumeExpiredUsageLimitedRequestsAsync(AppDbContext db, CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
@@ -1692,7 +1737,12 @@ public sealed class QueueWorker(
 
     private sealed record MaterializedAttachments(string PromptSection, IReadOnlyList<string> ImagePaths);
 
-    private async Task<MaterializedAttachments> MaterializeAttachmentsAsync(CodexRequest request, Project project, TargetMachine machine, CancellationToken cancellationToken)
+    private async Task<MaterializedAttachments> MaterializeAttachmentsAsync(
+        CodexRequest request,
+        Guid runId,
+        Project project,
+        TargetMachine machine,
+        CancellationToken cancellationToken)
     {
         var attachments = ReadAttachments(request.AttachmentsJson);
         if (attachments.Length == 0)
@@ -1714,7 +1764,9 @@ public sealed class QueueWorker(
             var storageName = attachment.StorageName ?? attachment.Name;
             var relativePath = ".codex-queue/attachments/" + request.Id.ToString("N") + "/" + storageName;
             var targetPath = CombineTargetPath(attachmentRoot, storageName, machine);
+            await AppendOutputAsync(runId, "Transferring attachment " + attachment.Name + "..." + Environment.NewLine, CancellationToken.None);
             await runner.WriteAttachmentAsync(machine, targetPath, bytes, cancellationToken);
+            await AppendOutputAsync(runId, "Transferred attachment " + attachment.Name + "." + Environment.NewLine, CancellationToken.None);
             prompt.Add("- " + attachment.Name + " (" + attachment.ContentType + ", " + attachment.Size + " bytes) available temporarily at `" + relativePath + "`.");
             if (attachment.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
             {

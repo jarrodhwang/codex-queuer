@@ -57,6 +57,10 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
     public const string UnixRemotePathSetup = "export PATH=\"$HOME/.local/bin:$HOME/bin:$HOME/.npm-global/bin:$HOME/.volta/bin:$HOME/.asdf/shims:$HOME/.cargo/bin:$HOME/.local/share/pnpm:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH\"; if [ -n \"${ZSH_VERSION-}\" ]; then setopt nonomatch; fi; for nodeBin in \"$HOME\"/.nvm/versions/node/*/bin; do [ -d \"$nodeBin\" ] && PATH=\"$nodeBin:$PATH\"; done; export PATH;";
     private static readonly TimeSpan CodexFirstOutputTimeout = TimeSpan.FromSeconds(75);
     private static readonly TimeSpan RateLimitsTimeout = TimeSpan.FromSeconds(20);
+    // Attachment transfer commands intentionally produce no output, so the normal
+    // first-output watchdog cannot protect them. Bound the entire operation instead
+    // so an unavailable SSH target cannot hold a queue lane indefinitely.
+    private static readonly TimeSpan AttachmentTransferTimeout = TimeSpan.FromSeconds(45);
 
     public Task<CommandResult> ReadRateLimitsAsync(TargetMachine machine, CancellationToken cancellationToken)
     {
@@ -240,7 +244,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 "ssh " + machine.Host + " write attachment",
                 static _ => Task.CompletedTask,
                 cancellationToken,
-                standardInput: encodedContent);
+                standardInput: encodedContent,
+                executionTimeout: AttachmentTransferTimeout);
         }
         else
         {
@@ -253,7 +258,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 "ssh " + machine.Host + " write attachment",
                 static _ => Task.CompletedTask,
                 cancellationToken,
-                standardInput: encodedContent);
+                standardInput: encodedContent,
+                executionTimeout: AttachmentTransferTimeout);
         }
 
         if (!result.Success)
@@ -395,7 +401,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         CancellationToken cancellationToken,
         TimeSpan? firstProcessOutputTimeout = null,
         string? standardInput = null,
-        Func<string, bool>? completionOutputPredicate = null)
+        Func<string, bool>? completionOutputPredicate = null,
+        TimeSpan? executionTimeout = null)
     {
         if (string.IsNullOrWhiteSpace(machine.Host))
         {
@@ -430,7 +437,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
         arguments.Add(destination);
         arguments.Add(remoteCommand);
-        return RunProcessAsync("ssh", arguments, null, preview, onOutput, cancellationToken, firstProcessOutputTimeout, standardInput, completionOutputPredicate);
+        return RunProcessAsync("ssh", arguments, null, preview, onOutput, cancellationToken, firstProcessOutputTimeout, standardInput, completionOutputPredicate, executionTimeout);
     }
 
     private async Task<CommandResult> RunProcessAsync(
@@ -442,7 +449,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         CancellationToken cancellationToken,
         TimeSpan? firstProcessOutputTimeout = null,
         string? standardInput = null,
-        Func<string, bool>? completionOutputPredicate = null)
+        Func<string, bool>? completionOutputPredicate = null,
+        TimeSpan? executionTimeout = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -582,6 +590,17 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                     TryKill(process);
                     throw new TimeoutException(message.Trim());
                 }
+                }
+            }
+
+            if (executionTimeout is { } maximumDuration)
+            {
+                var completionSignal = await Task.WhenAny(waitForExit, Task.Delay(maximumDuration, cancellationToken));
+                if (completionSignal != waitForExit)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    TryKill(process);
+                    throw new TimeoutException("Process did not finish within " + Math.Round(maximumDuration.TotalSeconds) + " seconds.");
                 }
             }
 
