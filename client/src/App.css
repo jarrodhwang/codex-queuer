@@ -1041,7 +1041,7 @@
 
 .project-item-main {
   min-width: 0;
-  padding: 4px 5px;
+  padding: 4px 68px 4px 5px;
   text-align: left;
 }
 
@@ -1072,9 +1072,10 @@
 }
 
 .project-queue-badge {
-  position: static;
+  position: absolute;
+  top: 4px;
+  right: 4px;
   display: flex;
-  flex: 0 0 auto;
   align-items: center;
   gap: 3px;
   min-width: 0;
@@ -1085,6 +1086,12 @@
   background: transparent;
   color: inherit;
   box-shadow: none;
+}
+
+.project-detail-button {
+  align-self: end;
+  position: relative;
+  z-index: 3;
 }
 
 .project-queue-badge__count {
