@@ -5028,6 +5028,12 @@ function formatRemainingTime(retryAfter: string, now: number) {
   const seconds = totalSeconds % 60
   const hours = Math.floor(minutes / 60)
   const displayMinutes = minutes % 60
+  const days = Math.floor(hours / 24)
+  const displayHours = hours % 24
+
+  if (days > 0) {
+    return `${days}d ${displayHours}h ${displayMinutes}m`
+  }
 
   if (hours > 0) {
     return `${hours}h ${displayMinutes}m`
