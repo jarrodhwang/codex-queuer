@@ -1207,7 +1207,7 @@
   max-width: none;
   overflow: visible;
   white-space: nowrap;
-  animation: project-name-marquee 8s ease-in-out infinite alternate;
+  animation: project-name-marquee 3s linear infinite;
 }
 
 @keyframes project-name-marquee {
