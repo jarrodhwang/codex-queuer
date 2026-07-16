@@ -755,6 +755,21 @@ function App() {
     }
   }
 
+  const updateProjectCommitModelDefault = async (project: Project, model: ModelValue) => {
+    setError('')
+    try {
+      const updated = await api.saveProject(projectSavePayload(project, {
+        defaultCommitModel: model.model,
+        defaultCommitModelEffort: model.effort,
+        defaultCommitModelSpeed: model.speed,
+      }), project.id)
+      setProjects((current) => current.map((item) => (item.id === updated.id ? updated : item)))
+    } catch (cause) {
+      handleApiError(cause)
+      throw cause
+    }
+  }
+
   const updateProjectQueueMode = async (project: Project, separateQueuesByTab: boolean) => {
     setError('')
     try {
@@ -1121,6 +1136,7 @@ function App() {
         onViewChange={setRightRailView}
         onError={handleApiError}
         onGitStatusChange={handleGitStatusChange}
+        onSaveCommitModelDefault={updateProjectCommitModelDefault}
       />
     </div>
   )
@@ -5161,6 +5177,7 @@ function RightRail({
   onViewChange,
   onError,
   onGitStatusChange,
+  onSaveCommitModelDefault,
 }: {
   open: boolean
   config: ApiConfig
@@ -5171,6 +5188,7 @@ function RightRail({
   onViewChange: (view: RightRailView) => void
   onError: (cause: unknown) => void
   onGitStatusChange: (projectId: string, status: GitStatus) => void
+  onSaveCommitModelDefault: (project: Project, model: ModelValue) => Promise<void>
 }) {
   if (!open) return null
 
@@ -5203,7 +5221,13 @@ function RightRail({
         {selectedProject && view === 'files' ? (
           <DirectoryTree project={selectedProject} onOpenFile={onOpenFile} onError={onError} />
         ) : selectedProject && view === 'git' ? (
-          <GitPanel project={selectedProject} config={config} onError={onError} onStatusChange={onGitStatusChange} />
+          <GitPanel
+            project={selectedProject}
+            config={config}
+            onError={onError}
+            onStatusChange={onGitStatusChange}
+            onSaveCommitModelDefault={onSaveCommitModelDefault}
+          />
         ) : (
           <span className="muted">Select a project to use this panel.</span>
         )}
@@ -5217,11 +5241,13 @@ function GitPanel({
   config,
   onError,
   onStatusChange,
+  onSaveCommitModelDefault,
 }: {
   project: Project
   config: ApiConfig
   onError: (cause: unknown) => void
   onStatusChange: (projectId: string, status: GitStatus) => void
+  onSaveCommitModelDefault: (project: Project, model: ModelValue) => Promise<void>
 }) {
   const defaults = useMemo(() => projectModelDefaults(project, config.models), [config.models, project])
   const [status, setStatus] = useState<GitStatus | null>(null)
@@ -5230,6 +5256,7 @@ function GitPanel({
   const [loading, setLoading] = useState(false)
   const [committing, setCommitting] = useState(false)
   const [generating, setGenerating] = useState(false)
+  const [savingDefault, setSavingDefault] = useState(false)
   const [actionOutput, setActionOutput] = useState('')
 
   const loadStatus = useCallback(async () => {
@@ -5291,9 +5318,23 @@ function GitPanel({
     }
   }
 
+  const saveCommitModelDefault = async () => {
+    setSavingDefault(true)
+    try {
+      await onSaveCommitModelDefault(project, suggestionModel)
+    } catch (cause) {
+      onError(cause)
+    } finally {
+      setSavingDefault(false)
+    }
+  }
+
   const changeCount = status?.changes.length ?? 0
   const clean = status?.isClean ?? false
   const gitStateLabel = clean ? 'Clean' : `${formatFileCount(changeCount)} changed`
+  const commitModelChanged = suggestionModel.model !== defaults.commitModel.model
+    || suggestionModel.effort !== defaults.commitModel.effort
+    || suggestionModel.speed !== defaults.commitModel.speed
 
   return (
     <div className="git-panel">
@@ -5355,6 +5396,10 @@ function GitPanel({
 
       <div className="git-ai-box">
         <ModelPicker label="Codex commit" options={config.models} value={suggestionModel} onChange={setSuggestionModel} disabled={clean || generating} />
+        <GlassButton variant="secondary" type="button" onClick={saveCommitModelDefault} disabled={!commitModelChanged || savingDefault || generating}>
+          {savingDefault ? <RefreshCcw size={15} className="action-spinner" /> : <Check size={15} />}
+          {savingDefault ? 'Saving default...' : 'Save model as default'}
+        </GlassButton>
         <GlassButton variant="primary" type="button" onClick={commitWithCodex} disabled={clean || generating || !suggestionModel.model.trim()}>
           {generating ? <RefreshCcw size={15} className="action-spinner" /> : <GitCommit size={15} />}
           {generating ? 'Committing...' : 'Commit with Codex'}
