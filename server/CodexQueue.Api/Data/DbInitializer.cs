@@ -424,7 +424,6 @@ public static class DbInitializer
         request.Status = QueueStatus.Succeeded;
         request.Error = null;
         request.FinishedAt = run.FinishedAt ?? DateTimeOffset.UtcNow;
-        request.Summary = LastUsefulLine(run.Output);
     }
 
     private static void ClearRequestRetryState(CodexRequest request)
@@ -434,14 +433,4 @@ public static class DbInitializer
         request.AvailableModel = null;
     }
 
-    private static string? LastUsefulLine(string? output)
-    {
-        if (string.IsNullOrWhiteSpace(output))
-        {
-            return null;
-        }
-
-        return output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .LastOrDefault(line => !CompletionTextCleaner.IsNoiseLine(line));
-    }
 }

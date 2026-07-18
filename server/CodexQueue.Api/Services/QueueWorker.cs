@@ -508,7 +508,7 @@ public sealed class QueueWorker(
             CancelUnusedCommitRun(GetLatestRunOfKind(request.Runs, RunKind.Commit));
             request.Status = QueueStatus.Succeeded;
             request.FinishedAt = DateTimeOffset.UtcNow;
-            request.Summary = LastUsefulLine(requestRun?.Output ?? string.Empty);
+            UpdateRequestSummary(request);
             await TrySaveChangesAsync(db, "complete request without separate commit", cancellationToken);
             return false;
         }
@@ -519,7 +519,7 @@ public sealed class QueueWorker(
             request.Status = QueueStatus.Succeeded;
             request.FinishedAt = commitRun.FinishedAt ?? DateTimeOffset.UtcNow;
             request.Error = null;
-            request.Summary = LastUsefulLine(commitRun.Output);
+            UpdateRequestSummary(request);
             await TrySaveChangesAsync(db, "complete already committed request", cancellationToken);
             return false;
         }
@@ -928,7 +928,7 @@ public sealed class QueueWorker(
                 request.Status = QueueStatus.Failed;
                 request.FinishedAt = commitRun.FinishedAt ?? DateTimeOffset.UtcNow;
                 request.Error = commitRun.Error ?? LastUsefulLine(commitRun.Output);
-                request.Summary = LastUsefulLine(commitRun.Output);
+                UpdateRequestSummary(request);
                 return true;
             }
 
@@ -937,7 +937,7 @@ public sealed class QueueWorker(
                 request.Status = QueueStatus.Cancelled;
                 request.FinishedAt = commitRun.FinishedAt ?? DateTimeOffset.UtcNow;
                 request.Error = commitRun.Error ?? "Commit run cancelled.";
-                request.Summary = LastUsefulLine(commitRun.Output);
+                UpdateRequestSummary(request);
                 return true;
             }
 
@@ -1162,7 +1162,17 @@ public sealed class QueueWorker(
         request.Status = QueueStatus.Succeeded;
         request.Error = null;
         request.FinishedAt = run.FinishedAt ?? DateTimeOffset.UtcNow;
-        request.Summary = LastUsefulLine(run.Output);
+        UpdateRequestSummary(request);
+    }
+
+    private static void UpdateRequestSummary(CodexRequest request, string? requestOutput = null)
+    {
+        var output = requestOutput ?? GetLatestRunOfKind(request.Runs, RunKind.Request)?.Output;
+        var summary = LastAssistantMessage(output ?? string.Empty);
+        if (!string.IsNullOrWhiteSpace(summary))
+        {
+            request.Summary = summary;
+        }
     }
 
     private static void ClearRequestRetryState(CodexRequest request)
@@ -1207,32 +1217,35 @@ public sealed class QueueWorker(
             request.FinishedAt = run.FinishedAt;
             request.Status = result.Success ? QueueStatus.Succeeded : QueueStatus.Failed;
             request.Error = result.Success ? null : run.Error;
-            request.Summary = LastUsefulLine(result.Output);
+            UpdateRequestSummary(request);
             if (CommitOutputClaimsCreated(result.Output))
             {
                 await PopulateCommitMetadataAsync(db, request, run, cancellationToken);
-                ApplyFormattedCommitOutput(run);
-                ApplyCommitSummary(request, run);
             }
         }
-        else if (!request.GenerateCommit || !request.SeparateCommitSession)
+        else
         {
-            request.FinishedAt = run.FinishedAt;
-            request.Status = result.Success ? QueueStatus.Succeeded : QueueStatus.Failed;
-            request.Error = result.Success ? null : run.Error;
-            request.Summary = LastUsefulLine(result.Output);
-            if (result.Success && request.GenerateCommit && CommitOutputClaimsCreated(result.Output))
+            if (result.Success)
             {
-                await PopulateCommitMetadataAsync(db, request, run, cancellationToken);
-                ApplyFormattedCommitOutput(run);
-                ApplyCommitSummary(request, run);
+                UpdateRequestSummary(request, result.Output);
             }
-        }
-        else if (!result.Success)
-        {
-            request.FinishedAt = run.FinishedAt;
-            request.Status = QueueStatus.Failed;
-            request.Error = run.Error;
+
+            if (!request.GenerateCommit || !request.SeparateCommitSession)
+            {
+                request.FinishedAt = run.FinishedAt;
+                request.Status = result.Success ? QueueStatus.Succeeded : QueueStatus.Failed;
+                request.Error = result.Success ? null : run.Error;
+                if (result.Success && request.GenerateCommit && CommitOutputClaimsCreated(result.Output))
+                {
+                    await PopulateCommitMetadataAsync(db, request, run, cancellationToken);
+                }
+            }
+            else if (!result.Success)
+            {
+                request.FinishedAt = run.FinishedAt;
+                request.Status = QueueStatus.Failed;
+                request.Error = run.Error;
+            }
         }
 
         await TrySaveChangesAsync(db, "complete run", cancellationToken);
@@ -1532,28 +1545,6 @@ public sealed class QueueWorker(
             var message = string.Join('\n', lines.Skip(shaIndex + 1)).Trim();
             run.CommitMessage = string.IsNullOrWhiteSpace(message) ? null : message;
         }
-    }
-
-    private static void ApplyCommitSummary(CodexRequest request, CodexRun run)
-    {
-        if (string.IsNullOrWhiteSpace(run.CommitSha))
-        {
-            return;
-        }
-
-        request.Summary = string.IsNullOrWhiteSpace(run.CommitMessage)
-            ? "Commit created: " + run.CommitSha
-            : run.CommitMessage;
-    }
-
-    private static void ApplyFormattedCommitOutput(CodexRun run)
-    {
-        if (string.IsNullOrWhiteSpace(run.CommitSha))
-        {
-            return;
-        }
-
-        run.Output = GitCommitResultFormatter.Format(run.CommitSha, run.CommitMessage) + Environment.NewLine;
     }
 
     private async Task AppendOutputAsync(Guid runId, string chunk, CancellationToken cancellationToken)
@@ -1975,6 +1966,32 @@ public sealed class QueueWorker(
         }
 
         return lastAssistantText ?? lastPlainText;
+    }
+
+    private static string? LastAssistantMessage(string output)
+    {
+        string? lastAssistantText = null;
+
+        foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var eventText = line.StartsWith("data:", StringComparison.OrdinalIgnoreCase)
+                ? line["data:".Length..].Trim()
+                : line;
+            if (!TryReadCodexEvent(eventText, out var eventJson))
+            {
+                continue;
+            }
+
+            using (eventJson)
+            {
+                if (TryExtractAssistantText(eventJson.RootElement, out var assistantText))
+                {
+                    lastAssistantText = assistantText;
+                }
+            }
+        }
+
+        return lastAssistantText;
     }
 
     private static bool TryReadCodexEvent(string line, out JsonDocument document)

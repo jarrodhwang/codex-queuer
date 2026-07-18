@@ -4227,14 +4227,48 @@ function completionMessageForRequest(request: CodexRequest) {
     return runMessage
   }
 
-  for (const run of [...request.runs].sort((left, right) => right.createdAt.localeCompare(left.createdAt))) {
-    const message = completionMessageFromOutput(run.output)
-    if (message) {
-      return message
+  const legacyFormattedCommit = Boolean(requestRun && isLegacyFormattedCommitResult(requestRun))
+
+  if (!legacyFormattedCommit) {
+    for (const run of [...request.runs]
+      .filter((candidate) => candidate.kind === 'Request')
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))) {
+      const message = completionMessageFromOutput(run.output)
+      if (message) {
+        return message
+      }
     }
   }
 
-  return cleanCompletionFallback(request.summary)
+  const fallback = cleanCompletionFallback(request.summary)
+  return legacyFormattedCommit && isCommitMetadataFallback(fallback, request) ? null : fallback
+}
+
+function isLegacyFormattedCommitResult(run: CodexRun) {
+  if (!run.commitSha) {
+    return false
+  }
+
+  const lines = run.output.replace(/\r\n?/g, '\n').trim().split('\n')
+  return lines[0] === 'Commit created:'
+    && lines[1]?.trim() === run.commitSha
+    && (lines.length === 2 || lines.slice(2).every((line) => line.startsWith('Message: ')))
+}
+
+function isCommitMetadataFallback(value: string | null, request: CodexRequest) {
+  if (!value) {
+    return false
+  }
+
+  const normalized = value.trim()
+  return request.runs.some((run) => {
+    const commitMessage = run.commitMessage?.trim()
+    return Boolean(
+      (commitMessage && (normalized === commitMessage || normalized === `Message: ${commitMessage}`))
+      || normalized === 'Commit created:'
+      || (run.commitSha && normalized === `Commit created: ${run.commitSha}`),
+    )
+  })
 }
 
 function completionMessageFromOutput(output: string) {
@@ -4267,7 +4301,7 @@ function completionMessagesFromOutput(output: string): string[] {
 
   const messages: string[] = []
   for (const event of events) {
-    if (isTurnCompletedEvent(event)) {
+    if (isTelemetryCompletionEvent(event)) {
       continue
     }
 
@@ -4635,7 +4669,8 @@ function reportMessagesForRequest(request: CodexRequest): WorkReportMessage[] {
 function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; now: number; onClose: () => void }) {
   const messages = useMemo(() => reportMessagesForRequest(request), [request])
   const finalMessage = request.status === 'Succeeded' ? completionMessageForRequest(request) : null
-  const primaryMessage = finalMessage ?? messages.at(-1)?.text ?? null
+  const finalResponseUnavailable = request.status === 'Succeeded' && !finalMessage
+  const primaryMessage = finalMessage ?? (request.status === 'Succeeded' ? null : messages.at(-1)?.text ?? null)
   const supportingMessages = primaryMessage
     ? messages.filter((message) => message.text !== primaryMessage)
     : messages
@@ -4656,7 +4691,9 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
             <h3>{requestDisplayName(request)}</h3>
             <p>
               {request.status === 'Succeeded'
-                ? 'Codex finished this request. The final response and meaningful work notes are collected below.'
+                ? finalResponseUnavailable
+                  ? 'Codex finished this request, but no final response was retained. Available work notes are collected below.'
+                  : 'Codex finished this request. The final response and meaningful work notes are collected below.'
                 : 'This report refreshes while Codex works. The finished response will replace the live update when it is ready.'}
             </p>
           </div>
@@ -4668,8 +4705,8 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
             <section className={`work-report-section work-report-primary ${finalMessage ? 'work-report-primary--complete' : ''}`}>
               <div className="work-report-section-head">
                 <div>
-                  <div className="section-kicker">{finalMessage ? 'Final result' : primaryMessage ? 'Latest Codex update' : 'Result pending'}</div>
-                  <h4>{finalMessage ? 'What Codex delivered' : primaryMessage ? 'What Codex has reported so far' : 'Codex is still working'}</h4>
+                  <div className="section-kicker">{finalMessage ? 'Final result' : finalResponseUnavailable ? 'Final response unavailable' : primaryMessage ? 'Latest Codex update' : 'Result pending'}</div>
+                  <h4>{finalMessage ? 'What Codex delivered' : finalResponseUnavailable ? 'Codex completed the work, but its final response was not retained' : primaryMessage ? 'What Codex has reported so far' : 'Codex is still working'}</h4>
                 </div>
                 {finalMessage && <Check size={20} aria-hidden="true" />}
               </div>
@@ -4679,7 +4716,9 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
                 </div>
               ) : (
                 <div className="work-report-empty">
-                  No formatted Codex response has been published yet. Status and elapsed time will continue to update here.
+                  {finalResponseUnavailable
+                    ? 'No final Codex response was retained for this completed run. Its work log and commit details remain available below.'
+                    : 'No formatted Codex response has been published yet. Status and elapsed time will continue to update here.'}
                 </div>
               )}
             </section>
