@@ -2353,6 +2353,11 @@ function QueueWorkspace({
     .filter((request) => (request.queueTabId ?? null) === activeQueueTabId)
     .toSorted(compareQueueRequests),
   [activeQueueTabId, projectQueueRequests])
+  const runningQueueTabIds = useMemo(() => new Set(
+    projectQueueRequests
+      .filter((request) => request.status === 'Running' && request.queueTabId)
+      .map((request) => request.queueTabId as string),
+  ), [projectQueueRequests])
   const queueNumberById = useMemo(() => new Map<string, number>(
     (selectedProject?.separateQueuesByTab ? queueRequests : projectQueueRequests)
       .map((request, index) => [request.id, index + 1]),
@@ -2408,6 +2413,7 @@ function QueueWorkspace({
           <QueueContextTabs
             tabs={projectQueueTabs}
             activeTabId={activeQueueTabId}
+            runningTabIds={runningQueueTabIds}
             separateQueuesByTab={selectedProject.separateQueuesByTab}
             queueModeChangeDisabled={projectQueueRequests.some((request) => request.status === 'Running' || request.status === 'CancelRequested')}
             onQueueModeChange={(separate) => onUpdateProjectQueueMode(selectedProject, separate)}
@@ -2503,6 +2509,7 @@ function QueueWorkspace({
 function QueueContextTabs({
   tabs,
   activeTabId,
+  runningTabIds,
   separateQueuesByTab,
   queueModeChangeDisabled,
   onQueueModeChange,
@@ -2513,6 +2520,7 @@ function QueueContextTabs({
 }: {
   tabs: QueueTab[]
   activeTabId: string | null
+  runningTabIds: ReadonlySet<string>
   separateQueuesByTab: boolean
   queueModeChangeDisabled: boolean
   onQueueModeChange: (separate: boolean) => Promise<void>
@@ -2571,7 +2579,8 @@ function QueueContextTabs({
             type="button"
             role="tab"
             aria-selected={activeTabId === tab.id}
-            className={activeTabId === tab.id ? 'active' : ''}
+            className={`${activeTabId === tab.id ? 'active' : ''} ${runningTabIds.has(tab.id) ? 'running' : ''}`.trim()}
+            aria-label={runningTabIds.has(tab.id) ? `${tab.name} (working)` : tab.name}
             onClick={() => onSelect(tab.id)}
             onContextMenu={(event) => {
               event.preventDefault()
@@ -2584,6 +2593,11 @@ function QueueContextTabs({
             }}
           >
             <span className="truncate">{tab.name}</span>
+            {runningTabIds.has(tab.id) && (
+              <span className="queue-tab-running-progress" role="progressbar" aria-label={`${tab.name} has a working queue`}>
+                <span />
+              </span>
+            )}
           </button>
         ))}
         <button type="button" aria-label="Create tab" title="Create tab" onClick={onCreate}>
