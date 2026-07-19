@@ -20,6 +20,7 @@ import {
   History,
   Image as ImageIcon,
   Eye,
+  ExternalLink,
   Menu,
   Monitor,
   Moon,
@@ -4897,6 +4898,15 @@ function ProjectTerminal({
     return apiUrl(`/projects/${project.id}/terminal/ttyd${restartQuery}`)
   }, [project.id, terminalRevision])
 
+  const openTerminalWindow = () => {
+    const terminalWindow = window.open(
+      terminalSrc,
+      `codex-queue-terminal-${project.id}`,
+      'popup=yes,width=1200,height=800,resizable=yes,scrollbars=yes',
+    )
+    terminalWindow?.focus()
+  }
+
   return (
     <GlassPanel className="terminal-panel">
       <div className="terminal-status-strip" aria-label="Queue status">
@@ -4917,6 +4927,16 @@ function ProjectTerminal({
           title="Reinitialize terminal"
         >
           <RefreshCcw size={14} /> Refresh terminal
+        </GlassButton>
+        <GlassButton
+          variant="secondary"
+          size="icon"
+          type="button"
+          onClick={openTerminalWindow}
+          title="Open terminal in a separate window"
+          aria-label="Open terminal in a separate window"
+        >
+          <ExternalLink size={15} />
         </GlassButton>
       </div>
       <iframe
