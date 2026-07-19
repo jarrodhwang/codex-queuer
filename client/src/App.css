@@ -1904,6 +1904,7 @@
 }
 
 .queue-context-tabs button {
+  position: relative;
   min-width: 32px;
   min-height: 30px;
   max-width: 220px;
@@ -1924,9 +1925,25 @@
 }
 
 .queue-context-tabs button.active {
-  background: linear-gradient(145deg, rgba(224, 242, 254, 0.72), rgba(255, 255, 255, 0.58));
+  background: linear-gradient(145deg, rgba(186, 230, 253, 0.96), rgba(224, 247, 255, 0.9) 62%, rgba(255, 255, 255, 0.74));
   color: var(--text-strong);
-  box-shadow: inset 0 1px 0 var(--glass-edge), 0 3px 10px rgba(90, 200, 250, 0.18);
+  box-shadow:
+    inset 0 0 0 1px rgba(2, 132, 199, 0.82),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 4px 12px rgba(14, 165, 233, 0.28),
+    0 0 0 2px rgba(14, 165, 233, 0.15);
+}
+
+.queue-context-tabs button.active::after {
+  content: '';
+  position: absolute;
+  right: 7px;
+  bottom: 3px;
+  left: 7px;
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #20d9f2, #43b6ff 55%, #b673ff);
+  box-shadow: 0 0 7px rgba(32, 217, 242, 0.72);
 }
 
 .queue-context-tabs button:focus-visible {
@@ -5907,6 +5924,15 @@
   border-color: var(--accent-line);
   background: linear-gradient(145deg, rgba(8, 95, 130, 0.58), rgba(30, 41, 59, 0.9));
   color: var(--text-strong);
+}
+
+:root[data-theme='dark'] .queue-context-tabs button.active {
+  background: linear-gradient(145deg, rgba(8, 121, 160, 0.9), rgba(14, 60, 88, 0.96));
+  box-shadow:
+    inset 0 0 0 1px rgba(103, 232, 249, 0.88),
+    inset 0 1px 0 rgba(186, 230, 253, 0.24),
+    0 4px 14px rgba(0, 0, 0, 0.3),
+    0 0 0 2px rgba(14, 165, 233, 0.2);
 }
 
 :root[data-theme='dark'] :is(
