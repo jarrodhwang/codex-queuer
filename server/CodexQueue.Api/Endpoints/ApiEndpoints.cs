@@ -1567,8 +1567,6 @@ public static class ApiEndpoints
         new("GPT-5.6 Terra", "gpt-5.6-terra", true),
         new("GPT-5.6 Luna", "gpt-5.6-luna", true),
         new("GPT-5.5", "gpt-5.5", true),
-        new("GPT-5.4", "gpt-5.4", true),
-        new("GPT-5.4 Mini", "gpt-5.4-mini", false),
         new("GPT-5.3 Codex Spark", "gpt-5.3-codex-spark", false)
     };
 
