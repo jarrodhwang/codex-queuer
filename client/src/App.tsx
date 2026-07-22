@@ -112,6 +112,8 @@ const defaultModels: ModelOption[] = [
   { label: 'GPT-5.6 Terra', model: 'gpt-5.6-terra', supportsPriority: true },
   { label: 'GPT-5.6 Luna', model: 'gpt-5.6-luna', supportsPriority: true },
   { label: 'GPT-5.5', model: 'gpt-5.5', supportsPriority: true },
+  { label: 'GPT-5.4', model: 'gpt-5.4', supportsPriority: true },
+  { label: 'GPT-5.4 Mini', model: 'gpt-5.4-mini', supportsPriority: true },
   { label: 'GPT-5.3 Codex Spark', model: 'gpt-5.3-codex-spark', supportsPriority: false },
 ]
 
