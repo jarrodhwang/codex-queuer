@@ -107,14 +107,10 @@ type LocalQueueAttachment = QueueAttachment & {
   insight: AttachmentInsight
 }
 
+const automaticModel = 'codex-default'
+
 const defaultModels: ModelOption[] = [
-  { label: 'GPT-5.6 Sol', model: 'gpt-5.6-sol', supportsPriority: true },
-  { label: 'GPT-5.6 Terra', model: 'gpt-5.6-terra', supportsPriority: true },
-  { label: 'GPT-5.6 Luna', model: 'gpt-5.6-luna', supportsPriority: true },
-  { label: 'GPT-5.5', model: 'gpt-5.5', supportsPriority: true },
-  { label: 'GPT-5.4', model: 'gpt-5.4', supportsPriority: true },
-  { label: 'GPT-5.4 Mini', model: 'gpt-5.4-mini', supportsPriority: true },
-  { label: 'GPT-5.3 Codex Spark', model: 'gpt-5.3-codex-spark', supportsPriority: false },
+  { label: 'Codex default (automatic)', model: automaticModel, supportsPriority: false },
 ]
 
 const appIconUrl = `${import.meta.env.BASE_URL}app-icon.png`
@@ -209,14 +205,14 @@ function projectSavePayload(project: Project, overrides: Partial<SaveProjectRequ
 function modelValueFromDefaults(model: string | null | undefined, effort: string | null | undefined, speed: string | null | undefined, fallback: ModelOption): ModelValue {
   return {
     model: model?.trim() || fallback.model,
-    effort: effort?.trim() || 'medium',
+    effort: effort?.trim() || fallback.defaultEffort || 'medium',
     speed: speed?.trim() || (fallback.supportsPriority ? 'priority' : 'normal'),
   }
 }
 
 function projectModelDefaults(project: Project, models: ModelOption[]): ProjectModelDefaults {
-  const requestFallback = models[0] ?? defaultModels[0]
-  const commitFallback = models[1] ?? requestFallback
+  const requestFallback = models.find((option) => option.model === project.defaultModel) ?? models[0] ?? defaultModels[0]
+  const commitFallback = models.find((option) => option.model === project.defaultCommitModel) ?? requestFallback
   const permissionMode = project.defaultPermissionMode ?? 'ApproveForMe'
   return {
     requestModel: modelValueFromDefaults(project.defaultModel, project.defaultModelEffort, project.defaultModelSpeed, requestFallback),
@@ -490,6 +486,7 @@ function App() {
   const [theme, setTheme] = useState<ColorTheme>(getInitialTheme)
   const [config, setConfig] = useState<ApiConfig>({ requiresToken: false, models: defaultModels })
   const [machines, setMachines] = useState<Machine[]>([])
+  const [modelsByMachine, setModelsByMachine] = useState<Record<string, ModelOption[]>>({})
   const [projects, setProjects] = useState<Project[]>([])
   const [queueTabs, setQueueTabs] = useState<QueueTab[]>([])
   const [requests, setRequests] = useState<CodexRequest[]>([])
@@ -521,6 +518,7 @@ function App() {
   }, [theme])
 
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0]
+  const selectedModels = selectedProject ? modelsByMachine[selectedProject.machineId] ?? config.models : config.models
   const gitChangeCount = selectedProject ? gitChangeCounts[selectedProject.id] ?? null : null
   const activeFile = openFiles.find((file) => file.key === activeFileKey)
   const hasLiveTimers = useMemo(
@@ -532,6 +530,17 @@ function App() {
     ),
     [requests],
   )
+
+  const refreshMachineModels = useCallback(async (machineList: Machine[], fallbackModels: ModelOption[]) => {
+    const entries = await Promise.all(machineList.map(async (machine) => {
+      try {
+        return [machine.id, await api.machineModels(machine.id)] as const
+      } catch {
+        return [machine.id, fallbackModels] as const
+      }
+    }))
+    setModelsByMachine(Object.fromEntries(entries))
+  }, [])
 
   const loadStatic = useCallback(async () => {
     const nextConfig = await api.config()
@@ -545,7 +554,8 @@ function App() {
     setProjects(nextProjects)
     setQueueTabs(nextQueueTabs)
     setSelectedProjectId((current) => current || nextProjects[0]?.id || '')
-  }, [])
+    void refreshMachineModels(nextMachines, nextConfig.models)
+  }, [refreshMachineModels])
 
   const loadLive = useCallback(async () => {
     const requestSequence = ++liveRequestSequenceRef.current
@@ -637,6 +647,16 @@ function App() {
     }, 2200)
     return () => window.clearInterval(timer)
   }, [authBlocked, handleApiError, loadLive])
+
+  useEffect(() => {
+    if (authBlocked || machines.length === 0) return
+
+    const refresh = () => {
+      void refreshMachineModels(machines, config.models)
+    }
+    const timer = window.setInterval(refresh, 120_000)
+    return () => window.clearInterval(timer)
+  }, [authBlocked, config.models, machines, refreshMachineModels])
 
   useEffect(() => {
     const projectId = selectedProject?.id
@@ -1086,7 +1106,7 @@ function App() {
           <CodeViewer file={activeFile} />
         ) : (
         <QueueWorkspace
-            config={config}
+            models={selectedModels}
             selectedProject={selectedProject}
             queueTabs={queueTabs}
             requests={requests}
@@ -1129,7 +1149,7 @@ function App() {
 
       <RightRail
         open={rightOpen}
-        config={config}
+        models={selectedModels}
         view={rightRailView}
         selectedProject={selectedProject}
         onOpenFile={openFile}
@@ -2265,7 +2285,7 @@ function Modal({ title, icon, children, onClose, wide = false, large = false }: 
 }
 
 function QueueWorkspace({
-  config,
+  models,
   selectedProject,
   queueTabs,
   requests,
@@ -2293,7 +2313,7 @@ function QueueWorkspace({
   onOpenGit,
   gitChangeCount,
 }: {
-  config: ApiConfig
+  models: ModelOption[]
   selectedProject?: Project
   queueTabs: QueueTab[]
   requests: CodexRequest[]
@@ -2391,7 +2411,7 @@ function QueueWorkspace({
       {selectedProject ? (
         <>
           <QueueComposer
-            config={config}
+            models={models}
             selectedProject={selectedProject}
             queueTabId={activeQueueTabId}
             requests={projectQueueRequests}
@@ -2788,7 +2808,7 @@ function ProjectDetailsModal({
 }
 
 function QueueComposer({
-  config,
+  models,
   selectedProject,
   queueTabId,
   requests,
@@ -2807,7 +2827,7 @@ function QueueComposer({
   onUpdateProjectDefaults,
   onError,
 }: {
-  config: ApiConfig
+  models: ModelOption[]
   selectedProject: Project
   queueTabId: string | null
   requests: CodexRequest[]
@@ -2826,7 +2846,7 @@ function QueueComposer({
   onUpdateProjectDefaults: (project: Project, defaults: ProjectModelDefaults) => Promise<void>
   onError: (cause: unknown) => void
 }) {
-  const defaults = useMemo(() => projectModelDefaults(selectedProject, config.models), [config.models, selectedProject])
+  const defaults = useMemo(() => projectModelDefaults(selectedProject, models), [models, selectedProject])
   const [requestModel, setRequestModel] = useState<ModelValue>(defaults.requestModel)
   const [commitModel, setCommitModel] = useState<ModelValue>(defaults.commitModel)
   const [generateCommit, setGenerateCommit] = useState(defaults.generateCommit)
@@ -2840,8 +2860,19 @@ function QueueComposer({
   const [savingDefaults, setSavingDefaults] = useState(false)
   const [isQueueing, setIsQueueing] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const previousProjectIdRef = useRef(selectedProject.id)
+  const previousEditingRequestIdRef = useRef<string | null>(editingRequest?.id ?? null)
 
   useEffect(() => {
+    const projectChanged = previousProjectIdRef.current !== selectedProject.id
+    const editingRequestId = editingRequest?.id ?? null
+    const editingRequestChanged = previousEditingRequestIdRef.current !== editingRequestId
+    previousProjectIdRef.current = selectedProject.id
+    previousEditingRequestIdRef.current = editingRequestId
+    if (!projectChanged && !editingRequestChanged) {
+      return
+    }
+
     if (editingRequest) {
       setRequestModel({ model: editingRequest.model, effort: editingRequest.modelEffort || 'medium', speed: editingRequest.modelSpeed || 'normal' })
       setCommitModel({
@@ -3125,8 +3156,8 @@ function QueueComposer({
           </div>
         </FieldLabel>
         <div className="composer-grid compact">
-          <ModelPicker label="Request" options={config.models} value={requestModel} onChange={setRequestModel} />
-          <ModelPicker label="Commit" options={config.models} value={commitModel} onChange={setCommitModel} disabled={!generateCommit || !separateCommitSession} />
+          <ModelPicker label="Request" options={models} value={requestModel} onChange={setRequestModel} />
+          <ModelPicker label="Commit" options={models} value={commitModel} onChange={setCommitModel} disabled={!generateCommit || !separateCommitSession} />
         </div>
         <div className="composer-actions-row">
           <div className="commit-options">
@@ -3310,19 +3341,38 @@ function ModelPicker({
 }) {
   const selectedOption = options.find((option) => option.model === value.model)
   const supportsPriority = selectedOption?.supportsPriority ?? false
-  const supportsUltra = supportsUltraEffort(value.model)
-  const selectedEffort = supportsUltra || value.effort !== 'ultra' ? value.effort : 'xhigh'
+  const supportsUltra = selectedOption?.supportedEfforts
+    ? selectedOption.supportedEfforts.includes('ultra')
+    : supportsUltraEffort(value.model)
+  const effortValues = selectedOption?.supportedEfforts?.length
+    ? selectedOption.supportedEfforts
+    : ['low', 'medium', 'high', 'xhigh', ...(supportsUltra ? ['ultra'] : [])]
+  const selectedEffort = effortValues.includes(value.effort)
+    ? value.effort
+    : selectedOption?.defaultEffort && effortValues.includes(selectedOption.defaultEffort)
+      ? selectedOption.defaultEffort
+      : effortValues[0] ?? 'medium'
   const selectedModelValue = selectedOption ? value.model : 'custom'
+  const effortLabels: Record<string, string> = {
+    none: 'None',
+    minimal: 'Minimal',
+    low: 'Light',
+    medium: 'Medium',
+    high: 'High',
+    xhigh: 'XHigh',
+    max: 'Max',
+    ultra: 'Ultra',
+  }
   const dropdownOptions = useMemo(
     () => [...options.map((option) => ({ label: option.label, value: option.model })), { label: 'Custom', value: 'custom' }],
     [options],
   )
 
   useEffect(() => {
-    if (!supportsUltra && value.effort === 'ultra') {
-      onChange({ ...value, effort: 'xhigh' })
+    if (selectedEffort !== value.effort) {
+      onChange({ ...value, effort: selectedEffort })
     }
-  }, [onChange, supportsUltra, value])
+  }, [onChange, selectedEffort, value])
 
   return (
     <div className={`model-picker-grid ${disabled ? 'model-picker-grid--disabled' : ''}`} aria-disabled={disabled}>
@@ -3340,7 +3390,11 @@ function ModelPicker({
             }
             const option = options.find((item) => item.model === nextValue)
             if (option) {
-              onChange({ model: option.model, effort: value.effort || 'medium', speed: option.supportsPriority ? value.speed : 'normal' })
+              const supportedEfforts = option.supportedEfforts ?? []
+              const effort = supportedEfforts.length === 0 || supportedEfforts.includes(value.effort)
+                ? value.effort || option.defaultEffort || 'medium'
+                : option.defaultEffort || supportedEfforts[0]
+              onChange({ model: option.model, effort, speed: option.supportsPriority ? value.speed : 'normal' })
             }
           }}
         />
@@ -3355,11 +3409,7 @@ function ModelPicker({
           value={selectedEffort}
           disabled={disabled}
           options={[
-            { label: 'Light', value: 'low' },
-            { label: 'Medium', value: 'medium' },
-            { label: 'High', value: 'high' },
-            { label: 'XHigh', value: 'xhigh' },
-            ...(supportsUltra ? [{ label: 'Ultra', value: 'ultra' }] : []),
+            ...effortValues.map((effort) => ({ label: effortLabels[effort] ?? effort, value: effort })),
           ]}
           onChange={(effort) => onChange({ ...value, effort })}
         />
@@ -5242,7 +5292,7 @@ function RequestHistory({
 
 function RightRail({
   open,
-  config,
+  models,
   view,
   selectedProject,
   onOpenFile,
@@ -5253,7 +5303,7 @@ function RightRail({
   onSaveCommitModelDefault,
 }: {
   open: boolean
-  config: ApiConfig
+  models: ModelOption[]
   view: RightRailView
   selectedProject?: Project
   onOpenFile: (project: Project, path: string) => Promise<void>
@@ -5296,7 +5346,7 @@ function RightRail({
         ) : selectedProject && view === 'git' ? (
           <GitPanel
             project={selectedProject}
-            config={config}
+            models={models}
             onError={onError}
             onStatusChange={onGitStatusChange}
             onSaveCommitModelDefault={onSaveCommitModelDefault}
@@ -5311,18 +5361,18 @@ function RightRail({
 
 function GitPanel({
   project,
-  config,
+  models,
   onError,
   onStatusChange,
   onSaveCommitModelDefault,
 }: {
   project: Project
-  config: ApiConfig
+  models: ModelOption[]
   onError: (cause: unknown) => void
   onStatusChange: (projectId: string, status: GitStatus) => void
   onSaveCommitModelDefault: (project: Project, model: ModelValue) => Promise<void>
 }) {
-  const defaults = useMemo(() => projectModelDefaults(project, config.models), [config.models, project])
+  const defaults = useMemo(() => projectModelDefaults(project, models), [models, project])
   const [status, setStatus] = useState<GitStatus | null>(null)
   const [commitMessage, setCommitMessage] = useState('')
   const [suggestionModel, setSuggestionModel] = useState<ModelValue>(defaults.commitModel)
@@ -5468,7 +5518,7 @@ function GitPanel({
       {actionOutput && <GitActionOutput output={actionOutput} />}
 
       <div className="git-ai-box">
-        <ModelPicker label="Codex commit" options={config.models} value={suggestionModel} onChange={setSuggestionModel} disabled={clean || generating} />
+        <ModelPicker label="Codex commit" options={models} value={suggestionModel} onChange={setSuggestionModel} disabled={clean || generating} />
         <GlassButton variant="secondary" type="button" onClick={saveCommitModelDefault} disabled={!commitModelChanged || savingDefault || generating}>
           {savingDefault ? <RefreshCcw size={15} className="action-spinner" /> : <Check size={15} />}
           {savingDefault ? 'Saving default...' : 'Save model as default'}
@@ -6101,16 +6151,23 @@ function CodeViewer({ file }: { file: OpenFile }) {
 
 function formatModel(model: string, effort?: string | null, speed?: string | null) {
   const labels: Record<string, string> = {
+    none: 'none',
+    minimal: 'minimal',
     low: 'light',
     medium: 'medium',
     high: 'high',
     xhigh: 'extra high',
+    max: 'max',
     ultra: 'ultra',
   }
-  const parts = [model]
+  const parts = [displayModel(model)]
   if (effort) parts.push(labels[effort] ?? effort)
   if (speed === 'priority') parts.push('x1.5')
   return parts.join(' ')
+}
+
+function displayModel(model: string) {
+  return model.trim().toLowerCase() === automaticModel ? 'Codex default (automatic)' : model
 }
 
 function formatDurationBetween(start?: string | null, end?: string | null) {
@@ -6146,17 +6203,20 @@ function attachmentSummary(attachments: Array<{ contentType: string }>) {
 
 function ModelChips({ model, effort, speed }: { model: string, effort?: string | null, speed?: string | null }) {
   const effortLabels: Record<string, string> = {
+    none: 'none',
+    minimal: 'minimal',
     low: 'light',
     medium: 'medium',
     high: 'high',
     xhigh: 'xhigh',
+    max: 'max',
     ultra: 'ultra',
   }
   const normalizedSpeed = speed === 'priority' ? 'x1.5' : speed || 'normal'
 
   return (
     <div className="model-chip-row" aria-label="Selected model settings">
-      <span className="model-chip model-chip--model">{model}</span>
+      <span className="model-chip model-chip--model">{displayModel(model)}</span>
       {effort && <span className={`model-chip model-chip--effort model-chip--effort-${effort}`}>{effortLabels[effort] ?? effort}</span>}
       <span className={`model-chip model-chip--speed ${speed === 'priority' ? 'model-chip--speed-priority' : ''}`}>{normalizedSpeed}</span>
     </div>

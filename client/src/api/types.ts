@@ -247,6 +247,8 @@ export type ModelOption = {
   label: string
   model: string
   supportsPriority: boolean
+  supportedEfforts?: string[] | null
+  defaultEffort?: string | null
 }
 
 export type ApiConfig = {

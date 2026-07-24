@@ -11,6 +11,10 @@ public interface ITargetCommandRunner
         TargetMachine machine,
         CancellationToken cancellationToken);
 
+    Task<CommandResult> ReadModelsAsync(
+        TargetMachine machine,
+        CancellationToken cancellationToken);
+
     Task<CommandResult> RunCodexAsync(
         TargetMachine machine,
         string projectPath,
@@ -50,6 +54,8 @@ public interface ITargetCommandRunner
 
 public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : ITargetCommandRunner
 {
+    private const string AutomaticModel = "codex-default";
+
     // sshd commonly supplies a deliberately small, non-login PATH. Include the package-manager
     // locations used by macOS and Linux without sourcing user shell startup files, which could
     // be interactive or have side effects in a queued command. zsh rejects unmatched nvm globs
@@ -99,6 +105,50 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             machine,
             remoteCommand,
             "ssh " + machine.Host + " codex app-server --stdio (account/rateLimits/read)",
+            static _ => Task.CompletedTask,
+            cancellationToken,
+            firstProcessOutputTimeout: RateLimitsTimeout,
+            standardInput: input,
+            completionOutputPredicate: static chunk => chunk.Contains("\"id\":2", StringComparison.Ordinal));
+    }
+
+    public Task<CommandResult> ReadModelsAsync(TargetMachine machine, CancellationToken cancellationToken)
+    {
+        var initialize = JsonSerializer.Serialize(new
+        {
+            method = "initialize",
+            id = 1,
+            @params = new
+            {
+                clientInfo = new { name = "codex-queue", title = "Codex Queue", version = "1.0" },
+                capabilities = new { experimentalApi = true }
+            }
+        });
+        var initialized = "{\"method\":\"initialized\"}";
+        var listModels = "{\"method\":\"model/list\",\"id\":2,\"params\":{\"limit\":100}}";
+        var input = string.Join(Environment.NewLine, new[] { initialize, initialized, listModels }) + Environment.NewLine;
+
+        if (machine.Kind == MachineKind.Local)
+        {
+            return RunProcessAsync(
+                "codex",
+                new[] { "app-server", "--stdio" },
+                null,
+                "codex app-server --stdio (model/list)",
+                static _ => Task.CompletedTask,
+                cancellationToken,
+                firstProcessOutputTimeout: RateLimitsTimeout,
+                standardInput: input,
+                completionOutputPredicate: static chunk => chunk.Contains("\"id\":2", StringComparison.Ordinal));
+        }
+
+        var remoteCommand = machine.TargetsWindows()
+            ? BuildPowerShellRemoteCommand(BuildPowerShellCodexCommandSetup() + "; & $codexCommand app-server --stdio")
+            : UnixRemotePathSetup + " codex app-server --stdio";
+        return RunSshAsync(
+            machine,
+            remoteCommand,
+            "ssh " + machine.Host + " codex app-server --stdio (model/list)",
             static _ => Task.CompletedTask,
             cancellationToken,
             firstProcessOutputTimeout: RateLimitsTimeout,
@@ -757,8 +807,11 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         }
 
         arguments.AddRange(BuildModelConfigArguments(modelEffort, modelSpeed));
-        arguments.Add("-m");
-        arguments.Add(model);
+        if (!IsAutomaticModel(model))
+        {
+            arguments.Add("-m");
+            arguments.Add(model);
+        }
         arguments.Add("--skip-git-repo-check");
 
         // Approval policy used to be exposed by `codex exec -a`, but newer CLI releases
@@ -824,7 +877,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
     private static string BuildCodexPreview(string model, string? modelEffort, string? modelSpeed, string? codexSessionId)
     {
-        var parts = new List<string> { string.IsNullOrWhiteSpace(codexSessionId) ? "codex exec -m " + model : "codex exec resume -m " + model };
+        var command = string.IsNullOrWhiteSpace(codexSessionId) ? "codex exec" : "codex exec resume";
+        var parts = new List<string> { IsAutomaticModel(model) ? command + " (Codex default model)" : command + " -m " + model };
         if (!string.IsNullOrWhiteSpace(modelEffort))
         {
             parts.Add("-c model_reasoning_effort=\"" + modelEffort + "\"");
@@ -842,4 +896,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
         return string.Join(" ", parts);
     }
+
+    private static bool IsAutomaticModel(string model) =>
+        string.Equals(model.Trim(), AutomaticModel, StringComparison.OrdinalIgnoreCase);
 }
