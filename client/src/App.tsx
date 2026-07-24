@@ -42,9 +42,12 @@ import {
 } from 'lucide-react'
 import { ApiError, api, apiUrl, getStoredToken, storeToken } from '@/api/client'
 import type {
+  AiProviderProfile,
+  AiProviderSource,
   ApiConfig,
   CodexRun,
   CodexRequest,
+  ExecutionRunner,
   RunKind,
   FileContent,
   FileTreeEntry,
@@ -55,8 +58,10 @@ import type {
   MachinePlatform,
   RateLimit,
   ModelOption,
+  OpenHandsMachineTest,
   Project,
   PermissionMode,
+  ProviderModelsResponse,
   QueueAttachment,
   QueueDiagnostics,
   QueueTab,
@@ -91,6 +96,7 @@ type ProjectModelDefaults = {
   permissionMode: PermissionMode
 }
 
+type RunnerChoice = 'Codex' | 'Claude' | 'Local'
 type RightRailView = 'files' | 'git'
 type ColorTheme = 'light' | 'dark'
 type AttachmentKind = 'image' | 'json' | 'csv' | 'text' | 'binary'
@@ -225,6 +231,35 @@ function projectModelDefaults(project: Project, models: ModelOption[]): ProjectM
     separateCommitSession: permissionMode !== 'ReadOnly' && (project.defaultSeparateCommitSession ?? false),
     permissionMode,
   }
+}
+
+function requestExecutionRunner(request: Pick<CodexRequest, 'executionRunner'>): ExecutionRunner {
+  return request.executionRunner ?? 'CodexCli'
+}
+
+function runnerChoiceForRequest(request: CodexRequest): RunnerChoice {
+  if (requestExecutionRunner(request) === 'CodexCli') {
+    return 'Codex'
+  }
+
+  if (request.providerSource === 'Anthropic') {
+    return 'Claude'
+  }
+
+  return 'Local'
+}
+
+function qualifyLocalModelId(model: string) {
+  const trimmed = model.trim()
+  return !trimmed
+    ? trimmed
+    : /^openai\//i.test(trimmed)
+      ? `openai/${trimmed.slice('openai/'.length)}`
+      : `openai/${trimmed}`
+}
+
+function localModelDisplayName(model: string) {
+  return model.replace(/^openai\//i, '')
 }
 
 async function readQueueAttachment(file: File): Promise<LocalQueueAttachment> {
@@ -489,6 +524,7 @@ function requestOverrideConfirmed(request: CodexRequest, override: Partial<Codex
 function App() {
   const [theme, setTheme] = useState<ColorTheme>(getInitialTheme)
   const [config, setConfig] = useState<ApiConfig>({ requiresToken: false, models: defaultModels })
+  const [providerProfiles, setProviderProfiles] = useState<AiProviderProfile[]>([])
   const [machines, setMachines] = useState<Machine[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   const [queueTabs, setQueueTabs] = useState<QueueTab[]>([])
@@ -540,10 +576,16 @@ function App() {
       setAuthBlocked(true)
       return
     }
-    const [nextMachines, nextProjects, nextQueueTabs] = await Promise.all([api.machines(), api.projects(), api.queueTabs()])
+    const [nextMachines, nextProjects, nextQueueTabs, nextProviderProfiles] = await Promise.all([
+      api.machines(),
+      api.projects(),
+      api.queueTabs(),
+      api.providerProfiles().catch(() => []),
+    ])
     setMachines(nextMachines)
     setProjects(nextProjects)
     setQueueTabs(nextQueueTabs)
+    setProviderProfiles(nextProviderProfiles)
     setSelectedProjectId((current) => current || nextProjects[0]?.id || '')
   }, [])
 
@@ -896,6 +938,16 @@ function App() {
     const optimisticUpdate: Partial<CodexRequest> = {
       ...requestFields,
     }
+    if (request.executionRunner === 'OpenHandsCli') {
+      const profile = providerProfiles.find((candidate) => candidate.id === request.providerProfileId)
+      optimisticUpdate.providerProfileName = profile?.name ?? null
+      optimisticUpdate.providerSource = profile?.source ?? null
+    } else if (request.executionRunner === 'CodexCli') {
+      optimisticUpdate.providerProfileId = null
+      optimisticUpdate.providerProfileName = null
+      optimisticUpdate.providerSource = null
+      optimisticUpdate.queueWaitReason = null
+    }
     if (attachments) {
       optimisticUpdate.attachments = attachments.map(({ name, contentType, size }) => ({ name, contentType, size }))
     }
@@ -1087,6 +1139,7 @@ function App() {
         ) : (
         <QueueWorkspace
             config={config}
+            providerProfiles={providerProfiles}
             selectedProject={selectedProject}
             queueTabs={queueTabs}
             requests={requests}
@@ -1779,6 +1832,7 @@ function MachineModal({
   const [editingId, setEditingId] = useState<string | undefined>()
   const [machineToDelete, setMachineToDelete] = useState<Machine | null>(null)
   const [testResults, setTestResults] = useState<Record<string, { testing: boolean; success?: boolean; output: string; checkedAt?: string }>>({})
+  const [openHandsTestResults, setOpenHandsTestResults] = useState<Record<string, { testing: boolean; result?: OpenHandsMachineTest; error?: string; checkedAt?: string }>>({})
 
   const selectedMachine = machines.find((machine) => machine.id === editingId)
 
@@ -1851,9 +1905,36 @@ function MachineModal({
     }
   }, [onError])
 
+  const testOpenHands = useCallback(async (id: string) => {
+    setOpenHandsTestResults((current) => ({
+      ...current,
+      [id]: { testing: true, result: current[id]?.result },
+    }))
+    try {
+      const result = await api.testOpenHands(id)
+      setOpenHandsTestResults((current) => ({
+        ...current,
+        [id]: { testing: false, result, checkedAt: new Date().toISOString() },
+      }))
+    } catch (cause) {
+      setOpenHandsTestResults((current) => ({
+        ...current,
+        [id]: {
+          testing: false,
+          error: cause instanceof Error ? cause.message : 'OpenHands CLI check failed.',
+          checkedAt: new Date().toISOString(),
+        },
+      }))
+    }
+  }, [])
+
+  const testRunners = useCallback(async (id: string) => {
+    await Promise.all([test(id), testOpenHands(id)])
+  }, [test, testOpenHands])
+
   const testAll = useCallback(async () => {
-    await Promise.all(machines.map((machine) => test(machine.id)))
-  }, [machines, test])
+    await Promise.all(machines.map((machine) => testRunners(machine.id)))
+  }, [machines, testRunners])
 
   useEffect(() => {
     void testAll()
@@ -1894,6 +1975,7 @@ function MachineModal({
           <div className="machine-list">
             {machines.map((machine) => {
               const result = testResults[machine.id]
+              const openHandsResult = openHandsTestResults[machine.id]
               return (
                 <button key={machine.id} type="button" className={`machine-card ${machine.id === editingId ? 'active' : ''}`} onClick={() => edit(machine)}>
                   <div className="machine-card-main">
@@ -1908,7 +1990,14 @@ function MachineModal({
                   <div className="machine-card-meta">
                     <span className="machine-chip">{machine.kind}</span>
                     <span className="machine-chip">{formatPlatform(machine.platform)}</span>
-                    <span className={`connection-dot ${result?.testing ? 'pending' : result?.success === true ? 'ok' : result?.success === false ? 'bad' : ''}`} />
+                    <span className="machine-runner-check" title={result?.output || 'Codex CLI not checked'}>
+                      Codex
+                      <span className={`connection-dot ${result?.testing ? 'pending' : result?.success === true ? 'ok' : result?.success === false ? 'bad' : ''}`} />
+                    </span>
+                    <span className="machine-runner-check" title={openHandsResult?.error || openHandsResult?.result?.message || 'OpenHands CLI not checked'}>
+                      OpenHands
+                      <span className={`connection-dot ${openHandsResult?.testing ? 'pending' : openHandsResult?.result?.available && !openHandsResult.result.requiresWsl ? 'ok' : openHandsResult?.result || openHandsResult?.error ? 'bad' : ''}`} />
+                    </span>
                   </div>
                 </button>
               )
@@ -1925,8 +2014,14 @@ function MachineModal({
             </div>
             <div className="button-row">
               {editingId && (
-                <GlassButton variant="secondary" size="sm" type="button" onClick={() => test(editingId)} disabled={testResults[editingId]?.testing}>
-                  <Check size={13} /> {testResults[editingId]?.testing ? 'Checking' : 'Check'}
+                <GlassButton
+                  variant="secondary"
+                  size="sm"
+                  type="button"
+                  onClick={() => testRunners(editingId)}
+                  disabled={testResults[editingId]?.testing || openHandsTestResults[editingId]?.testing}
+                >
+                  <Check size={13} /> {testResults[editingId]?.testing || openHandsTestResults[editingId]?.testing ? 'Checking' : 'Check'}
                 </GlassButton>
               )}
               {editingId && (
@@ -1999,6 +2094,25 @@ function MachineModal({
                 {testResults[editingId].checkedAt && <span className="meta">{formatDate(testResults[editingId].checkedAt)}</span>}
               </div>
               <pre className="log-block">{testResults[editingId].output || 'Waiting for output...'}</pre>
+            </div>
+          )}
+          {editingId && openHandsTestResults[editingId] && (
+            <div className={`diagnostics-panel ${openHandsTestResults[editingId].result?.available && !openHandsTestResults[editingId].result?.requiresWsl ? 'diagnostics-panel--ok' : openHandsTestResults[editingId].testing ? '' : 'diagnostics-panel--bad'}`}>
+              <div className="row-between">
+                <strong>
+                  {openHandsTestResults[editingId].testing
+                    ? 'Checking OpenHands CLI'
+                    : openHandsTestResults[editingId].result?.available && !openHandsTestResults[editingId].result?.requiresWsl
+                      ? `OpenHands ${openHandsTestResults[editingId].result?.version || 'available'}`
+                      : 'OpenHands unavailable'}
+                </strong>
+                {openHandsTestResults[editingId].checkedAt && <span className="meta">{formatDate(openHandsTestResults[editingId].checkedAt)}</span>}
+              </div>
+              <div className="meta">
+                {openHandsTestResults[editingId].error
+                  || openHandsTestResults[editingId].result?.message
+                  || 'Waiting for OpenHands CLI output…'}
+              </div>
             </div>
           )}
         </form>
@@ -2266,6 +2380,7 @@ function Modal({ title, icon, children, onClose, wide = false, large = false }: 
 
 function QueueWorkspace({
   config,
+  providerProfiles,
   selectedProject,
   queueTabs,
   requests,
@@ -2294,6 +2409,7 @@ function QueueWorkspace({
   gitChangeCount,
 }: {
   config: ApiConfig
+  providerProfiles: AiProviderProfile[]
   selectedProject?: Project
   queueTabs: QueueTab[]
   requests: CodexRequest[]
@@ -2392,6 +2508,7 @@ function QueueWorkspace({
         <>
           <QueueComposer
             config={config}
+            providerProfiles={providerProfiles}
             selectedProject={selectedProject}
             queueTabId={activeQueueTabId}
             requests={projectQueueRequests}
@@ -2789,6 +2906,7 @@ function ProjectDetailsModal({
 
 function QueueComposer({
   config,
+  providerProfiles,
   selectedProject,
   queueTabId,
   requests,
@@ -2808,6 +2926,7 @@ function QueueComposer({
   onError,
 }: {
   config: ApiConfig
+  providerProfiles: AiProviderProfile[]
   selectedProject: Project
   queueTabId: string | null
   requests: CodexRequest[]
@@ -2827,12 +2946,27 @@ function QueueComposer({
   onError: (cause: unknown) => void
 }) {
   const defaults = useMemo(() => projectModelDefaults(selectedProject, config.models), [config.models, selectedProject])
+  const localProfiles = useMemo(
+    () => providerProfiles.filter((profile) => profile.enabled && profile.source === 'Local'),
+    [providerProfiles],
+  )
   const [requestModel, setRequestModel] = useState<ModelValue>(defaults.requestModel)
   const [commitModel, setCommitModel] = useState<ModelValue>(defaults.commitModel)
   const [generateCommit, setGenerateCommit] = useState(defaults.generateCommit)
   const [separateCommitSession, setSeparateCommitSession] = useState(defaults.separateCommitSession)
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(defaults.permissionMode)
+  const [runnerChoice, setRunnerChoice] = useState<RunnerChoice>('Codex')
+  const [localProfileId, setLocalProfileId] = useState('')
+  const [localModel, setLocalModel] = useState('')
+  const [localModelStatus, setLocalModelStatus] = useState<ProviderModelsResponse | null>(null)
+  const [loadingLocalModels, setLoadingLocalModels] = useState(false)
+  const [localModelError, setLocalModelError] = useState('')
+  const [openHandsMachineStatus, setOpenHandsMachineStatus] = useState<OpenHandsMachineTest | null>(null)
+  const [checkingOpenHands, setCheckingOpenHands] = useState(false)
+  const [openHandsMachineError, setOpenHandsMachineError] = useState('')
   const [approvalDialogOpen, setApprovalDialogOpen] = useState(false)
+  const [openHandsApprovalDialogOpen, setOpenHandsApprovalDialogOpen] = useState(false)
+  const [composerValidationError, setComposerValidationError] = useState('')
   const [prompt, setPrompt] = useState('')
   const [attachments, setAttachments] = useState<LocalQueueAttachment[]>([])
   const [attachmentError, setAttachmentError] = useState('')
@@ -2840,10 +2974,68 @@ function QueueComposer({
   const [savingDefaults, setSavingDefaults] = useState(false)
   const [isQueueing, setIsQueueing] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const localModelLoadSequenceRef = useRef(0)
+  const previousProjectIdRef = useRef(selectedProject.id)
+  const previousEditingRequestIdRef = useRef<string | null>(null)
+  const draftRevisionRef = useRef(0)
+  const composerContextKey = `${selectedProject.id}|${queueTabId ?? ''}|${editingRequest?.id ?? ''}`
+  const composerContextKeyRef = useRef(composerContextKey)
+  composerContextKeyRef.current = composerContextKey
+  const selectedLocalProfile = localProfiles.find((profile) => profile.id === localProfileId)
+  const localModelOptions = useMemo(
+    () => (localModelStatus?.models ?? []).map((model) => ({
+      ...model,
+      id: qualifyLocalModelId(model.id),
+    })),
+    [localModelStatus],
+  )
+
+  const loadLocalModels = useCallback(async (profileId: string, refresh: boolean) => {
+    const requestSequence = ++localModelLoadSequenceRef.current
+    setLoadingLocalModels(true)
+    setLocalModelError('')
+    try {
+      const result = await api.providerModels(profileId, refresh)
+      if (requestSequence !== localModelLoadSequenceRef.current) return
+      setLocalModelStatus(result)
+      const profile = localProfiles.find((candidate) => candidate.id === profileId)
+      const firstModel = result.models[0]?.id ?? ''
+      const fallbackModel = qualifyLocalModelId(profile?.defaultModel || firstModel)
+      setLocalModel((current) => (
+        current
+          ? qualifyLocalModelId(current)
+          : fallbackModel
+      ))
+    } catch (cause) {
+      if (requestSequence !== localModelLoadSequenceRef.current) return
+      setLocalModelStatus(null)
+      setLocalModelError(cause instanceof Error ? cause.message : 'Codex Queue could not check the Local AI server.')
+    } finally {
+      if (requestSequence === localModelLoadSequenceRef.current) {
+        setLoadingLocalModels(false)
+      }
+    }
+  }, [localProfiles])
 
   useEffect(() => {
+    const previousProjectId = previousProjectIdRef.current
+    const previousEditingRequestId = previousEditingRequestIdRef.current
+    const editingRequestId = editingRequest?.id ?? null
+    const projectChanged = previousProjectId !== selectedProject.id
+    const editingRequestChanged = previousEditingRequestId !== editingRequestId
+    previousProjectIdRef.current = selectedProject.id
+    previousEditingRequestIdRef.current = editingRequestId
+
     if (editingRequest) {
+      if (!projectChanged && !editingRequestChanged) {
+        return
+      }
+
+      const nextRunnerChoice = runnerChoiceForRequest(editingRequest)
+      setRunnerChoice(nextRunnerChoice)
       setRequestModel({ model: editingRequest.model, effort: editingRequest.modelEffort || 'medium', speed: editingRequest.modelSpeed || 'normal' })
+      setLocalProfileId(editingRequest.providerProfileId ?? '')
+      setLocalModel(nextRunnerChoice === 'Local' ? qualifyLocalModelId(editingRequest.model) : '')
       setCommitModel({
         model: editingRequest.commitModel || defaults.commitModel.model,
         effort: editingRequest.commitModelEffort || defaults.commitModel.effort,
@@ -2855,15 +3047,149 @@ function QueueComposer({
       setPrompt(editingRequest.prompt)
       setAttachments([])
       setAttachmentError('')
+      setComposerValidationError('')
       return
     }
 
+    // A same-project refresh may replace Project/default objects. Preserve the
+    // complete active draft in that case. On a real project transition or when
+    // leaving edit mode, clear the whole draft so runner/model and prompt can
+    // never drift onto different execution contexts.
+    if (!projectChanged && previousEditingRequestId === null) {
+      return
+    }
+
+    setPrompt('')
+    setAttachments([])
+    setAttachmentError('')
+    setRunnerChoice('Codex')
     setRequestModel(defaults.requestModel)
+    setLocalModel('')
     setCommitModel(defaults.commitModel)
     setGenerateCommit(defaults.generateCommit)
     setSeparateCommitSession(defaults.separateCommitSession)
     setPermissionMode(defaults.permissionMode)
+    setComposerValidationError('')
   }, [defaults, editingRequest, selectedProject.id])
+
+  useEffect(() => {
+    draftRevisionRef.current += 1
+  }, [
+    attachments,
+    commitModel,
+    generateCommit,
+    localModel,
+    localProfileId,
+    permissionMode,
+    prompt,
+    requestModel,
+    runnerChoice,
+    separateCommitSession,
+  ])
+
+  useEffect(() => {
+    if (localProfiles.length === 0) {
+      setLocalProfileId('')
+      return
+    }
+
+    setLocalProfileId((current) => (
+      current && localProfiles.some((profile) => profile.id === current)
+        ? current
+        : localProfiles[0].id
+    ))
+  }, [localProfiles])
+
+  useEffect(() => {
+    if (runnerChoice !== 'Local' || !localProfileId) {
+      localModelLoadSequenceRef.current += 1
+      setLoadingLocalModels(false)
+      setLocalModelStatus(null)
+      setLocalModelError('')
+      return
+    }
+
+    void loadLocalModels(localProfileId, false)
+  }, [loadLocalModels, localProfileId, runnerChoice])
+
+  useEffect(() => {
+    if (runnerChoice !== 'Local' || !selectedLocalProfile || !localModel) {
+      setCheckingOpenHands(false)
+      setOpenHandsMachineStatus(null)
+      setOpenHandsMachineError('')
+      return
+    }
+
+    let cancelled = false
+    setCheckingOpenHands(true)
+    setOpenHandsMachineStatus(null)
+    setOpenHandsMachineError('')
+    void api.testOpenHands(selectedProject.machineId, selectedLocalProfile.id, localModel)
+      .then((result) => {
+        if (!cancelled) setOpenHandsMachineStatus(result)
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) {
+          setOpenHandsMachineError(cause instanceof Error ? cause.message : 'Could not check OpenHands on this machine.')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setCheckingOpenHands(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [localModel, runnerChoice, selectedLocalProfile, selectedProject.machineId])
+
+  const isCodexRunner = runnerChoice === 'Codex'
+  const isLocalRunner = runnerChoice === 'Local'
+  const localModelInstalled = Boolean(localModel && localModelOptions.some((model) => model.id === localModel))
+  const targetLocalAiReachable = openHandsMachineStatus?.targetLocalAiReachable === true
+  const targetLocalModelAvailable = openHandsMachineStatus?.targetSelectedModelAvailable === true
+  const configuredContextWindow = localModelStatus?.configuredContextWindow ?? selectedLocalProfile?.configuredContextWindow
+  const localContextWarning = localModelStatus?.contextWarning
+    || ((configuredContextWindow && configuredContextWindow < 22_000)
+      ? `Configured context is ${configuredContextWindow?.toLocaleString() ?? 'unknown'} tokens. OpenHands needs at least 22,000; 32,768 or more is recommended.`
+      : '')
+  const localBlockingMessage = !isLocalRunner
+    ? ''
+    : !selectedLocalProfile
+      ? 'No enabled Local AI Server profile is configured.'
+      : loadingLocalModels
+        ? 'Checking the Local AI server and installed models from Codex Queue…'
+        : localModelError
+          ? localModelError
+          : !localModelStatus
+            ? 'Local AI server health has not been checked from Codex Queue yet.'
+            : !localModelStatus.healthy
+              ? localModelStatus.error || 'Codex Queue cannot reach the Local AI server.'
+              : localModelOptions.length === 0
+                ? 'Codex Queue reached the Local AI server, but it has no installed models.'
+                : !localModelInstalled
+                  ? 'The selected model is not installed on the Local AI server.'
+                  : checkingOpenHands
+                    ? 'Checking OpenHands CLI and the Local AI route from the selected machine…'
+                    : openHandsMachineError
+                      ? openHandsMachineError
+                      : !openHandsMachineStatus
+                        ? 'OpenHands and target-side Local AI availability have not been checked yet.'
+                        : openHandsMachineStatus.requiresWsl
+                          ? 'Native Windows OpenHands CLI is not supported. Configure this machine through WSL before using Local.'
+                          : !openHandsMachineStatus.available
+                            ? openHandsMachineStatus.message || 'OpenHands is not installed on this machine.'
+                            : !openHandsMachineStatus.targetLocalAiChecked
+                              ? 'Local AI reachability has not been checked from the selected machine.'
+                              : !targetLocalAiReachable
+                                ? openHandsMachineStatus.targetLocalAiMessage || 'The selected machine cannot reach the Local AI server.'
+                                : openHandsMachineStatus.targetSelectedModelAvailable === false
+                                  ? 'The selected model is not installed on the Local AI server as seen from the selected machine.'
+                                  : !targetLocalModelAvailable
+                                    ? openHandsMachineStatus.targetLocalAiMessage || 'The selected machine could not verify the selected model.'
+                                    : permissionMode !== 'FullAccess'
+                                      ? 'Headless OpenHands requires Full access with explicit confirmation for this release.'
+                                      : ''
+  const selectedRequestModel = isLocalRunner ? localModel : requestModel.model
 
   const defaultsChanged =
     requestModel.model !== defaults.requestModel.model ||
@@ -2877,37 +3203,61 @@ function QueueComposer({
     permissionMode !== defaults.permissionMode
 
   const resetModelSelections = () => {
+    localModelLoadSequenceRef.current += 1
+    setRunnerChoice('Codex')
     setRequestModel(defaults.requestModel)
+    setLocalModel('')
     setCommitModel(defaults.commitModel)
     setGenerateCommit(defaults.generateCommit)
     setSeparateCommitSession(defaults.separateCommitSession)
     setPermissionMode(defaults.permissionMode)
+    setComposerValidationError('')
   }
 
-  const queueRequest = async () => {
+  const queueRequest = async (openHandsAlwaysApproveConfirmed = false) => {
     if (!editingRequest) {
       requestCompletionNotificationPermission()
     }
+    const submittedContextKey = composerContextKey
+    const submittedDraftRevision = draftRevisionRef.current
+    const shouldClearSubmittedDraft = () => (
+      composerContextKeyRef.current === submittedContextKey
+      && draftRevisionRef.current === submittedDraftRevision
+    )
     setIsQueueing(true)
     let previewId: string | null = null
     try {
       const payload: UpdateQueueRequest = {
         prompt,
-        attachments: editingRequest && attachments.length === 0 ? undefined : attachmentPayload(attachments),
-        model: requestModel.model,
-        modelEffort: requestModel.effort,
-        modelSpeed: requestModel.speed,
-        generateCommit,
-        separateCommitSession: generateCommit && separateCommitSession,
+        attachments: isLocalRunner
+          ? []
+          : editingRequest && attachments.length === 0
+            ? undefined
+            : attachmentPayload(attachments),
+        model: selectedRequestModel,
+        modelEffort: isCodexRunner ? requestModel.effort : null,
+        modelSpeed: isCodexRunner ? requestModel.speed : null,
+        generateCommit: isCodexRunner && generateCommit,
+        separateCommitSession: isCodexRunner && generateCommit && separateCommitSession,
         permissionMode,
-        commitModel: commitModel.model,
-        commitModelEffort: commitModel.effort,
-        commitModelSpeed: commitModel.speed,
+        executionRunner: isLocalRunner ? 'OpenHandsCli' : 'CodexCli',
+        providerProfileId: isLocalRunner ? selectedLocalProfile?.id ?? null : null,
+        openHandsAlwaysApproveConfirmed: isLocalRunner && openHandsAlwaysApproveConfirmed,
+        commitModel: isCodexRunner ? commitModel.model : null,
+        commitModelEffort: isCodexRunner ? commitModel.effort : null,
+        commitModelSpeed: isCodexRunner ? commitModel.speed : null,
       }
 
       if (editingRequest) {
         await onUpdateRequest(editingRequest.id, payload)
-        onCancelEdit()
+        if (shouldClearSubmittedDraft()) {
+          onCancelEdit()
+          setPrompt('')
+          setAttachments([])
+          setAttachmentError('')
+          resetModelSelections()
+        }
+        return
       } else {
         previewId = `optimistic:${selectedProject.id}:${Date.now()}`
         const nextQueueOrder = requests
@@ -2924,42 +3274,46 @@ function QueueComposer({
           machineName: selectedProject.machineName,
           machineKind: selectedProject.machineKind,
           prompt,
-          attachments: attachmentPayload(attachments).map(({ name, contentType, size }) => ({ name, contentType, size })),
-          model: requestModel.model,
-          modelEffort: requestModel.effort,
-          modelSpeed: requestModel.speed,
+          attachments: isLocalRunner
+            ? []
+            : attachmentPayload(attachments).map(({ name, contentType, size }) => ({ name, contentType, size })),
+          model: selectedRequestModel,
+          modelEffort: isCodexRunner ? requestModel.effort : null,
+          modelSpeed: isCodexRunner ? requestModel.speed : null,
           queueOrder: nextQueueOrder,
           status: 'Queued',
-          generateCommit,
-          separateCommitSession: generateCommit && separateCommitSession,
+          generateCommit: isCodexRunner && generateCommit,
+          separateCommitSession: isCodexRunner && generateCommit && separateCommitSession,
           permissionMode,
-          commitModel: commitModel.model,
-          commitModelEffort: commitModel.effort,
-          commitModelSpeed: commitModel.speed,
+          executionRunner: isLocalRunner ? 'OpenHandsCli' : 'CodexCli',
+          providerProfileId: isLocalRunner ? selectedLocalProfile?.id ?? null : null,
+          providerProfileName: isLocalRunner ? selectedLocalProfile?.name ?? null : null,
+          providerSource: isLocalRunner ? 'Local' : null,
+          queueWaitReason: null,
+          commitModel: isCodexRunner ? commitModel.model : null,
+          commitModelEffort: isCodexRunner ? commitModel.effort : null,
+          commitModelSpeed: isCodexRunner ? commitModel.speed : null,
           createdAt,
           runs: [],
         }
         onTabChange('queue')
         onCreated(previewRequest)
-        setPrompt('')
-        setAttachments([])
-        setAttachmentError('')
-        resetModelSelections()
 
         const createdRequest = await api.createRequest({
           projectId: selectedProject.id,
           queueTabId,
           ...payload,
-          attachments: attachmentPayload(attachments),
+          attachments: isLocalRunner ? [] : attachmentPayload(attachments),
         })
         onCreated(createdRequest, previewId)
+        if (shouldClearSubmittedDraft()) {
+          setPrompt('')
+          setAttachments([])
+          setAttachmentError('')
+          resetModelSelections()
+        }
         return
       }
-
-      setPrompt('')
-      setAttachments([])
-      setAttachmentError('')
-      resetModelSelections()
     } catch (cause) {
       if (previewId) {
         onDiscardRequestPreview(previewId)
@@ -2972,6 +3326,19 @@ function QueueComposer({
 
   const submit = (event: FormEvent) => {
     event.preventDefault()
+    setComposerValidationError('')
+    if (runnerChoice === 'Claude') {
+      setComposerValidationError('Claude through OpenHands is visible for compatibility but is not enabled in this Local-only release.')
+      return
+    }
+    if (isLocalRunner) {
+      if (localBlockingMessage) {
+        setComposerValidationError(localBlockingMessage)
+        return
+      }
+      setOpenHandsApprovalDialogOpen(true)
+      return
+    }
     if (permissionMode === 'AskForApproval') {
       setApprovalDialogOpen(true)
       return
@@ -2980,6 +3347,12 @@ function QueueComposer({
   }
 
   const addFiles = async (files: FileList | File[]) => {
+    if (isQueueing || isLocalRunner) {
+      if (isLocalRunner) {
+        setAttachmentError('Attachments are unavailable for OpenHands in this release.')
+      }
+      return
+    }
     setAttachmentError('')
     try {
       const normalizedFiles = Array.from(files).map(normalizeAttachmentFile)
@@ -3001,12 +3374,24 @@ function QueueComposer({
   const dropFiles = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
     setDraggingFiles(false)
+    if (isQueueing || isLocalRunner) {
+      if (isLocalRunner && event.dataTransfer.files.length > 0) {
+        setAttachmentError('Attachments are unavailable for OpenHands in this release.')
+      }
+      return
+    }
     if (event.dataTransfer.files.length > 0) {
       void addFiles(event.dataTransfer.files)
     }
   }
 
   const pasteFiles = (event: ClipboardEvent<HTMLDivElement>) => {
+    if (isQueueing || isLocalRunner) {
+      if (isLocalRunner && event.clipboardData.files.length > 0) {
+        setAttachmentError('Attachments are unavailable for OpenHands in this release.')
+      }
+      return
+    }
     const files = Array.from(event.clipboardData.files)
     const itemFiles = Array.from(event.clipboardData.items)
       .filter((item) => item.kind === 'file')
@@ -3071,6 +3456,7 @@ function QueueComposer({
         </div>
       </div>
       <form className="composer-form" onSubmit={submit}>
+        <fieldset className="composer-fieldset" disabled={isQueueing}>
         <FieldLabel label="Prompt">
           {editingRequest && (
             <div className="edit-request-banner">
@@ -3084,19 +3470,28 @@ function QueueComposer({
             className={`prompt-dropzone ${draggingFiles ? 'dragging' : ''}`}
             onDragOver={(event) => {
               event.preventDefault()
+              if (isQueueing || isLocalRunner) return
               setDraggingFiles(true)
             }}
             onDragLeave={() => setDraggingFiles(false)}
             onDrop={dropFiles}
             onPaste={pasteFiles}
           >
-            <GlassTextarea value={prompt} onChange={(event) => setPrompt(event.target.value)} required placeholder="Describe the change Codex should make in the selected project." />
+            <GlassTextarea
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              required
+              placeholder={isLocalRunner
+                ? 'Describe the change OpenHands should make in the selected project.'
+                : 'Describe the change Codex should make in the selected project.'}
+            />
             <div className="attachment-row">
               <input
                 ref={fileInputRef}
                 type="file"
                 multiple
                 className="sr-only"
+                disabled={isLocalRunner}
                 onChange={(event) => {
                   if (event.target.files) {
                     void addFiles(event.target.files)
@@ -3104,12 +3499,22 @@ function QueueComposer({
                   event.target.value = ''
                 }}
               />
-              <GlassButton variant="secondary" size="sm" type="button" onClick={() => fileInputRef.current?.click()}>
+              <GlassButton
+                variant="secondary"
+                size="sm"
+                type="button"
+                disabled={isLocalRunner}
+                onClick={() => fileInputRef.current?.click()}
+              >
                 <Plus size={13} /> Attach files
               </GlassButton>
-              <span className="meta">Drag, attach, or paste files/images. Images pass to Codex CLI; text/code/CSV include previews.</span>
+              <span className="meta">
+                {isLocalRunner
+                  ? 'Attachments are disabled for OpenHands until project-scoped transfer paths can be validated safely.'
+                  : 'Drag, attach, or paste files/images. Images pass to Codex CLI; text/code/CSV include previews.'}
+              </span>
             </div>
-            {editingRequest && editingRequest.attachments.length > 0 && attachments.length === 0 && (
+            {!isLocalRunner && editingRequest && editingRequest.attachments.length > 0 && attachments.length === 0 && (
               <div className="existing-attachment-summary">
                 <span className="meta">Existing attachments are kept unless you attach replacement files.</span>
                 <AttachmentMetadataChips attachments={editingRequest.attachments} />
@@ -3124,18 +3529,186 @@ function QueueComposer({
             {attachmentError && <span className="error-text">{attachmentError}</span>}
           </div>
         </FieldLabel>
-        <div className="composer-grid compact">
-          <ModelPicker label="Request" options={config.models} value={requestModel} onChange={setRequestModel} />
-          <ModelPicker label="Commit" options={config.models} value={commitModel} onChange={setCommitModel} disabled={!generateCommit || !separateCommitSession} />
+        <div className="runner-selector-row">
+          <FieldLabel label="Runner">
+            <GlassSelect
+              value={runnerChoice}
+              onChange={(event) => {
+                const nextChoice = event.target.value as RunnerChoice
+                localModelLoadSequenceRef.current += 1
+                setLoadingLocalModels(false)
+                setLocalModelStatus(null)
+                setLocalModelError('')
+                setRunnerChoice(nextChoice)
+                setComposerValidationError('')
+                if (nextChoice === 'Local') {
+                  setAttachments([])
+                  setAttachmentError('')
+                  setGenerateCommit(false)
+                  setSeparateCommitSession(false)
+                  return
+                }
+                if (nextChoice === 'Codex') {
+                  setGenerateCommit(defaults.generateCommit)
+                  setSeparateCommitSession(defaults.separateCommitSession)
+                  setPermissionMode(defaults.permissionMode)
+                }
+              }}
+            >
+              <option value="Codex">Codex / ChatGPT</option>
+              <option value="Claude" disabled>Claude — not enabled yet</option>
+              <option value="Local">Local — OpenHands + Ollama</option>
+            </GlassSelect>
+          </FieldLabel>
+          <div className="runner-selector-summary">
+            <strong>{isLocalRunner ? 'OpenHands CLI' : runnerChoice === 'Claude' ? 'OpenHands CLI · unavailable' : 'Codex CLI'}</strong>
+            <span>
+              {isLocalRunner
+                ? `Runs on ${selectedProject.machineName}; inference uses the selected Local AI Server.`
+                : runnerChoice === 'Claude'
+                  ? 'Anthropic profiles will be enabled in a later increment.'
+                  : `Existing Codex workflow on ${selectedProject.machineName}.`}
+            </span>
+          </div>
         </div>
+        {isCodexRunner ? (
+          <div className="composer-grid compact">
+            <ModelPicker label="Request" options={config.models} value={requestModel} onChange={setRequestModel} />
+            <ModelPicker label="Commit" options={config.models} value={commitModel} onChange={setCommitModel} disabled={!generateCommit || !separateCommitSession} />
+          </div>
+        ) : isLocalRunner ? (
+          <div className="local-runner-panel">
+            <div className="composer-grid compact local-runner-selectors">
+              <FieldLabel label="Source">
+                <GlassSelect
+                  value={localProfileId}
+                  disabled={localProfiles.length === 0}
+                  onChange={(event) => {
+                    localModelLoadSequenceRef.current += 1
+                    setLoadingLocalModels(false)
+                    setLocalModelStatus(null)
+                    setLocalModelError('')
+                    setLocalProfileId(event.target.value)
+                    setLocalModel('')
+                    setComposerValidationError('')
+                  }}
+                >
+                  {localProfiles.length === 0 && <option value="">No enabled Local profile</option>}
+                  {localProfiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>{profile.name}</option>
+                  ))}
+                </GlassSelect>
+              </FieldLabel>
+              <FieldLabel label="Model">
+                <div className="local-model-select-row">
+                  <GlassSelect
+                    value={localModel}
+                    disabled={loadingLocalModels || !localModelStatus?.healthy || localModelOptions.length === 0}
+                    onChange={(event) => {
+                      setLocalModel(event.target.value)
+                      setComposerValidationError('')
+                    }}
+                  >
+                    {!localModel && <option value="">{loadingLocalModels ? 'Discovering models…' : 'Select a model'}</option>}
+                    {localModel && !localModelOptions.some((model) => model.id === localModel) && (
+                      <option value={localModel}>{localModelDisplayName(localModel)} — not installed</option>
+                    )}
+                    {localModelOptions.map((model) => (
+                      <option key={model.id} value={model.id}>{model.name || localModelDisplayName(model.id)}</option>
+                    ))}
+                  </GlassSelect>
+                  <GlassButton
+                    variant="secondary"
+                    size="icon"
+                    type="button"
+                    disabled={!selectedLocalProfile || loadingLocalModels}
+                    title="Refresh Local AI server health and models"
+                    aria-label="Refresh Local AI server health and models"
+                    onClick={() => {
+                      if (selectedLocalProfile) void loadLocalModels(selectedLocalProfile.id, true)
+                    }}
+                  >
+                    <RefreshCcw size={14} className={loadingLocalModels ? 'action-spinner' : ''} />
+                  </GlassButton>
+                </div>
+              </FieldLabel>
+            </div>
+            <div className="local-health-grid" aria-live="polite">
+              <div className={`local-health-item ${checkingOpenHands || (!openHandsMachineStatus && !openHandsMachineError) ? 'pending' : openHandsMachineStatus?.available && !openHandsMachineStatus.requiresWsl ? 'ok' : 'bad'}`}>
+                <span>OpenHands on {selectedProject.machineName}</span>
+                <strong>
+                  {checkingOpenHands || (!openHandsMachineStatus && !openHandsMachineError)
+                    ? 'Checking…'
+                    : openHandsMachineStatus?.available && !openHandsMachineStatus.requiresWsl
+                      ? openHandsMachineStatus.version || 'Available'
+                      : 'Unavailable'}
+                </strong>
+                <small>{openHandsMachineError || openHandsMachineStatus?.message || 'Waiting for machine check.'}</small>
+              </div>
+              <div className={`local-health-item ${loadingLocalModels || (selectedLocalProfile && !localModelStatus && !localModelError) ? 'pending' : localModelStatus?.healthy ? 'ok' : 'bad'}`}>
+                <span>Local AI server from Codex Queue</span>
+                <strong>
+                  {loadingLocalModels || (selectedLocalProfile && !localModelStatus && !localModelError)
+                    ? 'Checking…'
+                    : localModelStatus?.healthy
+                      ? 'Reachable'
+                      : selectedLocalProfile
+                        ? 'Unreachable'
+                        : 'Not configured'}
+                </strong>
+                <small>{localModelError || localModelStatus?.error || selectedLocalProfile?.baseUrl || 'No Local profile configured.'}</small>
+              </div>
+              <div className={`local-health-item ${checkingOpenHands || (!openHandsMachineStatus && Boolean(localModel)) ? 'pending' : targetLocalAiReachable ? 'ok' : 'bad'}`}>
+                <span>Local AI server from {selectedProject.machineName}</span>
+                <strong>
+                  {checkingOpenHands || (!openHandsMachineStatus && Boolean(localModel))
+                    ? 'Checking…'
+                    : targetLocalAiReachable
+                      ? 'Reachable'
+                      : 'Unreachable'}
+                </strong>
+                <small>
+                  {openHandsMachineError
+                    || openHandsMachineStatus?.targetLocalAiMessage
+                    || (localModel ? 'Waiting for target-side network check.' : 'Choose a model to check the target route.')}
+                </small>
+              </div>
+              <div className={`local-health-item ${loadingLocalModels || checkingOpenHands || (selectedLocalProfile && !localModelStatus && !localModelError) ? 'pending' : localModelInstalled && targetLocalModelAvailable ? 'ok' : 'bad'}`}>
+                <span>Selected model</span>
+                <strong>
+                  {loadingLocalModels || checkingOpenHands || (selectedLocalProfile && !localModelStatus && !localModelError)
+                    ? 'Discovering…'
+                    : localModelInstalled && targetLocalModelAvailable
+                      ? localModelDisplayName(localModel)
+                      : 'Unavailable'}
+                </strong>
+                <small>
+                  {localModelInstalled && targetLocalModelAvailable
+                    ? `Installed and visible from ${selectedProject.machineName}`
+                    : openHandsMachineStatus?.targetSelectedModelAvailable === false
+                      ? `Not available from ${selectedProject.machineName}`
+                      : localModelInstalled
+                        ? 'Installed; waiting for target-side verification.'
+                        : 'Choose an installed model.'}
+                </small>
+              </div>
+            </div>
+            {localContextWarning && <div className="local-runner-warning"><ShieldAlert size={15} /> <span>{localContextWarning}</span></div>}
+            {localBlockingMessage && permissionMode === 'FullAccess' && (
+              <div className="local-runner-error">{localBlockingMessage}</div>
+            )}
+          </div>
+        ) : (
+          <div className="local-runner-error">Claude through OpenHands is not enabled in this Local-only release.</div>
+        )}
         <div className="composer-actions-row">
           <div className="commit-options">
             <div className="commit-toggle-group" aria-label="Commit options">
-              <label className={`commit-toggle ${generateCommit ? 'active' : ''} ${permissionMode === 'ReadOnly' ? 'disabled' : ''}`}>
+              <label className={`commit-toggle ${isCodexRunner && generateCommit ? 'active' : ''} ${!isCodexRunner || permissionMode === 'ReadOnly' ? 'disabled' : ''}`}>
                 <input
                   type="checkbox"
-                  checked={generateCommit}
-                  disabled={permissionMode === 'ReadOnly'}
+                  checked={isCodexRunner && generateCommit}
+                  disabled={!isCodexRunner || permissionMode === 'ReadOnly'}
                   onChange={(event) => {
                     setGenerateCommit(event.target.checked)
                     if (!event.target.checked) {
@@ -3146,47 +3719,89 @@ function QueueComposer({
                 <span className="commit-toggle-icon"><Check size={12} /></span>
                 <span>Generate git commit</span>
               </label>
-              <label className={`commit-toggle ${generateCommit && separateCommitSession ? 'active' : ''} ${!generateCommit || permissionMode === 'ReadOnly' ? 'disabled' : ''}`}>
+              <label className={`commit-toggle ${isCodexRunner && generateCommit && separateCommitSession ? 'active' : ''} ${!isCodexRunner || !generateCommit || permissionMode === 'ReadOnly' ? 'disabled' : ''}`}>
                 <input
                   type="checkbox"
-                  checked={generateCommit && separateCommitSession}
-                  disabled={!generateCommit || permissionMode === 'ReadOnly'}
+                  checked={isCodexRunner && generateCommit && separateCommitSession}
+                  disabled={!isCodexRunner || !generateCommit || permissionMode === 'ReadOnly'}
                   onChange={(event) => setSeparateCommitSession(event.target.checked)}
                 />
                 <span className="commit-toggle-icon"><Check size={12} /></span>
                 <span>Separate commit session</span>
               </label>
-              <GlassDropdownSelect
-                label="Codex permission"
-                className="permission-mode-select"
-                value={permissionMode}
-                onChange={(value) => {
-                  const nextMode = value as PermissionMode
-                  setPermissionMode(nextMode)
-                  if (nextMode === 'ReadOnly') {
-                    setGenerateCommit(false)
-                    setSeparateCommitSession(false)
-                  }
-                }}
-                options={[
-                  { value: 'ReadOnly', label: 'Read only', icon: <Eye size={14} /> },
-                  { value: 'AskForApproval', label: 'Ask for approval', icon: <ShieldQuestion size={14} /> },
-                  { value: 'ApproveForMe', label: 'Approve for me', icon: <ShieldCheck size={14} /> },
-                  { value: 'FullAccess', label: 'Full access', icon: <ShieldAlert size={14} /> },
-                ]}
-              />
+              {isCodexRunner ? (
+                <GlassDropdownSelect
+                  label="Codex permission"
+                  className="permission-mode-select"
+                  value={permissionMode}
+                  onChange={(value) => {
+                    const nextMode = value as PermissionMode
+                    setPermissionMode(nextMode)
+                    if (nextMode === 'ReadOnly') {
+                      setGenerateCommit(false)
+                      setSeparateCommitSession(false)
+                    }
+                  }}
+                  options={[
+                    { value: 'ReadOnly', label: 'Read only', icon: <Eye size={14} /> },
+                    { value: 'AskForApproval', label: 'Ask for approval', icon: <ShieldQuestion size={14} /> },
+                    { value: 'ApproveForMe', label: 'Approve for me', icon: <ShieldCheck size={14} /> },
+                    { value: 'FullAccess', label: 'Full access', icon: <ShieldAlert size={14} /> },
+                  ]}
+                />
+              ) : (
+                <FieldLabel label="OpenHands permission">
+                  <GlassSelect
+                    className="permission-mode-select"
+                    value={permissionMode}
+                    onChange={(event) => {
+                      setPermissionMode(event.target.value as PermissionMode)
+                      setComposerValidationError('')
+                    }}
+                  >
+                    <option value="ReadOnly" disabled>Read only — unavailable</option>
+                    <option value="AskForApproval" disabled>Ask for approval — unavailable</option>
+                    <option value="ApproveForMe" disabled>Approve for me — unavailable</option>
+                    <option value="FullAccess">Full access — always approve</option>
+                  </GlassSelect>
+                </FieldLabel>
+              )}
             </div>
+            {isLocalRunner && (
+              <div className="local-permission-note">
+                <ShieldAlert size={14} />
+                <span>
+                  Headless OpenHands cannot surface action-level approvals yet. It must use Full access and runs with the
+                  selected machine account’s permissions. Automatic commit generation is disabled for this release.
+                </span>
+              </div>
+            )}
           </div>
           <div className="button-row">
-            <GlassButton variant="secondary" size="sm" type="button" onClick={saveDefaults} disabled={!defaultsChanged || savingDefaults}>
-              <Check size={13} /> {savingDefaults ? 'Saving' : 'Save defaults'}
-            </GlassButton>
-            <GlassButton className="queue-submit-button" variant="primary" type="submit" disabled={!prompt.trim() || !requestModel.model.trim() || isQueueing}>
+            {isCodexRunner && (
+              <GlassButton variant="secondary" size="sm" type="button" onClick={saveDefaults} disabled={!defaultsChanged || savingDefaults}>
+                <Check size={13} /> {savingDefaults ? 'Saving' : 'Save defaults'}
+              </GlassButton>
+            )}
+            <GlassButton
+              className="queue-submit-button"
+              variant="primary"
+              type="submit"
+              disabled={
+                !prompt.trim()
+                || !selectedRequestModel.trim()
+                || isQueueing
+                || runnerChoice === 'Claude'
+                || (isLocalRunner && Boolean(localBlockingMessage))
+              }
+            >
               {isQueueing ? <RefreshCcw size={16} className="action-spinner" /> : <Play size={16} />}
               {isQueueing ? (editingRequest ? 'Updating...' : 'Queueing...') : (editingRequest ? 'Update' : 'Queue')}
             </GlassButton>
           </div>
         </div>
+        {composerValidationError && <div className="local-runner-error" role="alert">{composerValidationError}</div>}
+        </fieldset>
       </form>
       {approvalDialogOpen && (
         <ConfirmDialog
@@ -3197,6 +3812,24 @@ function QueueComposer({
           onConfirm={async () => {
             setApprovalDialogOpen(false)
             await queueRequest()
+          }}
+        />
+      )}
+      {openHandsApprovalDialogOpen && (
+        <ConfirmDialog
+          title="Allow OpenHands full access?"
+          description={(
+            <>
+              OpenHands will run <strong>headlessly with --always-approve</strong> on <strong>{selectedProject.machineName}</strong>.
+              It can read, modify, and run commands in the selected project using that machine account’s permissions.
+              This is not equivalent to a Codex sandbox or action-level approval flow.
+            </>
+          )}
+          confirmLabel="Allow and queue"
+          onCancel={() => setOpenHandsApprovalDialogOpen(false)}
+          onConfirm={async () => {
+            setOpenHandsApprovalDialogOpen(false)
+            await queueRequest(true)
           }}
         />
       )}
@@ -3725,7 +4358,17 @@ function RequestCard({
           <div className="request-title-row">
             <div className="request-title-stack">
               <span className="request-title truncate" title={request.prompt}>{requestDisplayName(request)}</span>
-              <ModelChips model={request.model} effort={request.modelEffort} speed={request.modelSpeed} />
+              <RunnerChips
+                executionRunner={request.executionRunner}
+                providerSource={request.providerSource}
+                providerProfileName={request.providerProfileName}
+              />
+              <ModelChips
+                model={request.model}
+                effort={request.modelEffort}
+                speed={request.modelSpeed}
+                showTuning={requestExecutionRunner(request) === 'CodexCli'}
+              />
             </div>
             <div className="request-card-status">
               <StatusBadge status={request.status} busy={request.status === 'Running'} />
@@ -3735,6 +4378,7 @@ function RequestCard({
           <div className="request-card-meta-row">
             <span className="request-stage-chip">{stageLabel(request)}</span>
             <span>{commitModeLabel(request)}</span>
+            {request.queueWaitReason && <span className="request-wait-reason">{request.queueWaitReason}</span>}
             {request.attachments.length > 0 && <span>{attachmentSummary(request.attachments)}</span>}
             {duration && <span>{duration}</span>}
             <span className="truncate">{request.machineName}</span>
@@ -4164,7 +4808,7 @@ function tryParseJson(value: string): unknown {
 
 function toBodyEvent(value: Record<string, unknown>): BodyEvent {
   const item = isRecord(value.item) ? value.item : undefined
-  const eventType = stringValue(value.type) ?? stringValue(item?.type) ?? 'event'
+  const eventType = stringValue(value.type) ?? stringValue(value.kind) ?? stringValue(item?.type) ?? 'event'
   const status = stringValue(value.status) ?? stringValue(item?.status)
   const text = textFromContent(item?.content)
     ?? textFromContent(value.content)
@@ -4343,8 +4987,10 @@ function assistantMessageFromEvent(event: Record<string, unknown>): string | nul
 function assistantMessageFromRecord(value: Record<string, unknown>, eventType?: string, fallback?: Record<string, unknown>): string | null {
   const itemType = stringValue(value.type)
   const role = stringValue(value.role)
+  const source = stringValue(value.source)
   const looksLikeCompletedMessage = isCompletedType(eventType) && isMessageType(itemType)
   const looksLikeAssistantMessage = role === 'assistant'
+    || source === 'agent'
     || looksLikeCompletedMessage
     || isAssistantTextEventType(eventType)
     || isAssistantTextEventType(itemType)
@@ -4558,7 +5204,7 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
             <div>
               <div className="queue-detail-compact-label">Work report</div>
               <strong>{request.status === 'Succeeded' ? 'Final result ready' : 'Live work in progress'}</strong>
-              <div className="meta">Read Codex's formatted results without the raw command log.</div>
+              <div className="meta">Read {runnerDisplayName(request.executionRunner, request.providerSource)} results without the raw command log.</div>
             </div>
             <GlassButton variant="primary" size="sm" type="button" onClick={() => setReportOpen(true)}>
               <FileText size={13} /> Details
@@ -4569,13 +5215,33 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
           <div className="queue-detail-body">
             <div className="request-body-header">
               <div className="section-kicker">Request body</div>
-              <ModelChips model={request.model} effort={request.modelEffort} speed={request.modelSpeed} />
+              <div className="request-runner-metadata">
+                <RunnerChips
+                  executionRunner={request.executionRunner}
+                  providerSource={request.providerSource}
+                  providerProfileName={request.providerProfileName}
+                />
+                <ModelChips
+                  model={request.model}
+                  effort={request.modelEffort}
+                  speed={request.modelSpeed}
+                  showTuning={requestExecutionRunner(request) === 'CodexCli'}
+                />
+              </div>
             </div>
             <AttachmentMetadataChips attachments={request.attachments} />
             <div className="request-body-scroll">
               <StructuredBodyView content={request.prompt} />
             </div>
           </div>
+
+          {request.queueWaitReason && (
+            <div className="queue-wait-banner" role="status">
+              <RefreshCcw size={14} />
+              <span>{request.queueWaitReason}</span>
+            </div>
+          )}
+          {request.error && <div className="local-runner-error">{request.error}</div>}
 
           {completionMessage && (
             <div className="completion-summary">
@@ -4597,11 +5263,26 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
               <div className="run-detail-head">
                 <div className="run-title-stack">
                   <strong>{run.kind}</strong>
-                  <ModelChips model={run.model} effort={run.modelEffort} speed={run.modelSpeed} />
+                  <RunnerChips
+                    executionRunner={run.executionRunner ?? request.executionRunner}
+                    providerSource={run.providerSource ?? request.providerSource}
+                    providerProfileName={run.providerProfileName ?? request.providerProfileName}
+                  />
+                  <ModelChips
+                    model={run.model}
+                    effort={run.modelEffort}
+                    speed={run.modelSpeed}
+                    showTuning={(run.executionRunner ?? requestExecutionRunner(request)) === 'CodexCli'}
+                  />
                 </div>
                 <StatusBadge status={run.status} busy={run.status === 'Running'} />
               </div>
               {run.commandPreview && <div className="command-preview">$ {run.commandPreview}</div>}
+              {run.openHandsConversationId && (
+                <div className="conversation-chip" title={run.openHandsConversationId}>
+                  OpenHands conversation {shortId(run.openHandsConversationId)}
+                </div>
+              )}
               {run.status === 'UsageLimited' && (
                 <UsageLimitBanner
                   reason={run.retryReason}
@@ -4617,7 +5298,10 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
                 </div>
               )}
               {run.error && <div className="error-text">{run.error}</div>}
-              <DetailedCodexAnswers output={run.output} />
+              <DetailedCodexAnswers
+                output={run.output}
+                agentName={(run.executionRunner ?? requestExecutionRunner(request)) === 'OpenHandsCli' ? 'OpenHands' : 'Codex'}
+              />
               <div className="run-output-head">
                 <span>Run log</span>
                 <span>{run.output.trim() ? `${run.output.length.toLocaleString()} chars` : 'empty'}</span>
@@ -4634,7 +5318,17 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
             <div className="pending-run-row">
               <div className="run-title-stack">
                 <strong>Request</strong>
-                <ModelChips model={request.model} effort={request.modelEffort} speed={request.modelSpeed} />
+                <RunnerChips
+                  executionRunner={request.executionRunner}
+                  providerSource={request.providerSource}
+                  providerProfileName={request.providerProfileName}
+                />
+                <ModelChips
+                  model={request.model}
+                  effort={request.modelEffort}
+                  speed={request.modelSpeed}
+                  showTuning={requestExecutionRunner(request) === 'CodexCli'}
+                />
               </div>
               <StatusBadge status="Queued" />
             </div>
@@ -4682,6 +5376,7 @@ function reportMessagesForRequest(request: CodexRequest): WorkReportMessage[] {
 }
 
 function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; now: number; onClose: () => void }) {
+  const agentName = requestExecutionRunner(request) === 'OpenHandsCli' ? 'OpenHands' : 'Codex'
   const messages = useMemo(() => reportMessagesForRequest(request), [request])
   const finalMessage = request.status === 'Succeeded' ? completionMessageForRequest(request) : null
   const finalResponseUnavailable = request.status === 'Succeeded' && !finalMessage
@@ -4698,7 +5393,7 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
   )
 
   return (
-    <Modal title="Codex work report" icon={<ClipboardList size={18} />} onClose={onClose} large>
+    <Modal title={`${agentName} work report`} icon={<ClipboardList size={18} />} onClose={onClose} large>
       <div className="work-report" aria-live={request.status === 'Running' ? 'polite' : undefined}>
         <header className={`work-report-hero work-report-hero--${request.status.toLowerCase()}`}>
           <div className="work-report-title-stack">
@@ -4707,9 +5402,9 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
             <p>
               {request.status === 'Succeeded'
                 ? finalResponseUnavailable
-                  ? 'Codex finished this request, but no final response was retained. Available work notes are collected below.'
-                  : 'Codex finished this request. The final response and meaningful work notes are collected below.'
-                : 'This report refreshes while Codex works. The finished response will replace the live update when it is ready.'}
+                  ? `${agentName} finished this request, but no final response was retained. Available work notes are collected below.`
+                  : `${agentName} finished this request. The final response and meaningful work notes are collected below.`
+                : `This report refreshes while ${agentName} works. The finished response will replace the live update when it is ready.`}
             </p>
           </div>
           <StatusBadge status={request.status} busy={request.status === 'Running'} />
@@ -4720,8 +5415,8 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
             <section className={`work-report-section work-report-primary ${finalMessage ? 'work-report-primary--complete' : ''}`}>
               <div className="work-report-section-head">
                 <div>
-                  <div className="section-kicker">{finalMessage ? 'Final result' : finalResponseUnavailable ? 'Final response unavailable' : primaryMessage ? 'Latest Codex update' : 'Result pending'}</div>
-                  <h4>{finalMessage ? 'What Codex delivered' : finalResponseUnavailable ? 'Codex completed the work, but its final response was not retained' : primaryMessage ? 'What Codex has reported so far' : 'Codex is still working'}</h4>
+                  <div className="section-kicker">{finalMessage ? 'Final result' : finalResponseUnavailable ? 'Final response unavailable' : primaryMessage ? `Latest ${agentName} update` : 'Result pending'}</div>
+                  <h4>{finalMessage ? `What ${agentName} delivered` : finalResponseUnavailable ? `${agentName} completed the work, but its final response was not retained` : primaryMessage ? `What ${agentName} has reported so far` : `${agentName} is still working`}</h4>
                 </div>
                 {finalMessage && <Check size={20} aria-hidden="true" />}
               </div>
@@ -4732,8 +5427,8 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
               ) : (
                 <div className="work-report-empty">
                   {finalResponseUnavailable
-                    ? 'No final Codex response was retained for this completed run. Its work log and commit details remain available below.'
-                    : 'No formatted Codex response has been published yet. Status and elapsed time will continue to update here.'}
+                    ? `No final ${agentName} response was retained for this completed run. Its work log and commit details remain available below.`
+                    : `No formatted ${agentName} response has been published yet. Status and elapsed time will continue to update here.`}
                 </div>
               )}
             </section>
@@ -4742,7 +5437,7 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
               <div className="work-report-section-head">
                 <div>
                   <div className="section-kicker">Detailed procedure</div>
-                  <h4>How Codex completed the work</h4>
+                  <h4>How {agentName} completed the work</h4>
                 </div>
                 <span className="work-report-count">{request.runs.length}</span>
               </div>
@@ -4763,7 +5458,7 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
                     />
                   </article>
                 )) : (
-                  <div className="work-report-empty">Codex has not started a procedure yet.</div>
+                  <div className="work-report-empty">{agentName} has not started a procedure yet.</div>
                 )}
               </div>
             </section>
@@ -4773,7 +5468,7 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
                 <div className="work-report-section-head">
                   <div>
                     <div className="section-kicker">Work notes</div>
-                    <h4>Additional Codex updates</h4>
+                    <h4>Additional {agentName} updates</h4>
                   </div>
                   <span className="work-report-count">{supportingMessages.length}</span>
                 </div>
@@ -4798,7 +5493,17 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
                 <div><dt>Elapsed</dt><dd>{elapsed ?? 'Not started'}</dd></div>
                 <div><dt>{finishedAt ? 'Finished' : 'Started'}</dt><dd>{formatDate(finishedAt ?? request.startedAt ?? request.createdAt)}</dd></div>
               </dl>
-              <ModelChips model={request.model} effort={request.modelEffort} speed={request.modelSpeed} />
+              <RunnerChips
+                executionRunner={request.executionRunner}
+                providerSource={request.providerSource}
+                providerProfileName={request.providerProfileName}
+              />
+              <ModelChips
+                model={request.model}
+                effort={request.modelEffort}
+                speed={request.modelSpeed}
+                showTuning={requestExecutionRunner(request) === 'CodexCli'}
+              />
             </section>
 
             <section className="work-report-summary-card">
@@ -4838,7 +5543,7 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
                   {reportedFiles.map((path) => <li key={path} title={path}>{path}</li>)}
                 </ul>
               ) : (
-                <div className="work-report-empty work-report-empty--compact">No file paths were included in the Codex report.</div>
+                <div className="work-report-empty work-report-empty--compact">No file paths were included in the {agentName} report.</div>
               )}
             </section>
           </aside>
@@ -4869,7 +5574,7 @@ function reportedFileChanges(request: CodexRequest, messages: WorkReportMessage[
   return [...paths].filter((path) => path && path !== 'unknown path').sort((left, right) => left.localeCompare(right))
 }
 
-function DetailedCodexAnswers({ output }: { output: string }) {
+function DetailedCodexAnswers({ output, agentName = 'Codex' }: { output: string; agentName?: string }) {
   const answers = useMemo(() => completionMessagesFromOutput(output), [output])
 
   if (answers.length === 0) {
@@ -4877,9 +5582,9 @@ function DetailedCodexAnswers({ output }: { output: string }) {
   }
 
   return (
-    <section className="codex-answers" aria-label="Codex answers">
+    <section className="codex-answers" aria-label={`${agentName} answers`}>
       <div className="run-output-head">
-        <span>Codex answers</span>
+        <span>{agentName} answers</span>
         <span>{answers.length === 1 ? '1 answer' : `${answers.length} answers`}</span>
       </div>
       <div className="codex-answers-list">
@@ -5203,7 +5908,17 @@ function RequestHistory({
                 <div className="truncate">
                   <div className="project-name truncate" title={request.prompt}>{requestDisplayName(request)}</div>
                   <div className="history-metadata">
-                    <ModelChips model={request.model} effort={request.modelEffort} speed={request.modelSpeed} />
+                    <RunnerChips
+                      executionRunner={request.executionRunner}
+                      providerSource={request.providerSource}
+                      providerProfileName={request.providerProfileName}
+                    />
+                    <ModelChips
+                      model={request.model}
+                      effort={request.modelEffort}
+                      speed={request.modelSpeed}
+                      showTuning={requestExecutionRunner(request) === 'CodexCli'}
+                    />
                     <span className="model-chip model-chip--time">{request.deletedAt ? 'trashed' : 'finished'} {formatDate(completedAt)}</span>
                     {duration && <span className="model-chip model-chip--time">{duration}</span>}
                     {request.attachments.length > 0 && <span className="model-chip">{request.attachments.length} files</span>}
@@ -6144,7 +6859,55 @@ function attachmentSummary(attachments: Array<{ contentType: string }>) {
   return imageCount > 0 ? `${fileLabel}, ${imageCount} image${imageCount === 1 ? '' : 's'}` : fileLabel
 }
 
-function ModelChips({ model, effort, speed }: { model: string, effort?: string | null, speed?: string | null }) {
+function runnerDisplayName(executionRunner?: ExecutionRunner, providerSource?: AiProviderSource | null) {
+  if ((executionRunner ?? 'CodexCli') === 'CodexCli') {
+    return 'Codex CLI'
+  }
+
+  return providerSource === 'Local' ? 'OpenHands CLI · Local' : 'OpenHands CLI'
+}
+
+function providerSourceLabel(source?: AiProviderSource | null) {
+  if (source === 'OpenAi') return 'OpenAI'
+  if (source === 'Anthropic') return 'Anthropic'
+  if (source === 'Local') return 'Local AI'
+  return null
+}
+
+function RunnerChips({
+  executionRunner,
+  providerSource,
+  providerProfileName,
+}: {
+  executionRunner?: ExecutionRunner
+  providerSource?: AiProviderSource | null
+  providerProfileName?: string | null
+}) {
+  const runner = executionRunner ?? 'CodexCli'
+  const sourceLabel = providerSourceLabel(providerSource)
+
+  return (
+    <div className="runner-chip-row" aria-label="Execution runner">
+      <span className={`model-chip runner-chip runner-chip--${runner === 'OpenHandsCli' ? 'openhands' : 'codex'}`}>
+        {runner === 'OpenHandsCli' ? 'OpenHands CLI' : 'Codex CLI'}
+      </span>
+      {sourceLabel && <span className="model-chip runner-chip runner-chip--source">{sourceLabel}</span>}
+      {providerProfileName && <span className="model-chip runner-chip runner-chip--profile">{providerProfileName}</span>}
+    </div>
+  )
+}
+
+function ModelChips({
+  model,
+  effort,
+  speed,
+  showTuning = true,
+}: {
+  model: string
+  effort?: string | null
+  speed?: string | null
+  showTuning?: boolean
+}) {
   const effortLabels: Record<string, string> = {
     low: 'light',
     medium: 'medium',
@@ -6156,9 +6919,9 @@ function ModelChips({ model, effort, speed }: { model: string, effort?: string |
 
   return (
     <div className="model-chip-row" aria-label="Selected model settings">
-      <span className="model-chip model-chip--model">{model}</span>
-      {effort && <span className={`model-chip model-chip--effort model-chip--effort-${effort}`}>{effortLabels[effort] ?? effort}</span>}
-      <span className={`model-chip model-chip--speed ${speed === 'priority' ? 'model-chip--speed-priority' : ''}`}>{normalizedSpeed}</span>
+      <span className="model-chip model-chip--model">{showTuning ? model : localModelDisplayName(model)}</span>
+      {showTuning && effort && <span className={`model-chip model-chip--effort model-chip--effort-${effort}`}>{effortLabels[effort] ?? effort}</span>}
+      {showTuning && <span className={`model-chip model-chip--speed ${speed === 'priority' ? 'model-chip--speed-priority' : ''}`}>{normalizedSpeed}</span>}
     </div>
   )
 }

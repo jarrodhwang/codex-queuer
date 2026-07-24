@@ -39,6 +39,14 @@ builder.Services.AddCors(options =>
 });
 builder.Services.AddSingleton<ITargetCommandRunner, TargetCommandRunner>();
 builder.Services.AddHttpClient();
+builder.Services.AddSingleton<AiProviderService>();
+builder.Services.AddSingleton<IAiProviderService>(sp => sp.GetRequiredService<AiProviderService>());
+builder.Services.AddSingleton(new OpenHandsCommandOptions());
+builder.Services.AddSingleton<IOpenHandsCommandRunner, OpenHandsCommandRunner>();
+builder.Services.AddSingleton<IQueueAgentRunner, CodexQueueAgentRunner>();
+builder.Services.AddSingleton<IQueueAgentRunner, OpenHandsQueueAgentRunner>();
+builder.Services.AddSingleton<IQueueAgentRunnerResolver, QueueAgentRunnerResolver>();
+builder.Services.AddSingleton<IProviderConcurrencyGate, ProviderConcurrencyGate>();
 builder.Services.AddSingleton<ITerminalSessionService, TerminalSessionService>();
 builder.Services.AddScoped<IProjectFileService, ProjectFileService>();
 builder.Services.AddSingleton<QueueWorker>();

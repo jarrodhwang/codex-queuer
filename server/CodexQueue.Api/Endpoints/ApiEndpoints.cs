@@ -8,6 +8,10 @@ namespace CodexQueue.Api.Endpoints;
 
 public static class ApiEndpoints
 {
+    private const string OpenHandsAttachmentsUnavailableError =
+        "Attachments are not available for OpenHands in this release because their "
+        + "project-scoped transfer path has not yet been validated against symbolic-link escapes.";
+
     public static void MapCodexQueueApi(this WebApplication app)
     {
         var api = app.MapGroup("/api");
@@ -62,9 +66,58 @@ public static class ApiEndpoints
                 return Results.BadRequest(new { error = validation });
             }
 
+            if (await db.Requests.AnyAsync(
+                    x => x.MachineId == id
+                        && x.ExecutionRunner == ExecutionRunner.OpenHandsCli
+                        && x.DeletedAt == null
+                        && x.ArchivedAt == null
+                        && (x.Status == QueueStatus.Queued
+                            || x.Status == QueueStatus.Running
+                            || x.Status == QueueStatus.CancelRequested
+                            || x.Status == QueueStatus.UsageLimited),
+                    cancellationToken))
+            {
+                return Results.Conflict(new
+                {
+                    error = "Finish or cancel active OpenHands requests before changing this machine.",
+                });
+            }
+
+            var previousExecutionContext = (
+                machine.Kind,
+                machine.Host,
+                machine.Port,
+                machine.UserName,
+                machine.SshKeyPath,
+                machine.WorkingRoot,
+                machine.Platform);
             Apply(input, machine);
             machine.UpdatedAt = DateTimeOffset.UtcNow;
+            var executionContextChanged = previousExecutionContext != (
+                machine.Kind,
+                machine.Host,
+                machine.Port,
+                machine.UserName,
+                machine.SshKeyPath,
+                machine.WorkingRoot,
+                machine.Platform);
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
             await db.SaveChangesAsync(cancellationToken);
+            if (executionContextChanged)
+            {
+                await db.QueueTabs
+                    .Where(tab => tab.DeletedAt == null
+                        && tab.OpenHandsConversationId != null
+                        && db.Projects.Any(project =>
+                            project.Id == tab.ProjectId
+                            && project.MachineId == id))
+                    .ExecuteUpdateAsync(
+                        setters => setters
+                            .SetProperty(tab => tab.OpenHandsConversationId, (string?)null)
+                            .SetProperty(tab => tab.UpdatedAt, machine.UpdatedAt),
+                        cancellationToken);
+            }
+            await transaction.CommitAsync(cancellationToken);
             return Results.Ok(machine.ToDto());
         });
 
@@ -108,6 +161,231 @@ public static class ApiEndpoints
             {
                 return Results.Ok(new MachineTestDto(false, ex.Message));
             }
+        });
+
+        api.MapGet("/machines/{id:guid}/openhands/test", async (
+            Guid id,
+            Guid? providerProfileId,
+            string? model,
+            AppDbContext db,
+            IAiProviderService providers,
+            IOpenHandsCommandRunner runner,
+            CancellationToken cancellationToken) =>
+        {
+            var machine = await db.Machines.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            if (machine is null)
+            {
+                return Results.NotFound();
+            }
+
+            string? localAiBaseUrl = null;
+            string? selectedModel = null;
+            if (providerProfileId is not null)
+            {
+                var profile = await db.AiProviderProfiles
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x => x.Id == providerProfileId, cancellationToken);
+                if (profile is null)
+                {
+                    return Results.BadRequest(new { error = "Selected Local AI Server profile was not found." });
+                }
+
+                var validation = providers.Validate(profile);
+                if (profile.Source != AiProviderSource.Local
+                    || !profile.Enabled
+                    || !validation.IsValid
+                    || validation.NormalizedBaseUrl is null)
+                {
+                    var detail = validation.IsValid
+                        ? ""
+                        : " " + string.Join(" ", validation.Errors);
+                    return Results.BadRequest(new
+                    {
+                        error = "Selected Local AI Server profile is unavailable or invalid." + detail,
+                    });
+                }
+
+                try
+                {
+                    localAiBaseUrl = validation.NormalizedBaseUrl;
+                    var requestedModel = string.IsNullOrWhiteSpace(model)
+                        ? validation.NormalizedDefaultModel
+                        : model;
+                    selectedModel = string.IsNullOrWhiteSpace(requestedModel)
+                        ? null
+                        : AiProviderService.QualifyModel(AiProviderSource.Local, requestedModel);
+                }
+                catch (ArgumentException ex)
+                {
+                    return Results.BadRequest(new { error = ex.Message });
+                }
+            }
+            else if (!string.IsNullOrWhiteSpace(model))
+            {
+                return Results.BadRequest(new
+                {
+                    error = "A Local AI Server profile is required when checking a selected model.",
+                });
+            }
+
+            var result = await runner.TestMachineAsync(
+                machine,
+                cancellationToken,
+                localAiBaseUrl,
+                selectedModel);
+            return Results.Ok(new OpenHandsMachineCheckDto(
+                result.Available,
+                result.Version,
+                result.RequiresWsl,
+                result.Message,
+                result.TargetLocalAiChecked,
+                result.TargetLocalAiReachable,
+                result.TargetSelectedModelAvailable,
+                result.TargetLocalAiMessage));
+        });
+
+        api.MapGet("/provider-profiles", async (AppDbContext db, CancellationToken cancellationToken) =>
+            await db.AiProviderProfiles
+                .AsNoTracking()
+                .OrderBy(x => x.Name)
+                .Select(x => x.ToDto())
+                .ToArrayAsync(cancellationToken));
+
+        api.MapPost("/provider-profiles", async (
+            SaveAiProviderProfileRequest input,
+            AppDbContext db,
+            IAiProviderService providers,
+            CancellationToken cancellationToken) =>
+        {
+            var profile = new AiProviderProfile();
+            Apply(input, profile);
+            var validation = providers.Validate(profile);
+            if (!validation.IsValid)
+            {
+                return Results.BadRequest(new { error = string.Join(" ", validation.Errors) });
+            }
+
+            if (await db.AiProviderProfiles.AnyAsync(
+                    x => x.Name.ToUpper() == profile.Name.ToUpper(),
+                    cancellationToken))
+            {
+                return Results.Conflict(new { error = "A provider profile with this name already exists." });
+            }
+
+            ApplyNormalizedProviderValues(profile, validation);
+            db.AiProviderProfiles.Add(profile);
+            await db.SaveChangesAsync(cancellationToken);
+            return Results.Created($"/api/provider-profiles/{profile.Id}", profile.ToDto());
+        });
+
+        api.MapPut("/provider-profiles/{id:guid}", async (
+            Guid id,
+            SaveAiProviderProfileRequest input,
+            AppDbContext db,
+            IAiProviderService providers,
+            CancellationToken cancellationToken) =>
+        {
+            var profile = await db.AiProviderProfiles.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            if (profile is null)
+            {
+                return Results.NotFound();
+            }
+
+            var hasActiveRequests = await db.Requests.AnyAsync(
+                x => x.ProviderProfileId == id
+                    && x.DeletedAt == null
+                    && x.ArchivedAt == null
+                    && (x.Status == QueueStatus.Queued
+                        || x.Status == QueueStatus.Running
+                        || x.Status == QueueStatus.CancelRequested
+                        || x.Status == QueueStatus.UsageLimited),
+                cancellationToken);
+            if (hasActiveRequests)
+            {
+                return Results.Conflict(new
+                {
+                    error = "Finish or cancel active requests before changing this provider profile.",
+                });
+            }
+
+            Apply(input, profile);
+            var validation = providers.Validate(profile);
+            if (!validation.IsValid)
+            {
+                return Results.BadRequest(new { error = string.Join(" ", validation.Errors) });
+            }
+
+            if (await db.AiProviderProfiles.AnyAsync(
+                    x => x.Id != id && x.Name.ToUpper() == profile.Name.ToUpper(),
+                    cancellationToken))
+            {
+                return Results.Conflict(new { error = "A provider profile with this name already exists." });
+            }
+
+            ApplyNormalizedProviderValues(profile, validation);
+            profile.LastHealthStatus = ProviderHealthStatus.Unknown;
+            profile.LastHealthAt = null;
+            profile.LastHealthError = null;
+            profile.UpdatedAt = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync(cancellationToken);
+            return Results.Ok(profile.ToDto());
+        });
+
+        api.MapDelete("/provider-profiles/{id:guid}", async (
+            Guid id,
+            AppDbContext db,
+            CancellationToken cancellationToken) =>
+        {
+            var profile = await db.AiProviderProfiles.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            if (profile is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (await db.Requests.AnyAsync(x => x.ProviderProfileId == id, cancellationToken))
+            {
+                return Results.Conflict(new
+                {
+                    error = "This provider profile is retained because request history references it. Disable it instead.",
+                });
+            }
+
+            db.AiProviderProfiles.Remove(profile);
+            await db.SaveChangesAsync(cancellationToken);
+            return Results.NoContent();
+        });
+
+        api.MapGet("/provider-profiles/{id:guid}/models", async (
+            Guid id,
+            bool? refresh,
+            AppDbContext db,
+            IAiProviderService providers,
+            CancellationToken cancellationToken) =>
+        {
+            var profile = await db.AiProviderProfiles.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            if (profile is null)
+            {
+                return Results.NotFound();
+            }
+
+            var discovery = await providers.DiscoverModelsAsync(
+                profile,
+                cancellationToken,
+                forceRefresh: refresh == true);
+            profile.LastHealthStatus = discovery.HealthStatus;
+            profile.LastHealthAt = discovery.CheckedAt;
+            profile.LastHealthError = Truncate(discovery.Error, 2_000);
+            await db.SaveChangesAsync(cancellationToken);
+            var warning = providers.GetContextWarning(profile);
+            return Results.Ok(new AiProviderModelsDto(
+                profile.Id,
+                discovery.HealthStatus == ProviderHealthStatus.Healthy,
+                discovery.HealthStatus,
+                discovery.Error,
+                discovery.CheckedAt,
+                profile.ConfiguredContextWindow,
+                warning?.Message,
+                discovery.Models.Select(x => new AiProviderModelDto(x.Model, x.Name)).ToArray()));
         });
 
         api.MapGet("/machines/{id:guid}/usage", async (Guid id, AppDbContext db, ITargetCommandRunner runner, CancellationToken cancellationToken) =>
@@ -261,6 +539,7 @@ public static class ApiEndpoints
             }
 
             tab.CodexSessionId = null;
+            tab.OpenHandsConversationId = null;
             tab.DeletedAt = DateTimeOffset.UtcNow;
             tab.UpdatedAt = tab.DeletedAt.Value;
             await db.SaveChangesAsync(cancellationToken);
@@ -368,10 +647,13 @@ public static class ApiEndpoints
             if (executionContextChanged)
             {
                 await db.QueueTabs
-                    .Where(x => x.ProjectId == project.Id && x.DeletedAt == null && x.CodexSessionId != null)
+                    .Where(x => x.ProjectId == project.Id
+                        && x.DeletedAt == null
+                        && (x.CodexSessionId != null || x.OpenHandsConversationId != null))
                     .ExecuteUpdateAsync(
                         setters => setters
                             .SetProperty(x => x.CodexSessionId, (string?)null)
+                            .SetProperty(x => x.OpenHandsConversationId, (string?)null)
                             .SetProperty(x => x.UpdatedAt, project.UpdatedAt),
                         cancellationToken);
             }
@@ -753,6 +1035,7 @@ public static class ApiEndpoints
                 .Include(x => x.Project)
                 .Include(x => x.QueueTab)
                 .Include(x => x.Machine)
+                .Include(x => x.ProviderProfile)
                 .Include(x => x.Runs)
                 .AsNoTracking();
 
@@ -800,6 +1083,7 @@ public static class ApiEndpoints
                 .Include(x => x.Project)
                 .Include(x => x.QueueTab)
                 .Include(x => x.Machine)
+                .Include(x => x.ProviderProfile)
                 .Include(x => x.Runs)
                 .AsNoTracking()
                 .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
@@ -807,7 +1091,12 @@ public static class ApiEndpoints
             return request is null ? Results.NotFound() : Results.Ok(request.ToDto());
         });
 
-        api.MapPost("/requests", async (CreateQueueRequest input, AppDbContext db, IQueueCoordinator queue, CancellationToken cancellationToken) =>
+        api.MapPost("/requests", async (
+            CreateQueueRequest input,
+            AppDbContext db,
+            IAiProviderService providers,
+            IQueueCoordinator queue,
+            CancellationToken cancellationToken) =>
         {
             var project = await db.Projects.Include(x => x.Machine).FirstOrDefaultAsync(x => x.Id == input.ProjectId, cancellationToken);
             if (project is null)
@@ -818,6 +1107,28 @@ public static class ApiEndpoints
             if (string.IsNullOrWhiteSpace(input.Prompt) || string.IsNullOrWhiteSpace(input.Model))
             {
                 return Results.BadRequest(new { error = "Prompt and model are required." });
+            }
+
+            var runnerValidation = await ValidateRunnerSelectionAsync(
+                input.ExecutionRunner,
+                input.ProviderProfileId,
+                input.Model,
+                input.PermissionMode,
+                input.GenerateCommit,
+                input.SeparateCommitSession,
+                input.OpenHandsAlwaysApproveConfirmed,
+                project.Machine,
+                project.Path,
+                db,
+                providers,
+                cancellationToken);
+            if (runnerValidation.Profile is not null)
+            {
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            if (runnerValidation.Error is not null)
+            {
+                return Results.BadRequest(new { error = runnerValidation.Error });
             }
 
             QueueTab? queueTab = null;
@@ -839,6 +1150,14 @@ public static class ApiEndpoints
             {
                 return Results.BadRequest(new { error = attachmentError });
             }
+            if (input.ExecutionRunner == ExecutionRunner.OpenHandsCli
+                && attachments.Length > 0)
+            {
+                return Results.BadRequest(new
+                {
+                    error = OpenHandsAttachmentsUnavailableError,
+                });
+            }
 
             var request = new CodexRequest
             {
@@ -848,15 +1167,41 @@ public static class ApiEndpoints
                 MachineId = project.MachineId,
                 Prompt = input.Prompt.Trim(),
                 AttachmentsJson = attachments.Length == 0 ? null : JsonSerializer.Serialize(attachments),
-                Model = input.Model.Trim(),
-                ModelEffort = NormalizeEffort(input.ModelEffort, input.Model),
-                ModelSpeed = NormalizeSpeed(input.ModelSpeed),
-                GenerateCommit = input.PermissionMode != PermissionMode.ReadOnly && input.GenerateCommit,
-                SeparateCommitSession = input.PermissionMode != PermissionMode.ReadOnly && input.GenerateCommit && input.SeparateCommitSession,
+                Model = runnerValidation.Model,
+                ModelEffort = input.ExecutionRunner == ExecutionRunner.CodexCli
+                    ? NormalizeEffort(input.ModelEffort, input.Model)
+                    : null,
+                ModelSpeed = input.ExecutionRunner == ExecutionRunner.CodexCli
+                    ? NormalizeSpeed(input.ModelSpeed)
+                    : null,
+                GenerateCommit = input.ExecutionRunner == ExecutionRunner.CodexCli
+                    && input.PermissionMode != PermissionMode.ReadOnly
+                    && input.GenerateCommit,
+                SeparateCommitSession = input.ExecutionRunner == ExecutionRunner.CodexCli
+                    && input.PermissionMode != PermissionMode.ReadOnly
+                    && input.GenerateCommit
+                    && input.SeparateCommitSession,
                 PermissionMode = input.PermissionMode,
-                CommitModel = string.IsNullOrWhiteSpace(input.CommitModel) ? null : input.CommitModel.Trim(),
-                CommitModelEffort = NormalizeEffort(input.CommitModelEffort, input.CommitModel ?? input.Model),
-                CommitModelSpeed = NormalizeSpeed(input.CommitModelSpeed),
+                CommitModel = input.ExecutionRunner == ExecutionRunner.CodexCli && !string.IsNullOrWhiteSpace(input.CommitModel)
+                    ? input.CommitModel.Trim()
+                    : null,
+                CommitModelEffort = input.ExecutionRunner == ExecutionRunner.CodexCli
+                    ? NormalizeEffort(input.CommitModelEffort, input.CommitModel ?? input.Model)
+                    : null,
+                CommitModelSpeed = input.ExecutionRunner == ExecutionRunner.CodexCli
+                    ? NormalizeSpeed(input.CommitModelSpeed)
+                    : null,
+                ExecutionRunner = input.ExecutionRunner,
+                ProviderProfileId = runnerValidation.Profile?.Id,
+                ProviderProfile = runnerValidation.Profile,
+                OpenHandsAlwaysApproveConfirmed = input.ExecutionRunner == ExecutionRunner.OpenHandsCli
+                    && input.OpenHandsAlwaysApproveConfirmed,
+                ExecutionProjectPath = input.ExecutionRunner == ExecutionRunner.OpenHandsCli
+                    ? project.Path
+                    : null,
+                ExecutionMachineUpdatedAt = input.ExecutionRunner == ExecutionRunner.OpenHandsCli
+                    ? project.Machine?.UpdatedAt
+                    : null,
                 QueueOrder = await NextQueueOrderAsync(db, project.Id, cancellationToken),
                 Status = QueueStatus.Queued,
                 CreatedAt = DateTimeOffset.UtcNow
@@ -867,6 +1212,10 @@ public static class ApiEndpoints
                 Model = request.Model,
                 ModelEffort = request.ModelEffort,
                 ModelSpeed = request.ModelSpeed,
+                ExecutionRunner = request.ExecutionRunner,
+                ProviderProfileId = request.ProviderProfileId,
+                ProviderProfileName = request.ProviderProfile?.Name,
+                ProviderSource = request.ProviderProfile?.Source,
                 Status = QueueStatus.Queued,
                 CreatedAt = request.CreatedAt
             });
@@ -879,12 +1228,18 @@ public static class ApiEndpoints
             return Results.Created($"/api/requests/{request.Id}", request.ToDto());
         });
 
-        api.MapPut("/requests/{id:guid}", async (Guid id, UpdateQueueRequest input, AppDbContext db, CancellationToken cancellationToken) =>
+        api.MapPut("/requests/{id:guid}", async (
+            Guid id,
+            UpdateQueueRequest input,
+            AppDbContext db,
+            IAiProviderService providers,
+            CancellationToken cancellationToken) =>
         {
             var request = await db.Requests
                 .Include(x => x.Project)
                 .Include(x => x.QueueTab)
                 .Include(x => x.Machine)
+                .Include(x => x.ProviderProfile)
                 .Include(x => x.Runs)
                 .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
             if (request is null || request.DeletedAt is not null || request.ArchivedAt is not null)
@@ -902,6 +1257,40 @@ public static class ApiEndpoints
                 return Results.BadRequest(new { error = "Prompt and model are required." });
             }
 
+            if (!input.ExecutionRunner.HasValue
+                && request.ExecutionRunner == ExecutionRunner.OpenHandsCli)
+            {
+                return Results.BadRequest(new
+                {
+                    error =
+                        "This OpenHands request requires runner metadata when edited. "
+                        + "Refresh the browser before changing it.",
+                });
+            }
+
+            var executionRunner = input.ExecutionRunner ?? request.ExecutionRunner;
+            var runnerValidation = await ValidateRunnerSelectionAsync(
+                executionRunner,
+                input.ProviderProfileId,
+                input.Model,
+                input.PermissionMode,
+                input.GenerateCommit,
+                input.SeparateCommitSession,
+                input.OpenHandsAlwaysApproveConfirmed,
+                request.Machine,
+                request.Project?.Path,
+                db,
+                providers,
+                cancellationToken);
+            if (runnerValidation.Profile is not null)
+            {
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            if (runnerValidation.Error is not null)
+            {
+                return Results.BadRequest(new { error = runnerValidation.Error });
+            }
+
             if (input.Attachments is not null)
             {
                 var attachments = NormalizeAttachments(input.Attachments, out var attachmentError);
@@ -909,20 +1298,65 @@ public static class ApiEndpoints
                 {
                     return Results.BadRequest(new { error = attachmentError });
                 }
+                if (executionRunner == ExecutionRunner.OpenHandsCli
+                    && attachments.Length > 0)
+                {
+                    return Results.BadRequest(new
+                    {
+                        error = OpenHandsAttachmentsUnavailableError,
+                    });
+                }
 
                 request.AttachmentsJson = attachments.Length == 0 ? null : JsonSerializer.Serialize(attachments);
             }
+            else if (executionRunner == ExecutionRunner.OpenHandsCli
+                     && !string.IsNullOrWhiteSpace(request.AttachmentsJson))
+            {
+                return Results.BadRequest(new
+                {
+                    error =
+                        "Remove this request's attachments before changing it to OpenHands. "
+                        + "Attachments are not available for OpenHands in this release.",
+                });
+            }
 
             request.Prompt = input.Prompt.Trim();
-            request.Model = input.Model.Trim();
-            request.ModelEffort = NormalizeEffort(input.ModelEffort, input.Model);
-            request.ModelSpeed = NormalizeSpeed(input.ModelSpeed);
-            request.GenerateCommit = input.PermissionMode != PermissionMode.ReadOnly && input.GenerateCommit;
-            request.SeparateCommitSession = input.PermissionMode != PermissionMode.ReadOnly && input.GenerateCommit && input.SeparateCommitSession;
+            request.Model = runnerValidation.Model;
+            request.ModelEffort = executionRunner == ExecutionRunner.CodexCli
+                ? NormalizeEffort(input.ModelEffort, input.Model)
+                : null;
+            request.ModelSpeed = executionRunner == ExecutionRunner.CodexCli
+                ? NormalizeSpeed(input.ModelSpeed)
+                : null;
+            request.GenerateCommit = executionRunner == ExecutionRunner.CodexCli
+                && input.PermissionMode != PermissionMode.ReadOnly
+                && input.GenerateCommit;
+            request.SeparateCommitSession = executionRunner == ExecutionRunner.CodexCli
+                && input.PermissionMode != PermissionMode.ReadOnly
+                && input.GenerateCommit
+                && input.SeparateCommitSession;
             request.PermissionMode = input.PermissionMode;
-            request.CommitModel = string.IsNullOrWhiteSpace(input.CommitModel) ? null : input.CommitModel.Trim();
-            request.CommitModelEffort = NormalizeEffort(input.CommitModelEffort, input.CommitModel ?? input.Model);
-            request.CommitModelSpeed = NormalizeSpeed(input.CommitModelSpeed);
+            request.CommitModel = executionRunner == ExecutionRunner.CodexCli && !string.IsNullOrWhiteSpace(input.CommitModel)
+                ? input.CommitModel.Trim()
+                : null;
+            request.CommitModelEffort = executionRunner == ExecutionRunner.CodexCli
+                ? NormalizeEffort(input.CommitModelEffort, input.CommitModel ?? input.Model)
+                : null;
+            request.CommitModelSpeed = executionRunner == ExecutionRunner.CodexCli
+                ? NormalizeSpeed(input.CommitModelSpeed)
+                : null;
+            request.ExecutionRunner = executionRunner;
+            request.ProviderProfileId = runnerValidation.Profile?.Id;
+            request.ProviderProfile = runnerValidation.Profile;
+            request.OpenHandsAlwaysApproveConfirmed = executionRunner == ExecutionRunner.OpenHandsCli
+                && input.OpenHandsAlwaysApproveConfirmed;
+            request.ExecutionProjectPath = executionRunner == ExecutionRunner.OpenHandsCli
+                ? request.Project?.Path
+                : null;
+            request.ExecutionMachineUpdatedAt = executionRunner == ExecutionRunner.OpenHandsCli
+                ? request.Machine?.UpdatedAt
+                : null;
+            request.QueueWaitReason = null;
             request.Error = null;
             request.Summary = null;
             request.RetryAfter = null;
@@ -943,6 +1377,12 @@ public static class ApiEndpoints
             requestRun.Model = request.Model;
             requestRun.ModelEffort = request.ModelEffort;
             requestRun.ModelSpeed = request.ModelSpeed;
+            requestRun.ExecutionRunner = request.ExecutionRunner;
+            requestRun.ProviderProfileId = request.ProviderProfileId;
+            requestRun.ProviderProfileName = request.ProviderProfile?.Name;
+            requestRun.ProviderSource = request.ProviderProfile?.Source;
+            requestRun.OpenHandsConversationId = null;
+            requestRun.RawDiagnosticOutput = "";
             requestRun.Output = "";
             requestRun.Error = null;
             requestRun.RetryAfter = null;
@@ -1020,6 +1460,7 @@ public static class ApiEndpoints
                 .Include(x => x.Project)
                 .Include(x => x.QueueTab)
                 .Include(x => x.Machine)
+                .Include(x => x.ProviderProfile)
                 .Include(x => x.Runs)
                 .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
             if (request is null || request.DeletedAt is not null)
@@ -1093,7 +1534,11 @@ public static class ApiEndpoints
                     x.CreatedAt,
                     x.StartedAt,
                     x.FinishedAt,
-                    x.CommitSha))
+                    x.CommitSha,
+                    x.ExecutionRunner,
+                    x.ProviderProfileName,
+                    x.ProviderSource,
+                    x.OpenHandsConversationId))
                 .ToArray();
         });
     }
@@ -1182,6 +1627,251 @@ public static class ApiEndpoints
             ? DefaultPaths.DefaultWorkingRoot(machine.Kind, machine.Platform)
             : input.WorkingRoot.Trim();
     }
+
+    private static void Apply(SaveAiProviderProfileRequest input, AiProviderProfile profile)
+    {
+        profile.Name = (input.Name ?? "").Trim();
+        profile.Source = input.Source;
+        profile.BaseUrl = (input.BaseUrl ?? "").Trim();
+        profile.ModelDiscoveryMode = input.ModelDiscoveryMode;
+        profile.ApiKeyEnvironmentVariable = NormalizeOptional(input.ApiKeyEnvironmentVariable);
+        profile.Enabled = input.Enabled;
+        profile.MaximumConcurrency = input.MaximumConcurrency;
+        profile.ConfiguredContextWindow = input.ConfiguredContextWindow;
+        profile.DefaultModel = NormalizeOptional(input.DefaultModel);
+    }
+
+    private static void ApplyNormalizedProviderValues(
+        AiProviderProfile profile,
+        AiProviderValidationResult validation)
+    {
+        profile.BaseUrl = validation.NormalizedBaseUrl
+            ?? throw new InvalidOperationException("Validated provider profile did not have a base URL.");
+        profile.DefaultModel = validation.NormalizedDefaultModel;
+    }
+
+    private static string? Truncate(string? value, int maximumLength) =>
+        string.IsNullOrWhiteSpace(value)
+            ? null
+            : value.Length <= maximumLength ? value : value[..maximumLength];
+
+    private static async Task<RunnerSelectionValidation> ValidateRunnerSelectionAsync(
+        ExecutionRunner executionRunner,
+        Guid? providerProfileId,
+        string model,
+        PermissionMode permissionMode,
+        bool generateCommit,
+        bool separateCommitSession,
+        bool alwaysApproveConfirmed,
+        TargetMachine? machine,
+        string? projectPath,
+        AppDbContext db,
+        IAiProviderService providers,
+        CancellationToken cancellationToken)
+    {
+        var normalizedModel = model?.Trim() ?? "";
+        if (!Enum.IsDefined(typeof(ExecutionRunner), executionRunner))
+        {
+            return new RunnerSelectionValidation(null, normalizedModel, "Selected execution runner is invalid.");
+        }
+
+        if (!Enum.IsDefined(typeof(PermissionMode), permissionMode))
+        {
+            return new RunnerSelectionValidation(null, normalizedModel, "Selected permission mode is invalid.");
+        }
+
+        if (executionRunner == ExecutionRunner.CodexCli)
+        {
+            return new RunnerSelectionValidation(null, normalizedModel, null);
+        }
+
+        if (normalizedModel.Length > 256 || normalizedModel.Any(char.IsControl))
+        {
+            return new RunnerSelectionValidation(
+                null,
+                normalizedModel,
+                "Local model identifier must be 256 characters or fewer and contain no control characters.");
+        }
+
+        if (machine is null)
+        {
+            return new RunnerSelectionValidation(null, normalizedModel, "Selected project machine is unavailable.");
+        }
+
+        if (machine.TargetsWindows())
+        {
+            return new RunnerSelectionValidation(
+                null,
+                normalizedModel,
+                "Native Windows OpenHands CLI is unsupported. Configure a Linux or macOS target; Windows requires a separately configured WSL target.");
+        }
+
+        if (!IsOpenHandsProjectPathScoped(machine, projectPath))
+        {
+            return new RunnerSelectionValidation(
+                null,
+                normalizedModel,
+                "OpenHands requires a project-scoped path and cannot run against a filesystem root.");
+        }
+
+        if (permissionMode != PermissionMode.FullAccess)
+        {
+            return new RunnerSelectionValidation(
+                null,
+                normalizedModel,
+                "This permission mode is not available for headless OpenHands. Select Full access and explicitly confirm unrestricted execution.");
+        }
+
+        if (!alwaysApproveConfirmed)
+        {
+            return new RunnerSelectionValidation(
+                null,
+                normalizedModel,
+                "OpenHands headless mode auto-approves actions. Explicitly confirm that it may run with the selected machine account's permissions.");
+        }
+
+        if (generateCommit || separateCommitSession)
+        {
+            return new RunnerSelectionValidation(
+                null,
+                normalizedModel,
+                "Automatic request commits are not available for OpenHands in this release. Leave both commit options disabled.");
+        }
+
+        if (!providerProfileId.HasValue)
+        {
+            return new RunnerSelectionValidation(
+                null,
+                normalizedModel,
+                "Select a Local AI Server profile for OpenHands.");
+        }
+
+        var profile = await db.AiProviderProfiles.FirstOrDefaultAsync(
+            x => x.Id == providerProfileId.Value,
+            cancellationToken);
+        if (profile is null)
+        {
+            return new RunnerSelectionValidation(null, normalizedModel, "Selected provider profile does not exist.");
+        }
+
+        if (!profile.Enabled)
+        {
+            return new RunnerSelectionValidation(profile, normalizedModel, "Selected provider profile is disabled.");
+        }
+
+        if (profile.Source != AiProviderSource.Local)
+        {
+            return new RunnerSelectionValidation(
+                profile,
+                normalizedModel,
+                "This first OpenHands release executes only Local/Ollama profiles. Authenticated cloud profiles remain disabled to prevent credential exposure to agent-launched commands.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(profile.ApiKeyEnvironmentVariable))
+        {
+            return new RunnerSelectionValidation(
+                profile,
+                normalizedModel,
+                "Authenticated Local AI profiles are not available in this release. Use an unauthenticated Ollama endpoint protected by LAN/VPN access.");
+        }
+
+        var validation = providers.Validate(profile);
+        if (!validation.IsValid)
+        {
+            return new RunnerSelectionValidation(
+                profile,
+                normalizedModel,
+                "Provider profile is invalid: " + string.Join(" ", validation.Errors));
+        }
+
+        normalizedModel = AiProviderService.QualifyModel(AiProviderSource.Local, normalizedModel);
+        var discovery = await providers.DiscoverModelsAsync(profile, cancellationToken);
+        profile.LastHealthStatus = discovery.HealthStatus;
+        profile.LastHealthAt = discovery.CheckedAt;
+        profile.LastHealthError = Truncate(discovery.Error, 2_000);
+        if (discovery.HealthStatus != ProviderHealthStatus.Healthy)
+        {
+            return new RunnerSelectionValidation(
+                profile,
+                normalizedModel,
+                "Local AI server is offline or unavailable: " + (discovery.Error ?? "health check failed."));
+        }
+
+        if (!discovery.Models.Any(x => string.Equals(x.Model, normalizedModel, StringComparison.OrdinalIgnoreCase)))
+        {
+            return new RunnerSelectionValidation(
+                profile,
+                normalizedModel,
+                "Selected model is not installed on the Local AI server.");
+        }
+
+        return new RunnerSelectionValidation(profile, normalizedModel, null);
+    }
+
+    public static bool IsOpenHandsProjectPathScoped(
+        TargetMachine machine,
+        string? projectPath)
+    {
+        if (string.IsNullOrWhiteSpace(projectPath)
+            || projectPath.Any(char.IsControl))
+        {
+            return false;
+        }
+
+        var trimmedPath = projectPath.Trim();
+        if (machine.Kind == MachineKind.Local)
+        {
+            try
+            {
+                var canonicalPath = Path.GetFullPath(trimmedPath);
+                var filesystemRoot = Path.GetPathRoot(canonicalPath);
+                return !string.IsNullOrWhiteSpace(filesystemRoot)
+                    && !string.Equals(
+                        Path.TrimEndingDirectorySeparator(canonicalPath),
+                        Path.TrimEndingDirectorySeparator(filesystemRoot),
+                        OperatingSystem.IsWindows()
+                            ? StringComparison.OrdinalIgnoreCase
+                            : StringComparison.Ordinal);
+            }
+            catch (Exception ex) when (ex is ArgumentException
+                                       or NotSupportedException
+                                       or PathTooLongException)
+            {
+                return false;
+            }
+        }
+
+        if (!trimmedPath.StartsWith("/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var depth = 0;
+        foreach (var segment in trimmedPath.Split(
+                     '/',
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (segment == ".")
+            {
+                continue;
+            }
+
+            if (segment == "..")
+            {
+                depth = Math.Max(0, depth - 1);
+                continue;
+            }
+
+            depth++;
+        }
+
+        return depth > 0;
+    }
+
+    private sealed record RunnerSelectionValidation(
+        AiProviderProfile? Profile,
+        string Model,
+        string? Error);
 
     private static string? Validate(SaveMachineRequest input)
     {

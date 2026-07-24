@@ -1,6 +1,6 @@
 # Codex Queue
 
-Codex Queue is a React + ASP.NET Core + SQLite web app for dispatching Codex CLI work to local or SSH target machines. The web server records queue state, output, session history, project grouping, file browsing, and optional separate commit sessions.
+Codex Queue is a React + ASP.NET Core + SQLite web app for dispatching Codex CLI and headless OpenHands CLI work to local or SSH target machines. The web server records queue state, output, session history, project grouping, file browsing, and optional Codex commit sessions.
 
 ## Stack
 
@@ -72,16 +72,79 @@ Install Codex for the same Windows account configured as the SSH user. The Codex
 
 Codex runs over Windows SSH use `danger-full-access` because both native Windows sandbox modes can fail to initialize child processes in a non-interactive OpenSSH session with status `0xC0000142`. The queue still injects a strict project-root boundary into every prompt, but this is an instruction boundary rather than OS enforcement: the Codex process has the SSH user's filesystem and network access. Use a dedicated, least-privileged Windows account and restrict its NTFS permissions and SSH access. Local Windows runs continue to use the Codex-configured sandbox mode and desktop; Linux and macOS SSH runs retain `workspace-write` unless commit generation requires broader access.
 
+## OpenHands Local Runner with Ollama
+
+The first OpenHands slice keeps Codex Queue as the only browser UI and control plane. It runs the native OpenHands CLI headlessly on the selected Linux or macOS development machine, in that machine's selected repository. File access, Git, builds, tests, and terminal commands therefore stay on that machine. Conversation continuation is bound to the same queue tab, project, and machine; a request is never moved to another PC. The central Ollama server performs inference only and does not need repository mounts, SSH access, or a shell on any development machine. It receives only normal model requests, which can contain code and tool context selected by the agent.
+
+### Install OpenHands on each target
+
+Install OpenHands for the same OS account that Codex Queue uses locally or over SSH. The `uv` installation method requires Python 3.12 or newer:
+
+```bash
+uv tool install openhands --python 3.12
+openhands --version
+openhands --help
+```
+
+OpenHands also publishes a standalone executable installer for native Linux and macOS targets. The machine check reports OpenHands availability and version separately from the existing Codex check. Make sure `openhands` is also on the non-login SSH `PATH`; common per-user locations such as `~/.local/bin` may not be present automatically. See the official [OpenHands CLI installation guide](https://docs.openhands.dev/openhands/usage/cli/installation).
+
+Native Windows OpenHands CLI is not supported. OpenHands requires [WSL on Windows](https://docs.openhands.dev/openhands/usage/cli/quick-start), and this first slice does not configure or claim support for a WSL bridge. Windows machines should report that requirement instead of attempting a native run.
+
+### Configure the central Ollama server
+
+Keep Ollama private to a trusted LAN or VPN and enforce that boundary with host firewall and network access controls. Do not expose port `11434` directly to the public internet. Configure the API-facing values in `.env`:
+
+```dotenv
+CQ_LOCAL_AI_BASE_URL=http://host-or-private-ip:11434/v1
+CQ_LOCAL_AI_DEFAULT_MODEL=your-model:tag
+CQ_LOCAL_AI_CONTEXT_WINDOW=32768
+```
+
+These are the app-facing configuration names, and the included Compose file passes them into the API container. They seed the initial `Local Ollama` profile; afterward the additive provider-profile API can update or add profiles without changing existing Codex data. Use a LAN/VPN address that is reachable both from Codex Queue and from every selected development machine. The base URL must use Ollama's OpenAI-compatible `/v1` endpoint. Codex Queue discovers installed models from Ollama's [`/api/tags`](https://docs.ollama.com/api/tags) endpoint first and falls back to `/v1/models` when appropriate. It qualifies the selected model for OpenHands/LiteLLM as `openai/<ollama-model-name>` and supplies the non-secret placeholder API key `local-llm` when Ollama has no authentication.
+
+The configured context window describes the Ollama model as served; it does not enlarge the server's context by itself. Codex Queue warns below 22,000 tokens, and 32,768 or more is recommended for agent use. Configure the actual Ollama context with `OLLAMA_CONTEXT_LENGTH` or a model-specific Modelfile. See the official [OpenHands local-LLM guide](https://docs.openhands.dev/openhands/usage/llms/local-llms) and [Ollama OpenAI compatibility documentation](https://docs.ollama.com/api/openai-compatibility).
+
+The UI and machine checks distinguish:
+
+- OpenHands CLI missing or unavailable on the selected machine
+- Ollama reachability from the Codex Queue server
+- Ollama reachability from the selected development machine
+- Selected model not installed or not visible from that machine
+- Waiting for the shared Local AI slot
+
+Local AI concurrency defaults to one globally across all connected PCs so one large central model is not overloaded. Health and model discovery are cached briefly, but execution still occurs on the selected machine.
+
+### Headless permissions and execution safety
+
+OpenHands is launched with JSONL output using the validated headless shape:
+
+```text
+openhands --headless --json --override-with-envs --always-approve -f <temporary-task-file>
+```
+
+As documented in [OpenHands headless mode](https://docs.openhands.dev/openhands/usage/cli/headless), headless OpenHands always auto-approves agent actions; this is not equivalent to any Codex sandbox or approval mode. `ReadOnly` and `AskForApproval` are unavailable, and `ApproveForMe` must not be silently converted to unrestricted access. A user must explicitly confirm the OpenHands unrestricted mode before `--always-approve` is allowed. The flag records that choice, although headless execution is inherently auto-approved. OpenHands then runs with the selected machine account's filesystem and network permissions, so use a dedicated least-privileged account and OS permissions to enforce boundaries outside the project.
+
+Task prompts and provider values are kept out of process arguments and command previews. Temporary task and SSH environment files are restricted and removed after completion, failure, or cancellation. SSH execution removes unrelated exported variables before OpenHands starts, retaining only an explicit runtime allowlist. OpenHands JSON can include internal reasoning fields; Codex Queue exposes only user-visible messages, tool activity, commands, errors, summaries, and results. Oversized JSONL events and captured diagnostics are bounded before storage or browser streaming.
+
+Every OpenHands task also receives explicit instructions not to leave the project, commit or push, rewrite history, elevate privileges, or inspect unrelated credentials. Those instructions are a safety boundary for the agent, not an OS sandbox; enforce the real boundary with a dedicated account, repository permissions, and network controls.
+
+Attachments remain unchanged for Codex requests. They are disabled for OpenHands in this first slice because the existing transfer path runs before the OpenHands project-path guards; enable them only after local and SSH symbolic-link escape tests cover that workflow.
+
+Cancellation terminates the launched process tree and releases the shared Local AI slot. OpenHands can create detached `tmux` sessions, and an interrupted SSH connection alone does not prove that a remote process stopped. After an abnormal SSH or host failure, check the target for an orphaned OpenHands/tmux session before retrying; hard power loss can also leave restricted temporary files for later cleanup. On API restart, interrupted OpenHands runs fail closed, and queued OpenHands work is paused as failed until a user verifies the targets and resumes it. Browser disconnects do not cancel server-side queue work, and stored output remains available after reconnecting.
+
+This first slice intentionally supports unauthenticated Local Ollama with the non-secret `local-llm` placeholder only. Do not configure real OpenAI, Anthropic, or authenticated-Ollama credentials for OpenHands execution yet: current OpenHands CLI versions can pass `LLM_API_KEY` into agent-created child processes. Cloud and authenticated provider execution remain disabled until credential isolation can be validated.
+
+The JSON event and persisted-conversation validation in this slice was tested against OpenHands CLI 1.16.0 with OpenHands SDK 1.21.0. The machine check verifies the required command flags; revalidate captured JSON events and conversation state before adopting a flag-compatible release with a different output or persistence schema.
+
 ## Queue Behavior
 
 1. A request is queued against a project and model.
-2. The worker processes each project's queue in order while running different project queues concurrently.
-3. The worker runs `codex exec --json` on the project machine.
-   Prompts are streamed over stdin instead of placed in process arguments, which supports long requests on Windows and avoids exposing prompt text in process listings.
-4. Requests in the icon-only base tab keep the original behavior and start independent Codex threads.
-5. Named queue tabs keep one Codex thread per project tab. After the first request establishes the thread, later requests in that tab continue it with `codex exec resume`.
+2. The worker processes each project's queue in order while running different project queues concurrently. Local/OpenHands requests also share the configured global provider limit, which defaults to one.
+3. Codex requests keep the existing `codex exec --json` path on the project machine. Prompts are streamed over stdin instead of placed in process arguments, which supports long requests on Windows and avoids exposing prompt text in process listings.
+4. Local requests run headless OpenHands on the same selected project machine and send inference requests to the configured central Ollama server.
+5. Requests in the icon-only base tab keep the original behavior and start independent conversations. Named queue tabs retain separate Codex session IDs and OpenHands conversation IDs and continue each runner only on the same project and machine.
 6. The browser terminal is a separate reusable shell session per project and machine. It preserves shell state while the terminal stays open, but it does not automatically attach queued `codex exec` jobs to that terminal chat history.
-7. If commit generation is enabled and the request succeeds, a second Codex session runs with the commit model.
+7. If Codex commit generation is enabled and the request succeeds, a second Codex session runs with the commit model. This option is disabled for OpenHands in the first slice.
 8. Request and commit output are stored as separate runs and displayed together under the request details.
 
 ## Codex Session Model
@@ -100,7 +163,7 @@ Codex runs over Windows SSH use `danger-full-access` because both native Windows
 
 ## Practical Quality Notes
 
-- Reliability: interrupted running jobs are marked failed on API restart; queued jobs remain queued.
+- Reliability: interrupted OpenHands runs are marked failed on API restart to avoid launching a duplicate unrestricted agent; queued OpenHands work pauses for explicit recovery, while existing Codex recovery/requeue behavior remains unchanged.
 - Maintainability: HTTP routes, persistence, command execution, file browsing, and queue processing are separated.
 - Performance: UI progress uses polling to keep the first version simple; switch to SignalR if many users or sub-second updates are needed.
 - Portability: Docker Compose keeps Apache, API, and SQLite data isolated; target-specific Codex setup stays on each execution machine. SSH folder browsing uses portable shell commands for Linux/macOS targets and PowerShell for Windows targets.

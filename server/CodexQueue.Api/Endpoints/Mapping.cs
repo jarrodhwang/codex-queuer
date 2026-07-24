@@ -46,7 +46,8 @@ public static class Mapping
             tab.ProjectId,
             tab.Name,
             tab.CreatedAt,
-            tab.UpdatedAt);
+            tab.UpdatedAt,
+            tab.OpenHandsConversationId);
 
     public static CodexRequestDto ToDto(this CodexRequest request, bool includeRunOutput = true) =>
         new(
@@ -82,7 +83,13 @@ public static class Mapping
             request.FinishedAt,
             request.ArchivedAt,
             request.DeletedAt,
-            request.Runs.OrderBy(x => x.CreatedAt).Select(x => x.ToDto(includeRunOutput)).ToArray());
+            request.Runs.OrderBy(x => x.CreatedAt).Select(x => x.ToDto(includeRunOutput)).ToArray(),
+            request.ExecutionRunner,
+            request.ProviderProfileId,
+            request.ProviderProfile?.Name,
+            request.ProviderProfile?.Source,
+            request.QueueWaitReason,
+            request.OpenHandsAlwaysApproveConfirmed);
 
     public static CodexRunDto ToDto(this CodexRun run, bool includeOutput = true) =>
         new(
@@ -103,7 +110,30 @@ public static class Mapping
             run.Error,
             run.CreatedAt,
             run.StartedAt,
-            run.FinishedAt);
+            run.FinishedAt,
+            run.ExecutionRunner,
+            run.ProviderProfileId,
+            run.ProviderProfileName,
+            run.ProviderSource,
+            run.OpenHandsConversationId);
+
+    public static AiProviderProfileDto ToDto(this AiProviderProfile profile) =>
+        new(
+            profile.Id,
+            profile.Name,
+            profile.Source,
+            profile.BaseUrl,
+            profile.ModelDiscoveryMode,
+            profile.ApiKeyEnvironmentVariable,
+            profile.Enabled,
+            profile.MaximumConcurrency,
+            profile.ConfiguredContextWindow,
+            profile.DefaultModel,
+            profile.LastHealthStatus,
+            profile.LastHealthAt,
+            profile.LastHealthError,
+            profile.CreatedAt,
+            profile.UpdatedAt);
 
     private static IReadOnlyList<RequestAttachmentDto> ReadAttachmentMetadata(string? attachmentsJson)
     {

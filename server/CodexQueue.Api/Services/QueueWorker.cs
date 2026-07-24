@@ -37,6 +37,8 @@ public sealed record QueueWorkerDiagnostics(
 public sealed class QueueWorker(
     IServiceScopeFactory scopeFactory,
     ITargetCommandRunner runner,
+    IQueueAgentRunnerResolver agentRunnerResolver,
+    IProviderConcurrencyGate providerConcurrency,
     ILogger<QueueWorker> logger) : BackgroundService, IQueueCoordinator
 {
     private const int MaxStoredOutput = 512_000;
@@ -60,42 +62,53 @@ public sealed class QueueWorker(
 
     public async Task<bool> CancelRequestAsync(Guid requestId, CancellationToken cancellationToken)
     {
-        await using var scope = scopeFactory.CreateAsyncScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        var request = await db.Requests.Include(x => x.Runs).FirstOrDefaultAsync(x => x.Id == requestId, cancellationToken);
-        if (request is null)
+        // Serialize cancellation with dispatch so a queued request cannot be marked
+        // cancelled and then immediately claimed by an in-flight dispatch pass.
+        await _dispatchLock.WaitAsync(cancellationToken);
+        try
         {
-            return false;
-        }
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var request = await db.Requests.Include(x => x.Runs).FirstOrDefaultAsync(x => x.Id == requestId, cancellationToken);
+            if (request is null)
+            {
+                return false;
+            }
 
-        if (request.Status is QueueStatus.Succeeded or QueueStatus.Failed or QueueStatus.Cancelled)
-        {
+            if (request.Status is QueueStatus.Succeeded or QueueStatus.Failed or QueueStatus.Cancelled)
+            {
+                return true;
+            }
+
+            var isActive = _activeRequests.ContainsKey(requestId);
+            request.Status = isActive ? QueueStatus.CancelRequested : QueueStatus.Cancelled;
+            request.QueueWaitReason = null;
+            request.FinishedAt = isActive ? request.FinishedAt : DateTimeOffset.UtcNow;
+            request.Error = isActive ? request.Error : "Cancelled before start.";
+            foreach (var run in request.Runs.Where(x =>
+                         x.Status is QueueStatus.Queued or QueueStatus.Running or QueueStatus.CancelRequested or QueueStatus.UsageLimited))
+            {
+                run.Status = isActive ? QueueStatus.CancelRequested : QueueStatus.Cancelled;
+                run.FinishedAt = isActive ? run.FinishedAt : request.FinishedAt;
+                run.Error = isActive ? run.Error : "Cancelled by user.";
+            }
+
+            if (!await TrySaveChangesAsync(db, "cancel request", cancellationToken))
+            {
+                return true;
+            }
+
+            if (isActive && _activeRequests.TryGetValue(requestId, out var tokenSource))
+            {
+                await tokenSource.CancelAsync();
+            }
+
             return true;
         }
-
-        var isActive = _activeRequests.ContainsKey(requestId);
-        request.Status = isActive ? QueueStatus.CancelRequested : QueueStatus.Cancelled;
-        request.FinishedAt = isActive ? request.FinishedAt : DateTimeOffset.UtcNow;
-        request.Error = isActive ? request.Error : "Cancelled before start.";
-        foreach (var run in request.Runs.Where(x =>
-                     x.Status is QueueStatus.Queued or QueueStatus.Running or QueueStatus.CancelRequested or QueueStatus.UsageLimited))
+        finally
         {
-            run.Status = isActive ? QueueStatus.CancelRequested : QueueStatus.Cancelled;
-            run.FinishedAt = isActive ? run.FinishedAt : request.FinishedAt;
-            run.Error = isActive ? run.Error : "Cancelled by user.";
+            _dispatchLock.Release();
         }
-
-        if (!await TrySaveChangesAsync(db, "cancel request", cancellationToken))
-        {
-            return true;
-        }
-
-        if (isActive && _activeRequests.TryGetValue(requestId, out var tokenSource))
-        {
-            await tokenSource.CancelAsync();
-        }
-
-        return true;
     }
 
     public async Task<bool> RemoveProjectAsync(Guid projectId, CancellationToken cancellationToken)
@@ -157,6 +170,7 @@ public sealed class QueueWorker(
         var request = await db.Requests
             .Include(x => x.Project)
             .Include(x => x.QueueTab)
+            .Include(x => x.ProviderProfile)
             .Include(x => x.Runs)
             .FirstOrDefaultAsync(x => x.Id == requestId, cancellationToken);
         if (request is null || request.QueueTab?.DeletedAt is not null)
@@ -329,22 +343,31 @@ public sealed class QueueWorker(
                     .Include(x => x.Project).ThenInclude(x => x!.Machine)
                     .Include(x => x.QueueTab)
                     .Include(x => x.Machine)
+                    .Include(x => x.ProviderProfile)
                     .Include(x => x.Runs)
                     .Where(x =>
                         x.DeletedAt == null
                         && (x.QueueTabId == null || x.QueueTab!.DeletedAt == null)
                         && (x.Status == QueueStatus.Queued || x.Status == QueueStatus.Running))
                     .ToArrayAsync(stoppingToken);
+                var providerLimits = BuildProviderConcurrencyLimits(
+                    await db.AiProviderProfiles
+                        .AsNoTracking()
+                        .Where(x => x.Enabled)
+                        .ToArrayAsync(stoppingToken));
                 var lanesWithUnclaimedRunningRequests = queuedRequests
                     .Where(x => x.Status == QueueStatus.Running && !_activeQueues.ContainsKey(QueueLaneFor(x)))
                     .Select(QueueLaneFor)
                     .ToHashSet();
+                var providerBlockedQueueLanes = new HashSet<QueueLaneKey>();
 
+                var queueMetadataChanged = false;
                 foreach (var candidate in queuedRequests.OrderBy(x => x.QueueOrder).ThenBy(x => x.CreatedAt))
                 {
                     var queueLane = QueueLaneFor(candidate);
                     if (_activeQueues.ContainsKey(queueLane)
-                        || lanesWithUnclaimedRunningRequests.Contains(queueLane))
+                        || lanesWithUnclaimedRunningRequests.Contains(queueLane)
+                        || providerBlockedQueueLanes.Contains(queueLane))
                     {
                         continue;
                     }
@@ -355,16 +378,48 @@ public sealed class QueueWorker(
                         continue;
                     }
 
-                    var modelLimited = await IsRunModelUsageLimitedAsync(db, candidate.MachineId, candidateRun.Model, now, stoppingToken);
+                    var modelLimited = candidate.ExecutionRunner == ExecutionRunner.CodexCli
+                        && await IsRunModelUsageLimitedAsync(db, candidate.MachineId, candidateRun.Model, now, stoppingToken);
                     if (modelLimited)
                     {
                         continue;
                     }
 
+                    IDisposable? providerLease = null;
+                    if (candidate.ExecutionRunner == ExecutionRunner.OpenHandsCli
+                        && candidate.ProviderProfile is { } profile)
+                    {
+                        var providerKey = ProviderConcurrencyKey(profile);
+                        var maximumConcurrency = providerLimits.GetValueOrDefault(
+                            providerKey,
+                            Math.Max(1, profile.MaximumConcurrency));
+                        if (!providerConcurrency.TryAcquire(
+                                providerKey,
+                                maximumConcurrency,
+                                out providerLease))
+                        {
+                            var waitReason = "Waiting for shared "
+                                + (profile.Source == AiProviderSource.Local ? "Local AI" : profile.Name)
+                                + " capacity ("
+                                + maximumConcurrency
+                                + " concurrent run"
+                                + (maximumConcurrency == 1 ? "" : "s")
+                                + ").";
+                            if (!string.Equals(candidate.QueueWaitReason, waitReason, StringComparison.Ordinal))
+                            {
+                                candidate.QueueWaitReason = waitReason;
+                                queueMetadataChanged = true;
+                            }
+                            providerBlockedQueueLanes.Add(queueLane);
+                            continue;
+                        }
+                    }
+
                     var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(_workerStoppingToken);
-                    var execution = new QueueExecution(requestCancellation);
+                    var execution = new QueueExecution(requestCancellation, providerLease);
                     if (!_activeQueues.TryAdd(queueLane, execution))
                     {
+                        providerLease?.Dispose();
                         requestCancellation.Dispose();
                         continue;
                     }
@@ -372,20 +427,31 @@ public sealed class QueueWorker(
                     if (!_activeRequests.TryAdd(candidate.Id, requestCancellation))
                     {
                         _activeQueues.TryRemove(queueLane, out _);
+                        providerLease?.Dispose();
                         requestCancellation.Dispose();
                         continue;
                     }
 
+                    if (candidate.QueueWaitReason is not null)
+                    {
+                        candidate.QueueWaitReason = null;
+                        queueMetadataChanged = true;
+                    }
                     candidate.Status = QueueStatus.Running;
                     candidate.StartedAt ??= DateTimeOffset.UtcNow;
                     candidateRun.Status = QueueStatus.Running;
                     candidateRun.StartedAt ??= DateTimeOffset.UtcNow;
-                    candidateRun.Output = TrimOutput(candidateRun.Output + "Dispatching " + candidateRun.Kind.ToString().ToLowerInvariant() + " run on " + (candidate.Machine?.Name ?? candidate.Project?.Machine?.Name ?? "target machine") + "..." + Environment.NewLine);
+                    var runnerName = candidate.ExecutionRunner == ExecutionRunner.OpenHandsCli ? "OpenHands" : "Codex";
+                    candidateRun.Output = TrimOutput(candidateRun.Output + "Dispatching " + runnerName + " " + candidateRun.Kind.ToString().ToLowerInvariant() + " run on " + (candidate.Machine?.Name ?? candidate.Project?.Machine?.Name ?? "target machine") + "..." + Environment.NewLine);
                     dispatches.Add(new PendingDispatch(queueLane, candidate.Id, candidateRun.Kind, execution));
                 }
 
                 if (dispatches.Count == 0)
                 {
+                    if (queueMetadataChanged)
+                    {
+                        await TrySaveChangesAsync(db, "update provider queue wait state", stoppingToken);
+                    }
                     _lastIdle = DateTimeOffset.UtcNow;
                     return false;
                 }
@@ -461,6 +527,7 @@ public sealed class QueueWorker(
     {
         _activeRequests.TryRemove(dispatch.RequestId, out _);
         _activeQueues.TryRemove(dispatch.QueueLane, out _);
+        dispatch.Execution.ProviderLease?.Dispose();
         dispatch.Execution.Cancellation.Dispose();
         dispatch.Execution.Completion.TrySetResult();
     }
@@ -568,6 +635,7 @@ public sealed class QueueWorker(
                 .Include(x => x.Project).ThenInclude(x => x!.Machine)
                 .Include(x => x.QueueTab)
                 .Include(x => x.Machine)
+                .Include(x => x.ProviderProfile)
                 .Include(x => x.Runs)
                 .FirstAsync(x => x.Id == requestId, cancellationToken);
             run = GetLatestRunOfKind(request.Runs, kind) ?? throw new InvalidOperationException("Request run was not found.");
@@ -583,10 +651,15 @@ public sealed class QueueWorker(
             }
         }
 
-        var machine = request.Project?.Machine ?? request.Machine ?? throw new InvalidOperationException("Request machine is missing.");
         var project = request.Project ?? throw new InvalidOperationException("Request project is missing.");
-        var projectPath = project.Path;
+        var machine = request.ExecutionRunner == ExecutionRunner.CodexCli
+            ? request.Project?.Machine ?? request.Machine ?? throw new InvalidOperationException("Request machine is missing.")
+            : request.Machine ?? throw new InvalidOperationException("OpenHands request machine snapshot is missing.");
+        var projectPath = request.ExecutionRunner == ExecutionRunner.CodexCli
+            ? project.Path
+            : ValidateOpenHandsExecutionTarget(request, project, machine);
         var attachmentsCleaned = false;
+        var attachmentMaterializationAttempted = false;
 
         try
         {
@@ -604,8 +677,18 @@ public sealed class QueueWorker(
                 return commitResult.Success;
             }
 
-            await AppendOutputAsync(run.Id, "Preparing Codex request..." + Environment.NewLine, CancellationToken.None);
+            var runnerName = request.ExecutionRunner == ExecutionRunner.OpenHandsCli ? "OpenHands" : "Codex";
+            await AppendOutputAsync(run.Id, "Preparing " + runnerName + " request..." + Environment.NewLine, CancellationToken.None);
             var prompt = BuildProjectScopedPrompt(projectPath, BuildRequestPrompt(request));
+            if (request.ExecutionRunner == ExecutionRunner.OpenHandsCli
+                && !string.IsNullOrWhiteSpace(request.AttachmentsJson))
+            {
+                throw new InvalidOperationException(
+                    "Attachments are not available for OpenHands in this release. "
+                    + "Remove the attachments or create a new OpenHands request.");
+            }
+
+            attachmentMaterializationAttempted = !string.IsNullOrWhiteSpace(request.AttachmentsJson);
             var attachments = await MaterializeAttachmentsAsync(request, run.Id, project, machine, cancellationToken);
             if (!string.IsNullOrWhiteSpace(attachments.PromptSection))
             {
@@ -616,47 +699,76 @@ public sealed class QueueWorker(
                 ? await ReadGitHeadAsync(machine, projectPath, cancellationToken)
                 : null;
 
-            var result = await runner.RunCodexAsync(
-                machine,
-                projectPath,
-                run.Model,
-                run.ModelEffort,
-                run.ModelSpeed,
-                request.QueueTab?.CodexSessionId,
-                attachments.ImagePaths,
-                prompt,
-                request.PermissionMode,
+            var selectedRunner = agentRunnerResolver.Resolve(request.ExecutionRunner);
+            var result = await selectedRunner.RunAsync(
+                new QueueAgentRunContext(
+                    request,
+                    run,
+                    machine,
+                    projectPath,
+                    prompt,
+                    attachments.ImagePaths),
                 chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
                 cancellationToken);
 
             // Remove temporary inputs before evaluating Git state so they cannot be
             // mistaken for user changes or accidentally included in a commit.
-            await RemoveMaterializedAttachmentsAsync(request, project, machine);
+            if (attachmentMaterializationAttempted)
+            {
+                await RemoveMaterializedAttachmentsAsync(request, project, machine);
+            }
             attachmentsCleaned = true;
 
-            if (TryParseUsageLimit(result, out var usageLimit))
+            var codexResult = request.ExecutionRunner == ExecutionRunner.CodexCli
+                ? new CommandResult(
+                    result.ExitCode,
+                    result.Output,
+                    result.CommandPreview,
+                    result.CodexSessionId)
+                : null;
+            if (codexResult is not null && TryParseUsageLimit(codexResult, out var usageLimit))
             {
-                await MarkUsageLimitedAsync(request, run, kind, result, usageLimit, cancellationToken);
+                await MarkUsageLimitedAsync(request, run, kind, codexResult, usageLimit, cancellationToken);
                 return false;
             }
 
-            if (result.Success && request.GenerateCommit && !request.SeparateCommitSession)
+            if (codexResult is not null
+                && codexResult.Success
+                && request.GenerateCommit
+                && !request.SeparateCommitSession)
             {
-                result = await ValidateCodexCommitAsync(
+                codexResult = await ValidateCodexCommitAsync(
                     run,
                     machine,
                     projectPath,
-                    result,
+                    codexResult,
                     beforeCommitHead,
                     // Inline commit is part of this request's contract. A clean
                     // working tree alone is not enough: Git HEAD must advance so
                     // the request has a durable, traceable result.
                     commitRequired: true,
                     cancellationToken);
+                result = result with
+                {
+                    ExitCode = codexResult.ExitCode,
+                    Output = codexResult.Output,
+                    CommandPreview = codexResult.CommandPreview,
+                    CodexSessionId = codexResult.CodexSessionId,
+                };
             }
 
             await CompleteRunAsync(requestId, run.Id, kind, result, cancellationToken);
             return result.Success;
+        }
+        catch (OpenHandsRunCancelledException ex)
+        {
+            await PersistOpenHandsCancellationDiagnosticsAsync(
+                requestId,
+                run.Id,
+                ex.RawDiagnosticOutput,
+                ex.ConversationId);
+            await MarkCancelledAsync(requestId, run.Id, kind, CancellationToken.None);
+            return false;
         }
         catch (OperationCanceledException)
         {
@@ -670,7 +782,9 @@ public sealed class QueueWorker(
         }
         finally
         {
-            if (kind == RunKind.Request && !attachmentsCleaned && !string.IsNullOrWhiteSpace(request.AttachmentsJson))
+            if (kind == RunKind.Request
+                && attachmentMaterializationAttempted
+                && !attachmentsCleaned)
             {
                 await RemoveMaterializedAttachmentsAsync(request, project, machine);
             }
@@ -835,16 +949,82 @@ public sealed class QueueWorker(
                     && x.Runs.Any(run => run.Kind == RunKind.Commit && run.Status != QueueStatus.Succeeded))))
             .ToArrayAsync(cancellationToken);
 
-        var changed = false;
+        var activeRequestIds = _activeRequests.Keys.ToHashSet();
+        var changed = FailClosedInterruptedOpenHandsRequests(requests, activeRequestIds);
         foreach (var request in requests)
         {
-            changed |= ReconcileRequestState(request, _activeRequests.ContainsKey(request.Id));
+            changed |= ReconcileRequestState(request, activeRequestIds.Contains(request.Id));
         }
 
         if (changed)
         {
             await TrySaveChangesAsync(db, "reconcile queue state", cancellationToken);
         }
+    }
+
+    public static bool FailClosedInterruptedOpenHandsRequests(
+        IReadOnlyCollection<CodexRequest> requests,
+        IReadOnlySet<Guid> activeRequestIds)
+    {
+        var interruptedRequests = requests
+            .Where(request =>
+                request.ExecutionRunner == ExecutionRunner.OpenHandsCli
+                && request.Status is QueueStatus.Running or QueueStatus.CancelRequested
+                && !activeRequestIds.Contains(request.Id)
+                && GetLatestRunOfKind(request.Runs, RunKind.Request)?.Status
+                    is QueueStatus.Running or QueueStatus.CancelRequested)
+            .ToArray();
+        if (interruptedRequests.Length == 0)
+        {
+            return false;
+        }
+
+        var failedAt = DateTimeOffset.UtcNow;
+        const string interruptedReason =
+            "OpenHands run lost its server-side process owner. "
+            + "Verify the selected machine has no orphaned OpenHands process before retrying.";
+        foreach (var request in interruptedRequests)
+        {
+            request.Status = QueueStatus.Failed;
+            request.QueueWaitReason = null;
+            request.FinishedAt = failedAt;
+            request.Error = interruptedReason;
+            foreach (var run in request.Runs.Where(run =>
+                         run.Status is QueueStatus.Running
+                             or QueueStatus.CancelRequested
+                             or QueueStatus.UsageLimited))
+            {
+                run.Status = QueueStatus.Failed;
+                run.FinishedAt = failedAt;
+                run.Error = interruptedReason;
+            }
+        }
+
+        const string queuedReason =
+            "OpenHands request was paused because another OpenHands run may still be active without "
+            + "a server-side process owner. Verify the selected machines have no orphaned OpenHands "
+            + "process, then resume this request.";
+        foreach (var request in requests.Where(request =>
+                     request.ExecutionRunner == ExecutionRunner.OpenHandsCli
+                     && request.Status == QueueStatus.Queued))
+        {
+            request.Status = QueueStatus.Failed;
+            request.QueueWaitReason = null;
+            request.FinishedAt = failedAt;
+            request.Error = queuedReason;
+            foreach (var run in request.Runs.Where(run =>
+                         run.Status is QueueStatus.Queued
+                             or QueueStatus.Running
+                             or QueueStatus.CancelRequested
+                             or QueueStatus.UsageLimited))
+            {
+                run.Status = QueueStatus.Failed;
+                run.FinishedAt = failedAt;
+                run.Error = queuedReason;
+            }
+        }
+
+        return true;
     }
 
     private static bool ReconcileRequestState(CodexRequest request, bool isActive)
@@ -1050,6 +1230,10 @@ public sealed class QueueWorker(
                 Model = request.Model,
                 ModelEffort = request.ModelEffort,
                 ModelSpeed = request.ModelSpeed,
+                ExecutionRunner = request.ExecutionRunner,
+                ProviderProfileId = request.ProviderProfileId,
+                ProviderProfileName = request.ProviderProfile?.Name,
+                ProviderSource = request.ProviderProfile?.Source,
                 CreatedAt = DateTimeOffset.UtcNow
             };
             request.Runs.Add(requestRun);
@@ -1101,6 +1285,10 @@ public sealed class QueueWorker(
         {
             RequestId = request.Id,
             Kind = RunKind.Commit,
+            ExecutionRunner = request.ExecutionRunner,
+            ProviderProfileId = request.ProviderProfileId,
+            ProviderProfileName = request.ProviderProfile?.Name,
+            ProviderSource = request.ProviderProfile?.Source,
             Status = QueueStatus.Queued,
             CreatedAt = DateTimeOffset.UtcNow
         });
@@ -1118,8 +1306,10 @@ public sealed class QueueWorker(
     {
         run.Status = QueueStatus.Queued;
         run.CodexSessionId = null;
+        run.OpenHandsConversationId = null;
         run.CommandPreview = null;
         run.Output = "";
+        run.RawDiagnosticOutput = "";
         run.CommitMessage = null;
         run.CommitSha = null;
         run.Error = null;
@@ -1168,11 +1358,58 @@ public sealed class QueueWorker(
     private static void UpdateRequestSummary(CodexRequest request, string? requestOutput = null)
     {
         var output = requestOutput ?? GetLatestRunOfKind(request.Runs, RunKind.Request)?.Output;
-        var summary = LastAssistantMessage(output ?? string.Empty);
+        var summary = request.ExecutionRunner == ExecutionRunner.OpenHandsCli
+            ? LastOpenHandsMessage(output ?? string.Empty)
+            : LastAssistantMessage(output ?? string.Empty);
         if (!string.IsNullOrWhiteSpace(summary))
         {
             request.Summary = summary;
         }
+    }
+
+    private static string? LastOpenHandsMessage(string output)
+    {
+        string? lastMessage = null;
+        foreach (var line in output.Split(
+                     '\n',
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(line);
+                var root = document.RootElement;
+                if (!string.Equals(
+                        ReadString(root, "kind"),
+                        "MessageEvent",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var role = ReadString(root, "role");
+                var source = ReadString(root, "source");
+                if (!string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(source, "agent", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var message = ReadContentText(root)
+                    ?? ReadString(root, "message")
+                    ?? ReadString(root, "text");
+                message = CompletionTextCleaner.Sanitize(message);
+                if (!string.IsNullOrWhiteSpace(message))
+                {
+                    lastMessage = message;
+                }
+            }
+            catch (JsonException)
+            {
+                // OpenHands also emits safe, non-JSON lifecycle lines.
+            }
+        }
+
+        return lastMessage;
     }
 
     private static void ClearRequestRetryState(CodexRequest request)
@@ -1180,9 +1417,32 @@ public sealed class QueueWorker(
         request.RetryAfter = null;
         request.RetryReason = null;
         request.AvailableModel = null;
+        request.QueueWaitReason = null;
     }
 
-    private async Task CompleteRunAsync(Guid requestId, Guid runId, RunKind kind, CommandResult result, CancellationToken cancellationToken)
+    private Task CompleteRunAsync(
+        Guid requestId,
+        Guid runId,
+        RunKind kind,
+        CommandResult result,
+        CancellationToken cancellationToken) =>
+        CompleteRunAsync(
+            requestId,
+            runId,
+            kind,
+            new QueueAgentRunResult(
+                result.ExitCode,
+                result.Output,
+                result.CommandPreview,
+                CodexSessionId: result.CodexSessionId),
+            cancellationToken);
+
+    private async Task CompleteRunAsync(
+        Guid requestId,
+        Guid runId,
+        RunKind kind,
+        QueueAgentRunResult result,
+        CancellationToken cancellationToken)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -1198,19 +1458,39 @@ public sealed class QueueWorker(
         {
             return;
         }
-        var sessionId = result.CodexSessionId ?? run.CodexSessionId;
-
         run.CommandPreview = result.CommandPreview;
-        run.CodexSessionId = sessionId;
-        if (kind == RunKind.Request && request.QueueTab is not null && !string.IsNullOrWhiteSpace(sessionId))
+        if (request.ExecutionRunner == ExecutionRunner.CodexCli)
         {
-            request.QueueTab.CodexSessionId = sessionId;
-            request.QueueTab.UpdatedAt = DateTimeOffset.UtcNow;
+            var sessionId = result.CodexSessionId ?? run.CodexSessionId;
+            run.CodexSessionId = sessionId;
+            if (kind == RunKind.Request && request.QueueTab is not null && !string.IsNullOrWhiteSpace(sessionId))
+            {
+                request.QueueTab.CodexSessionId = sessionId;
+                request.QueueTab.UpdatedAt = DateTimeOffset.UtcNow;
+            }
+        }
+        else
+        {
+            var conversationId = result.OpenHandsConversationId ?? run.OpenHandsConversationId;
+            run.OpenHandsConversationId = conversationId;
+            run.RawDiagnosticOutput = TrimOutput(result.RawDiagnosticOutput ?? run.RawDiagnosticOutput);
+            if (kind == RunKind.Request
+                && request.QueueTab is not null
+                && !string.IsNullOrWhiteSpace(conversationId))
+            {
+                request.QueueTab.OpenHandsConversationId = conversationId;
+                request.QueueTab.UpdatedAt = DateTimeOffset.UtcNow;
+            }
         }
         run.ExitCode = result.ExitCode;
         run.FinishedAt = DateTimeOffset.UtcNow;
         run.Status = result.Success ? QueueStatus.Succeeded : QueueStatus.Failed;
-        run.Error = result.Success ? null : LastUsefulLine(result.Output);
+        run.Error = result.Success
+            ? null
+            : request.ExecutionRunner == ExecutionRunner.OpenHandsCli
+                ? LastOpenHandsError(result.Output)
+                : LastUsefulLine(result.Output);
+        request.QueueWaitReason = null;
 
         if (kind == RunKind.Commit)
         {
@@ -1249,6 +1529,53 @@ public sealed class QueueWorker(
         }
 
         await TrySaveChangesAsync(db, "complete run", cancellationToken);
+    }
+
+    private static string? LastOpenHandsError(string output)
+    {
+        string? plainTextFallback = null;
+        foreach (var line in output.Split(
+                     '\n',
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Reverse())
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(line);
+                var root = document.RootElement;
+                var kind = ReadString(root, "kind");
+                if (string.IsNullOrWhiteSpace(kind)
+                    || !kind.Contains("Error", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var message = ReadString(root, "message")
+                    ?? ReadString(root, "detail")
+                    ?? ReadString(root, "error");
+                if (message is null
+                    && root.TryGetProperty("error", out var error)
+                    && error.ValueKind == JsonValueKind.Object)
+                {
+                    message = ReadString(error, "message") ?? ReadString(error, "detail");
+                }
+
+                if (!string.IsNullOrWhiteSpace(message))
+                {
+                    return message.Length <= 2_000 ? message : message[..2_000];
+                }
+            }
+            catch (JsonException)
+            {
+                if (!line.StartsWith("$ ", StringComparison.Ordinal)
+                    && OpenHandsCommandRunner.ExtractConversationId(line) is null
+                    && !CompletionTextCleaner.IsNoiseLine(line))
+                {
+                    plainTextFallback ??= line.Length <= 2_000 ? line : line[..2_000];
+                }
+            }
+        }
+
+        return plainTextFallback ?? "OpenHands reported an execution error.";
     }
 
     private sealed record UsageLimitMetadata(
@@ -1590,6 +1917,35 @@ public sealed class QueueWorker(
         await TrySaveChangesAsync(db, "mark cancelled", cancellationToken);
     }
 
+    private async Task PersistOpenHandsCancellationDiagnosticsAsync(
+        Guid requestId,
+        Guid runId,
+        string rawDiagnosticOutput,
+        string? conversationId)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var request = await db.Requests
+            .Include(x => x.QueueTab)
+            .Include(x => x.Runs)
+            .FirstOrDefaultAsync(x => x.Id == requestId);
+        var run = request?.Runs.FirstOrDefault(x => x.Id == runId);
+        if (request is null || run is null)
+        {
+            return;
+        }
+
+        run.RawDiagnosticOutput = TrimOutput(rawDiagnosticOutput);
+        run.OpenHandsConversationId = conversationId ?? run.OpenHandsConversationId;
+        if (request.QueueTab is not null && !string.IsNullOrWhiteSpace(conversationId))
+        {
+            request.QueueTab.OpenHandsConversationId = conversationId;
+            request.QueueTab.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+
+        await TrySaveChangesAsync(db, "persist OpenHands cancellation diagnostics", CancellationToken.None);
+    }
+
     private async Task MarkFailedAsync(Guid requestId, Guid runId, RunKind kind, Exception exception, CancellationToken cancellationToken)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
@@ -1876,9 +2232,20 @@ public sealed class QueueWorker(
         var attachmentBoundary = string.IsNullOrWhiteSpace(request.AttachmentsJson)
             ? ""
             : "\n\nDo not modify, stage, or commit `.codex-queue/attachments`; it contains temporary prompt inputs.";
+        var runnerBoundary = request.ExecutionRunner == ExecutionRunner.OpenHandsCli
+            ? """
+
+              OpenHands safety constraints for this headless run:
+              - Work only inside the selected project root, except for normal read-only operating-system files needed by build tools.
+              - Do not modify, stage, or commit anything under `.codex-queue`; it contains temporary control-plane task inputs that are removed after this run.
+              - Do not create Git commits, push, force-push, rewrite history, or alter remote branches.
+              - Do not use sudo, administrator elevation, or change machine-level configuration.
+              - Do not inspect or access credentials, secret stores, or unrelated environment variables. Use only the inference configuration supplied by the launcher.
+              """
+            : "";
         if (!request.GenerateCommit)
         {
-            return request.Prompt + attachmentBoundary;
+            return request.Prompt + attachmentBoundary + runnerBoundary;
         }
 
         if (request.SeparateCommitSession)
@@ -1888,7 +2255,7 @@ public sealed class QueueWorker(
 
                 Do not run git commit in this run.
                 Leave file changes for the follow-up Codex commit step.
-                """ + attachmentBoundary;
+                """ + attachmentBoundary + runnerBoundary;
         }
 
         return request.Prompt.TrimEnd()
@@ -1899,7 +2266,7 @@ public sealed class QueueWorker(
             Choose one concise imperative commit message.
             Do not amend existing commits.
             Do not push.
-            """ + attachmentBoundary;
+            """ + attachmentBoundary + runnerBoundary;
     }
 
     private static string BuildProjectScopedPrompt(string projectPath, string userPrompt) =>
@@ -1914,6 +2281,34 @@ public sealed class QueueWorker(
         User request:
         {userPrompt}
         """;
+
+    private static string ValidateOpenHandsExecutionTarget(
+        CodexRequest request,
+        Project project,
+        TargetMachine machine)
+    {
+        if (project.MachineId != request.MachineId || machine.Id != request.MachineId)
+        {
+            throw new InvalidOperationException(
+                "The selected machine changed after this OpenHands request was queued. The task was not moved; create a new request for the new machine.");
+        }
+
+        if (string.IsNullOrWhiteSpace(request.ExecutionProjectPath)
+            || !string.Equals(request.ExecutionProjectPath, project.Path, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "The selected project path changed after this OpenHands request was queued. The task was not moved; create a new request for the new path.");
+        }
+
+        if (!request.ExecutionMachineUpdatedAt.HasValue
+            || request.ExecutionMachineUpdatedAt.Value != machine.UpdatedAt)
+        {
+            throw new InvalidOperationException(
+                "The selected machine configuration changed after this OpenHands request was queued. The task was not moved; review the machine and create a new request.");
+        }
+
+        return request.ExecutionProjectPath;
+    }
 
     private static string TrimOutput(string value) =>
         value.Length <= MaxStoredOutput ? value : value[^MaxStoredOutput..];
@@ -2195,6 +2590,30 @@ public sealed class QueueWorker(
     private static QueueLaneKey QueueLaneFor(CodexRequest request) =>
         new(request.ProjectId, request.Project?.SeparateQueuesByTab == true ? request.QueueTabId : null);
 
+    public static string ProviderConcurrencyKey(AiProviderProfile profile)
+    {
+        if (AiProviderService.TryNormalizeBaseUrl(
+                profile.Source,
+                profile.BaseUrl,
+                out var normalized,
+                out _)
+            && Uri.TryCreate(normalized, UriKind.Absolute, out var uri))
+        {
+            return profile.Source + "|" + uri.Scheme + "://" + uri.Authority;
+        }
+
+        return profile.Source + "|" + profile.BaseUrl.Trim().TrimEnd('/');
+    }
+
+    public static IReadOnlyDictionary<string, int> BuildProviderConcurrencyLimits(
+        IEnumerable<AiProviderProfile> profiles) =>
+        profiles
+            .GroupBy(ProviderConcurrencyKey, StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => group.Min(profile => Math.Max(1, profile.MaximumConcurrency)),
+                StringComparer.Ordinal);
+
     private readonly record struct QueueLaneKey(Guid ProjectId, Guid? QueueTabId);
 
     private sealed record PendingDispatch(
@@ -2203,9 +2622,12 @@ public sealed class QueueWorker(
         RunKind RunKind,
         QueueExecution Execution);
 
-    private sealed class QueueExecution(CancellationTokenSource cancellation)
+    private sealed class QueueExecution(
+        CancellationTokenSource cancellation,
+        IDisposable? providerLease)
     {
         public CancellationTokenSource Cancellation { get; } = cancellation;
+        public IDisposable? ProviderLease { get; } = providerLease;
         public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 

@@ -38,3 +38,30 @@ public enum PermissionMode
     ApproveForMe,
     FullAccess
 }
+
+public enum ExecutionRunner
+{
+    CodexCli = 0,
+    OpenHandsCli = 1
+}
+
+public enum AiProviderSource
+{
+    OpenAi,
+    Anthropic,
+    Local
+}
+
+public enum ModelDiscoveryMode
+{
+    Auto,
+    Ollama,
+    OpenAi
+}
+
+public enum ProviderHealthStatus
+{
+    Unknown,
+    Healthy,
+    Offline
+}

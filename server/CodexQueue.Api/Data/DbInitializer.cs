@@ -11,13 +11,24 @@ public static class DbInitializer
         await using var scope = services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("DbInitializer");
+        var configuration = scope.ServiceProvider.GetService<IConfiguration>();
         await db.Database.EnsureCreatedAsync(cancellationToken);
+        await EnsureAiProviderProfilesTableAsync(db, cancellationToken);
+        await EnsureAiProviderProfileIndexesAsync(db, cancellationToken);
         await EnsureQueueTabsTableAsync(db, cancellationToken);
         await EnsureColumnAsync(db, "QueueTabs", "DeletedAt", "ALTER TABLE \"QueueTabs\" ADD COLUMN \"DeletedAt\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "QueueTabs", "OpenHandsConversationId", "ALTER TABLE \"QueueTabs\" ADD COLUMN \"OpenHandsConversationId\" TEXT NULL", cancellationToken);
         await EnsureQueueTabIndexesAsync(db, cancellationToken);
         await EnsureColumnAsync(db, "Machines", "Platform", "ALTER TABLE \"Machines\" ADD COLUMN \"Platform\" TEXT NOT NULL DEFAULT 'Auto'", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "QueueTabId", "ALTER TABLE \"Requests\" ADD COLUMN \"QueueTabId\" TEXT NULL REFERENCES \"QueueTabs\" (\"Id\") ON DELETE SET NULL", cancellationToken);
         await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_Requests_QueueTabId\" ON \"Requests\" (\"QueueTabId\")", cancellationToken);
+        await EnsureColumnAsync(db, "Requests", "ExecutionRunner", "ALTER TABLE \"Requests\" ADD COLUMN \"ExecutionRunner\" TEXT NOT NULL DEFAULT 'CodexCli'", cancellationToken);
+        await EnsureColumnAsync(db, "Requests", "ProviderProfileId", "ALTER TABLE \"Requests\" ADD COLUMN \"ProviderProfileId\" TEXT NULL REFERENCES \"AiProviderProfiles\" (\"Id\") ON DELETE RESTRICT", cancellationToken);
+        await EnsureColumnAsync(db, "Requests", "OpenHandsAlwaysApproveConfirmed", "ALTER TABLE \"Requests\" ADD COLUMN \"OpenHandsAlwaysApproveConfirmed\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnAsync(db, "Requests", "QueueWaitReason", "ALTER TABLE \"Requests\" ADD COLUMN \"QueueWaitReason\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "Requests", "ExecutionProjectPath", "ALTER TABLE \"Requests\" ADD COLUMN \"ExecutionProjectPath\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "Requests", "ExecutionMachineUpdatedAt", "ALTER TABLE \"Requests\" ADD COLUMN \"ExecutionMachineUpdatedAt\" TEXT NULL", cancellationToken);
+        await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_Requests_ProviderProfileId\" ON \"Requests\" (\"ProviderProfileId\")", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "ModelEffort", "ALTER TABLE \"Requests\" ADD COLUMN \"ModelEffort\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "ModelSpeed", "ALTER TABLE \"Requests\" ADD COLUMN \"ModelSpeed\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "QueueOrder", "ALTER TABLE \"Requests\" ADD COLUMN \"QueueOrder\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
@@ -44,11 +55,19 @@ public static class DbInitializer
         await EnsureColumnAsync(db, "Projects", "SeparateQueuesByTab", "ALTER TABLE \"Projects\" ADD COLUMN \"SeparateQueuesByTab\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "ModelEffort", "ALTER TABLE \"Runs\" ADD COLUMN \"ModelEffort\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "ModelSpeed", "ALTER TABLE \"Runs\" ADD COLUMN \"ModelSpeed\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "Runs", "ExecutionRunner", "ALTER TABLE \"Runs\" ADD COLUMN \"ExecutionRunner\" TEXT NOT NULL DEFAULT 'CodexCli'", cancellationToken);
+        await EnsureColumnAsync(db, "Runs", "ProviderProfileId", "ALTER TABLE \"Runs\" ADD COLUMN \"ProviderProfileId\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "Runs", "ProviderProfileName", "ALTER TABLE \"Runs\" ADD COLUMN \"ProviderProfileName\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "Runs", "ProviderSource", "ALTER TABLE \"Runs\" ADD COLUMN \"ProviderSource\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "CodexSessionId", "ALTER TABLE \"Runs\" ADD COLUMN \"CodexSessionId\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "Runs", "OpenHandsConversationId", "ALTER TABLE \"Runs\" ADD COLUMN \"OpenHandsConversationId\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "Runs", "RawDiagnosticOutput", "ALTER TABLE \"Runs\" ADD COLUMN \"RawDiagnosticOutput\" TEXT NOT NULL DEFAULT ''", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "RetryAfter", "ALTER TABLE \"Runs\" ADD COLUMN \"RetryAfter\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "RetryReason", "ALTER TABLE \"Runs\" ADD COLUMN \"RetryReason\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "AvailableModel", "ALTER TABLE \"Runs\" ADD COLUMN \"AvailableModel\" TEXT NULL", cancellationToken);
+        await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_Runs_ProviderProfileId\" ON \"Runs\" (\"ProviderProfileId\")", cancellationToken);
         await EnsureQueueOrderAsync(db, cancellationToken);
+        await EnsureDefaultLocalProviderProfileAsync(db, configuration, logger, cancellationToken);
 
         var defaultMachine = DefaultPaths.DefaultMachine();
         if (!await db.Machines.AnyAsync(cancellationToken))
@@ -103,6 +122,9 @@ public static class DbInitializer
                     || x.Status == QueueStatus.Failed)
                 .ToArrayAsync(cancellationToken);
 
+            var interruptedOpenHandsDetected = interruptedRequests.Any(x =>
+                x.ExecutionRunner == ExecutionRunner.OpenHandsCli
+                && x.Status is QueueStatus.Running or QueueStatus.CancelRequested);
             var repairedRequests = false;
             foreach (var request in interruptedRequests)
             {
@@ -115,6 +137,29 @@ public static class DbInitializer
 
                 if (RepairInterruptedRequest(request))
                 {
+                    repairedRequests = true;
+                    continue;
+                }
+
+                if (request.Status == QueueStatus.Running
+                    && request.ExecutionRunner == ExecutionRunner.OpenHandsCli)
+                {
+                    request.Status = QueueStatus.Failed;
+                    request.QueueWaitReason = null;
+                    request.FinishedAt = DateTimeOffset.UtcNow;
+                    request.Error =
+                        "OpenHands run was interrupted by an API server restart. "
+                        + "Verify the selected machine has no orphaned OpenHands process before retrying.";
+                    foreach (var run in request.Runs.Where(x =>
+                                 x.Status is QueueStatus.Running
+                                     or QueueStatus.CancelRequested
+                                     or QueueStatus.UsageLimited))
+                    {
+                        run.Status = QueueStatus.Failed;
+                        run.FinishedAt = request.FinishedAt;
+                        run.Error = request.Error;
+                    }
+
                     repairedRequests = true;
                     continue;
                 }
@@ -156,6 +201,39 @@ public static class DbInitializer
                 }
 
                 repairedRequests = true;
+            }
+
+            if (interruptedOpenHandsDetected)
+            {
+                var queuedOpenHandsRequests = await db.Requests
+                    .Include(x => x.Runs)
+                    .Where(x => x.ExecutionRunner == ExecutionRunner.OpenHandsCli
+                        && x.Status == QueueStatus.Queued)
+                    .ToArrayAsync(cancellationToken);
+                var pausedAt = DateTimeOffset.UtcNow;
+                const string pauseReason =
+                    "OpenHands request was paused after an API server restart because another OpenHands run "
+                    + "may still be active. Verify the selected machines have no orphaned OpenHands process, "
+                    + "then resume this request.";
+                foreach (var request in queuedOpenHandsRequests)
+                {
+                    request.Status = QueueStatus.Failed;
+                    request.QueueWaitReason = null;
+                    request.FinishedAt = pausedAt;
+                    request.Error = pauseReason;
+                    foreach (var run in request.Runs.Where(x =>
+                                 x.Status is QueueStatus.Queued
+                                     or QueueStatus.Running
+                                     or QueueStatus.CancelRequested
+                                     or QueueStatus.UsageLimited))
+                    {
+                        run.Status = QueueStatus.Failed;
+                        run.FinishedAt = pausedAt;
+                        run.Error = pauseReason;
+                    }
+                }
+
+                repairedRequests |= queuedOpenHandsRequests.Length > 0;
             }
 
             if (repairedRequests)
@@ -229,6 +307,7 @@ public static class DbInitializer
                 "ProjectId" TEXT NOT NULL,
                 "Name" TEXT COLLATE NOCASE NOT NULL,
                 "CodexSessionId" TEXT NULL,
+                "OpenHandsConversationId" TEXT NULL,
                 "CreatedAt" TEXT NOT NULL,
                 "UpdatedAt" TEXT NOT NULL,
                 "DeletedAt" TEXT NULL,
@@ -236,6 +315,133 @@ public static class DbInitializer
             )
             """,
             cancellationToken);
+    }
+
+    private static async Task EnsureAiProviderProfilesTableAsync(AppDbContext db, CancellationToken cancellationToken)
+    {
+        await db.Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS "AiProviderProfiles" (
+                "Id" TEXT NOT NULL CONSTRAINT "PK_AiProviderProfiles" PRIMARY KEY,
+                "Name" TEXT COLLATE NOCASE NOT NULL,
+                "Source" TEXT NOT NULL,
+                "BaseUrl" TEXT NOT NULL,
+                "ModelDiscoveryMode" TEXT NOT NULL,
+                "ApiKeyEnvironmentVariable" TEXT NULL,
+                "Enabled" INTEGER NOT NULL,
+                "MaximumConcurrency" INTEGER NOT NULL DEFAULT 1,
+                "ConfiguredContextWindow" INTEGER NULL,
+                "DefaultModel" TEXT NULL,
+                "LastHealthStatus" TEXT NOT NULL DEFAULT 'Unknown',
+                "LastHealthAt" TEXT NULL,
+                "LastHealthError" TEXT NULL,
+                "CreatedAt" TEXT NOT NULL,
+                "UpdatedAt" TEXT NOT NULL
+            )
+            """,
+            cancellationToken);
+    }
+
+    private static async Task EnsureAiProviderProfileIndexesAsync(AppDbContext db, CancellationToken cancellationToken)
+    {
+        await db.Database.ExecuteSqlRawAsync(
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"IX_AiProviderProfiles_Name\" ON \"AiProviderProfiles\" (\"Name\")",
+            cancellationToken);
+        await db.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS \"IX_AiProviderProfiles_Source_BaseUrl\" ON \"AiProviderProfiles\" (\"Source\", \"BaseUrl\")",
+            cancellationToken);
+    }
+
+    private static async Task EnsureDefaultLocalProviderProfileAsync(
+        AppDbContext db,
+        IConfiguration? configuration,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        if (await db.AiProviderProfiles.AnyAsync(x => x.Source == AiProviderSource.Local, cancellationToken))
+        {
+            return;
+        }
+
+        const string fallbackBaseUrl = "http://localhost:11434/v1";
+        var configuredBaseUrl = Environment.GetEnvironmentVariable("CQ_LOCAL_AI_BASE_URL");
+        if (string.IsNullOrWhiteSpace(configuredBaseUrl))
+        {
+            configuredBaseUrl = configuration?["LocalAi:BaseUrl"];
+        }
+
+        var requestedBaseUrl = string.IsNullOrWhiteSpace(configuredBaseUrl)
+            ? fallbackBaseUrl
+            : configuredBaseUrl.Trim();
+        if (!AiProviderService.TryNormalizeBaseUrl(
+                AiProviderSource.Local,
+                requestedBaseUrl,
+                out var normalizedBaseUrl,
+                out var baseUrlError))
+        {
+            logger.LogWarning(
+                "Ignoring invalid Local AI base URL while creating the default profile: {Reason}",
+                baseUrlError);
+            normalizedBaseUrl = fallbackBaseUrl;
+        }
+
+        const int defaultContextWindow = 32_768;
+        var configuredContext = Environment.GetEnvironmentVariable("CQ_LOCAL_AI_CONTEXT_WINDOW");
+        if (string.IsNullOrWhiteSpace(configuredContext))
+        {
+            configuredContext = configuration?["LocalAi:ConfiguredContextWindow"];
+        }
+
+        var contextWindow = defaultContextWindow;
+        if (!string.IsNullOrWhiteSpace(configuredContext)
+            && (!int.TryParse(configuredContext, out contextWindow) || contextWindow <= 0))
+        {
+            logger.LogWarning(
+                "Ignoring invalid Local AI configured context window {ConfiguredContextWindow}; using {DefaultContextWindow}.",
+                configuredContext,
+                defaultContextWindow);
+            contextWindow = defaultContextWindow;
+        }
+
+        var configuredDefaultModel = Environment.GetEnvironmentVariable("CQ_LOCAL_AI_DEFAULT_MODEL");
+        if (string.IsNullOrWhiteSpace(configuredDefaultModel))
+        {
+            configuredDefaultModel = configuration?["LocalAi:DefaultModel"];
+        }
+
+        string? defaultModel = null;
+        if (!string.IsNullOrWhiteSpace(configuredDefaultModel))
+        {
+            try
+            {
+                defaultModel = AiProviderService.QualifyModel(
+                    AiProviderSource.Local,
+                    configuredDefaultModel);
+            }
+            catch (ArgumentException)
+            {
+                logger.LogWarning(
+                    "Ignoring an invalid Local AI default model identifier while creating the default profile.");
+            }
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        db.AiProviderProfiles.Add(new AiProviderProfile
+        {
+            Name = "Local Ollama",
+            Source = AiProviderSource.Local,
+            BaseUrl = normalizedBaseUrl,
+            ModelDiscoveryMode = ModelDiscoveryMode.Auto,
+            ApiKeyEnvironmentVariable = null,
+            Enabled = true,
+            MaximumConcurrency = 1,
+            ConfiguredContextWindow = contextWindow,
+            DefaultModel = defaultModel,
+            LastHealthStatus = ProviderHealthStatus.Unknown,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await db.SaveChangesAsync(cancellationToken);
     }
 
     private static async Task EnsureQueueTabIndexesAsync(AppDbContext db, CancellationToken cancellationToken)
@@ -351,6 +557,10 @@ public static class DbInitializer
         {
             RequestId = request.Id,
             Kind = RunKind.Commit,
+            ExecutionRunner = request.ExecutionRunner,
+            ProviderProfileId = request.ProviderProfileId,
+            ProviderProfileName = request.ProviderProfile?.Name,
+            ProviderSource = request.ProviderProfile?.Source,
             Status = QueueStatus.Queued,
             CreatedAt = DateTimeOffset.UtcNow
         });
@@ -380,8 +590,10 @@ public static class DbInitializer
     {
         run.Status = QueueStatus.Queued;
         run.CodexSessionId = null;
+        run.OpenHandsConversationId = null;
         run.CommandPreview = null;
         run.Output = "";
+        run.RawDiagnosticOutput = "";
         run.CommitMessage = null;
         run.CommitSha = null;
         run.Error = null;
@@ -431,6 +643,7 @@ public static class DbInitializer
         request.RetryAfter = null;
         request.RetryReason = null;
         request.AvailableModel = null;
+        request.QueueWaitReason = null;
     }
 
 }

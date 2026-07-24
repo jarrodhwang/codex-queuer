@@ -65,7 +65,8 @@ public sealed record QueueTabDto(
     Guid ProjectId,
     string Name,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    string? OpenHandsConversationId);
 
 public sealed record CreateQueueTabRequest(Guid ProjectId, string Name);
 
@@ -84,7 +85,10 @@ public sealed record CreateQueueRequest(
     PermissionMode PermissionMode,
     string? CommitModel,
     string? CommitModelEffort,
-    string? CommitModelSpeed);
+    string? CommitModelSpeed,
+    ExecutionRunner ExecutionRunner = ExecutionRunner.CodexCli,
+    Guid? ProviderProfileId = null,
+    bool OpenHandsAlwaysApproveConfirmed = false);
 
 public sealed record UpdateQueueRequest(
     string Prompt,
@@ -97,7 +101,10 @@ public sealed record UpdateQueueRequest(
     PermissionMode PermissionMode,
     string? CommitModel,
     string? CommitModelEffort,
-    string? CommitModelSpeed);
+    string? CommitModelSpeed,
+    ExecutionRunner? ExecutionRunner = null,
+    Guid? ProviderProfileId = null,
+    bool OpenHandsAlwaysApproveConfirmed = false);
 
 public sealed record ReorderQueueRequest(Guid ProjectId, IReadOnlyList<Guid> RequestIds);
 
@@ -128,7 +135,12 @@ public sealed record CodexRunDto(
     string? Error,
     DateTimeOffset CreatedAt,
     DateTimeOffset? StartedAt,
-    DateTimeOffset? FinishedAt);
+    DateTimeOffset? FinishedAt,
+    ExecutionRunner ExecutionRunner,
+    Guid? ProviderProfileId,
+    string? ProviderProfileName,
+    AiProviderSource? ProviderSource,
+    string? OpenHandsConversationId);
 
 public sealed record CodexRequestDto(
     Guid Id,
@@ -163,7 +175,13 @@ public sealed record CodexRequestDto(
     DateTimeOffset? FinishedAt,
     DateTimeOffset? ArchivedAt,
     DateTimeOffset? DeletedAt,
-    IReadOnlyList<CodexRunDto> Runs);
+    IReadOnlyList<CodexRunDto> Runs,
+    ExecutionRunner ExecutionRunner,
+    Guid? ProviderProfileId,
+    string? ProviderProfileName,
+    AiProviderSource? ProviderSource,
+    string? QueueWaitReason,
+    bool OpenHandsAlwaysApproveConfirmed);
 
 public sealed record SessionDto(
     Guid RunId,
@@ -176,7 +194,11 @@ public sealed record SessionDto(
     DateTimeOffset CreatedAt,
     DateTimeOffset? StartedAt,
     DateTimeOffset? FinishedAt,
-    string? CommitSha);
+    string? CommitSha,
+    ExecutionRunner ExecutionRunner,
+    string? ProviderProfileName,
+    AiProviderSource? ProviderSource,
+    string? OpenHandsConversationId);
 
 public sealed record FileTreeEntryDto(string Name, string Path, bool IsDirectory, long? Size);
 
@@ -205,6 +227,56 @@ public sealed record ModelOptionDto(string Label, string Model, bool SupportsPri
 public sealed record ApiConfigDto(bool RequiresToken, IReadOnlyList<ModelOptionDto> Models);
 
 public sealed record MachineTestDto(bool Success, string Output);
+
+public sealed record OpenHandsMachineCheckDto(
+    bool Available,
+    string? Version,
+    bool RequiresWsl,
+    string Message,
+    bool TargetLocalAiChecked = false,
+    bool? TargetLocalAiReachable = null,
+    bool? TargetSelectedModelAvailable = null,
+    string? TargetLocalAiMessage = null);
+
+public sealed record AiProviderProfileDto(
+    Guid Id,
+    string Name,
+    AiProviderSource Source,
+    string BaseUrl,
+    ModelDiscoveryMode ModelDiscoveryMode,
+    string? ApiKeyEnvironmentVariable,
+    bool Enabled,
+    int MaximumConcurrency,
+    int? ConfiguredContextWindow,
+    string? DefaultModel,
+    ProviderHealthStatus LastHealthStatus,
+    DateTimeOffset? LastHealthAt,
+    string? LastHealthError,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record SaveAiProviderProfileRequest(
+    string Name,
+    AiProviderSource Source,
+    string BaseUrl,
+    ModelDiscoveryMode ModelDiscoveryMode,
+    string? ApiKeyEnvironmentVariable,
+    bool Enabled,
+    int MaximumConcurrency,
+    int? ConfiguredContextWindow,
+    string? DefaultModel);
+
+public sealed record AiProviderModelDto(string Id, string Name);
+
+public sealed record AiProviderModelsDto(
+    Guid ProfileId,
+    bool Healthy,
+    ProviderHealthStatus Status,
+    string? Error,
+    DateTimeOffset CheckedAt,
+    int? ConfiguredContextWindow,
+    string? ContextWarning,
+    IReadOnlyList<AiProviderModelDto> Models);
 
 public sealed record RateLimitWindowDto(int UsedPercent, int? WindowDurationMins, long? ResetsAt);
 

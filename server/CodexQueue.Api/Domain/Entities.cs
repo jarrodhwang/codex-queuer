@@ -42,6 +42,27 @@ public sealed class Project
     public ICollection<QueueTab> QueueTabs { get; set; } = new List<QueueTab>();
 }
 
+public sealed class AiProviderProfile
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Name { get; set; } = "";
+    public AiProviderSource Source { get; set; }
+    public string BaseUrl { get; set; } = "";
+    public ModelDiscoveryMode ModelDiscoveryMode { get; set; } = ModelDiscoveryMode.Auto;
+    public string? ApiKeyEnvironmentVariable { get; set; }
+    public bool Enabled { get; set; } = true;
+    public int MaximumConcurrency { get; set; } = 1;
+    public int? ConfiguredContextWindow { get; set; }
+    public string? DefaultModel { get; set; }
+    public ProviderHealthStatus LastHealthStatus { get; set; } = ProviderHealthStatus.Unknown;
+    public DateTimeOffset? LastHealthAt { get; set; }
+    public string? LastHealthError { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public ICollection<CodexRequest> Requests { get; set; } = new List<CodexRequest>();
+}
+
 public sealed class QueueTab
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -49,6 +70,7 @@ public sealed class QueueTab
     public Project? Project { get; set; }
     public string Name { get; set; } = "";
     public string? CodexSessionId { get; set; }
+    public string? OpenHandsConversationId { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? DeletedAt { get; set; }
@@ -65,6 +87,13 @@ public sealed class CodexRequest
     public QueueTab? QueueTab { get; set; }
     public Guid MachineId { get; set; }
     public TargetMachine? Machine { get; set; }
+    public ExecutionRunner ExecutionRunner { get; set; } = ExecutionRunner.CodexCli;
+    public Guid? ProviderProfileId { get; set; }
+    public AiProviderProfile? ProviderProfile { get; set; }
+    public bool OpenHandsAlwaysApproveConfirmed { get; set; }
+    public string? QueueWaitReason { get; set; }
+    public string? ExecutionProjectPath { get; set; }
+    public DateTimeOffset? ExecutionMachineUpdatedAt { get; set; }
     public string Prompt { get; set; } = "";
     public string? AttachmentsJson { get; set; }
     public string Model { get; set; } = "";
@@ -101,10 +130,16 @@ public sealed class CodexRun
     public string Model { get; set; } = "";
     public string? ModelEffort { get; set; }
     public string? ModelSpeed { get; set; }
+    public ExecutionRunner ExecutionRunner { get; set; } = ExecutionRunner.CodexCli;
+    public Guid? ProviderProfileId { get; set; }
+    public string? ProviderProfileName { get; set; }
+    public AiProviderSource? ProviderSource { get; set; }
     public QueueStatus Status { get; set; } = QueueStatus.Queued;
     public string? CodexSessionId { get; set; }
+    public string? OpenHandsConversationId { get; set; }
     public string? CommandPreview { get; set; }
     public string Output { get; set; } = "";
+    public string RawDiagnosticOutput { get; set; } = "";
     public int? ExitCode { get; set; }
     public string? CommitMessage { get; set; }
     public string? CommitSha { get; set; }

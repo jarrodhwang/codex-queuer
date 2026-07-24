@@ -1,4 +1,5 @@
 import type {
+  AiProviderProfile,
   ApiConfig,
   CodexGitCommitRequest,
   CodexRequest,
@@ -10,10 +11,13 @@ import type {
   GitStatus,
   Machine,
   MachineTest,
+  OpenHandsMachineTest,
   MachineRateLimits,
   Project,
   QueueTab,
   QueueDiagnostics,
+  ProviderModelsResponse,
+  SaveAiProviderProfileRequest,
   SaveMachineRequest,
   SaveProjectRequest,
   Session,
@@ -101,6 +105,13 @@ export const api = {
     }),
   deleteMachine: (id: string) => apiFetch<void>(`/machines/${id}`, { method: 'DELETE' }),
   testMachine: (id: string) => apiFetch<MachineTest>(`/machines/${id}/test`, { method: 'POST' }),
+  testOpenHands: (id: string, providerProfileId?: string, model?: string) => {
+    const params = new URLSearchParams()
+    if (providerProfileId) params.set('providerProfileId', providerProfileId)
+    if (model) params.set('model', model)
+    const query = params.toString()
+    return apiFetch<OpenHandsMachineTest>(`/machines/${id}/openhands/test${query ? `?${query}` : ''}`)
+  },
   machineUsage: (id: string) => apiFetch<MachineRateLimits>(`/machines/${id}/usage`),
   machineFolders: (id: string, path = '') =>
     apiFetch<FileTreeEntry[]>(`/machines/${id}/folders?path=${encodeURIComponent(path)}`),
@@ -111,6 +122,15 @@ export const api = {
       body: JSON.stringify(project),
     }),
   deleteProject: (id: string) => apiFetch<void>(`/projects/${id}`, { method: 'DELETE' }),
+  providerProfiles: () => apiFetch<AiProviderProfile[]>('/provider-profiles'),
+  saveProviderProfile: (profile: SaveAiProviderProfileRequest, id?: string) =>
+    apiFetch<AiProviderProfile>(id ? `/provider-profiles/${id}` : '/provider-profiles', {
+      method: id ? 'PUT' : 'POST',
+      body: JSON.stringify(profile),
+    }),
+  deleteProviderProfile: (id: string) => apiFetch<void>(`/provider-profiles/${id}`, { method: 'DELETE' }),
+  providerModels: (id: string, refresh = false) =>
+    apiFetch<ProviderModelsResponse>(`/provider-profiles/${id}/models?refresh=${refresh ? 'true' : 'false'}`),
   queueTabs: (projectId?: string) =>
     apiFetch<QueueTab[]>(projectId ? `/queue-tabs?projectId=${encodeURIComponent(projectId)}` : '/queue-tabs'),
   createQueueTab: (projectId: string, name: string) =>

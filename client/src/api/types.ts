@@ -1,5 +1,9 @@
 export type MachineKind = 'Local' | 'Ssh'
 export type MachinePlatform = 'Auto' | 'Linux' | 'MacOs' | 'Windows'
+export type ExecutionRunner = 'CodexCli' | 'OpenHandsCli'
+export type AiProviderSource = 'OpenAi' | 'Anthropic' | 'Local'
+export type ModelDiscoveryMode = 'Auto' | 'Ollama' | 'OpenAi'
+export type ProviderHealthStatus = 'Unknown' | 'Healthy' | 'Offline'
 export type QueueStatus =
   | 'Queued'
   | 'Running'
@@ -78,6 +82,7 @@ export type QueueTab = {
   id: string
   projectId: string
   name: string
+  openHandsConversationId?: string | null
   createdAt: string
   updatedAt: string
 }
@@ -93,6 +98,9 @@ export type CreateQueueRequest = {
   generateCommit: boolean
   separateCommitSession: boolean
   permissionMode: PermissionMode
+  executionRunner?: ExecutionRunner
+  providerProfileId?: string | null
+  openHandsAlwaysApproveConfirmed?: boolean
   commitModel?: string | null
   commitModelEffort?: string | null
   commitModelSpeed?: string | null
@@ -110,6 +118,11 @@ export type QueueAttachment = {
 export type CodexRun = {
   id: string
   kind: RunKind
+  executionRunner?: ExecutionRunner
+  providerProfileId?: string | null
+  providerProfileName?: string | null
+  providerSource?: AiProviderSource | null
+  openHandsConversationId?: string | null
   model: string
   modelEffort?: string | null
   modelSpeed?: string | null
@@ -148,6 +161,12 @@ export type CodexRequest = {
   generateCommit: boolean
   separateCommitSession: boolean
   permissionMode: PermissionMode
+  executionRunner?: ExecutionRunner
+  providerProfileId?: string | null
+  providerProfileName?: string | null
+  providerSource?: AiProviderSource | null
+  queueWaitReason?: string | null
+  openHandsAlwaysApproveConfirmed?: boolean
   retryAfter?: string | null
   retryReason?: string | null
   availableModel?: string | null
@@ -176,6 +195,10 @@ export type Session = {
   startedAt?: string | null
   finishedAt?: string | null
   commitSha?: string | null
+  executionRunner?: ExecutionRunner
+  providerProfileName?: string | null
+  providerSource?: AiProviderSource | null
+  openHandsConversationId?: string | null
 }
 
 export type FileTreeEntry = {
@@ -254,9 +277,66 @@ export type ApiConfig = {
   models: ModelOption[]
 }
 
+export type AiProviderProfile = {
+  id: string
+  name: string
+  source: AiProviderSource
+  baseUrl: string
+  modelDiscoveryMode: ModelDiscoveryMode
+  apiKeyEnvironmentVariable?: string | null
+  enabled: boolean
+  maximumConcurrency: number
+  configuredContextWindow?: number | null
+  defaultModel?: string | null
+  lastHealthStatus: ProviderHealthStatus
+  lastHealthAt?: string | null
+  lastHealthError?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export type SaveAiProviderProfileRequest = {
+  name: string
+  source: AiProviderSource
+  baseUrl: string
+  modelDiscoveryMode: ModelDiscoveryMode
+  apiKeyEnvironmentVariable?: string | null
+  enabled: boolean
+  maximumConcurrency: number
+  configuredContextWindow?: number | null
+  defaultModel?: string | null
+}
+
+export type ProviderModel = {
+  id: string
+  name: string
+}
+
+export type ProviderModelsResponse = {
+  profileId: string
+  healthy: boolean
+  status: ProviderHealthStatus
+  error?: string | null
+  checkedAt: string
+  configuredContextWindow?: number | null
+  contextWarning?: string | null
+  models: ProviderModel[]
+}
+
 export type MachineTest = {
   success: boolean
   output: string
+}
+
+export type OpenHandsMachineTest = {
+  available: boolean
+  version?: string | null
+  requiresWsl: boolean
+  message: string
+  targetLocalAiChecked?: boolean
+  targetLocalAiReachable?: boolean | null
+  targetSelectedModelAvailable?: boolean | null
+  targetLocalAiMessage?: string | null
 }
 
 export type RateLimitWindow = {

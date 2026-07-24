@@ -7,6 +7,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
 {
     public DbSet<TargetMachine> Machines => Set<TargetMachine>();
     public DbSet<Project> Projects => Set<Project>();
+    public DbSet<AiProviderProfile> AiProviderProfiles => Set<AiProviderProfile>();
     public DbSet<QueueTab> QueueTabs => Set<QueueTab>();
     public DbSet<CodexRequest> Requests => Set<CodexRequest>();
     public DbSet<CodexRun> Runs => Set<CodexRun>();
@@ -30,10 +31,10 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.Name).HasMaxLength(160).IsRequired();
             entity.Property(x => x.Path).HasMaxLength(2048).IsRequired();
             entity.Property(x => x.CodexSessionId).HasMaxLength(80);
-            entity.Property(x => x.DefaultModel).HasMaxLength(120);
+            entity.Property(x => x.DefaultModel).HasMaxLength(256);
             entity.Property(x => x.DefaultModelEffort).HasMaxLength(32);
             entity.Property(x => x.DefaultModelSpeed).HasMaxLength(32);
-            entity.Property(x => x.DefaultCommitModel).HasMaxLength(120);
+            entity.Property(x => x.DefaultCommitModel).HasMaxLength(256);
             entity.Property(x => x.DefaultCommitModelEffort).HasMaxLength(32);
             entity.Property(x => x.DefaultCommitModelSpeed).HasMaxLength(32);
             entity.Property(x => x.DefaultGenerateCommit);
@@ -47,17 +48,34 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.HasIndex(x => new { x.MachineId, x.Name }).IsUnique();
         });
 
+        modelBuilder.Entity<AiProviderProfile>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(160).UseCollation("NOCASE").IsRequired();
+            entity.Property(x => x.Source).HasConversion<string>().HasMaxLength(24);
+            entity.Property(x => x.BaseUrl).HasMaxLength(2048).IsRequired();
+            entity.Property(x => x.ModelDiscoveryMode).HasConversion<string>().HasMaxLength(24);
+            entity.Property(x => x.ApiKeyEnvironmentVariable).HasMaxLength(160);
+            entity.Property(x => x.DefaultModel).HasMaxLength(256);
+            entity.Property(x => x.LastHealthStatus).HasConversion<string>().HasMaxLength(24);
+            entity.Property(x => x.LastHealthError).HasMaxLength(2048);
+            entity.HasIndex(x => x.Name).IsUnique();
+            entity.HasIndex(x => new { x.Source, x.BaseUrl });
+        });
+
         modelBuilder.Entity<CodexRequest>(entity =>
         {
+            entity.Property(x => x.ExecutionRunner).HasConversion<string>().HasMaxLength(32);
+            entity.Property(x => x.QueueWaitReason).HasMaxLength(512);
+            entity.Property(x => x.ExecutionProjectPath).HasMaxLength(2048);
             entity.Property(x => x.Prompt).IsRequired();
             entity.Property(x => x.AttachmentsJson);
-            entity.Property(x => x.Model).HasMaxLength(120).IsRequired();
+            entity.Property(x => x.Model).HasMaxLength(256).IsRequired();
             entity.Property(x => x.ModelEffort).HasMaxLength(32);
             entity.Property(x => x.ModelSpeed).HasMaxLength(32);
             entity.Property(x => x.QueueOrder);
             entity.Property(x => x.SeparateCommitSession);
             entity.Property(x => x.PermissionMode).HasConversion<string>().HasMaxLength(32);
-            entity.Property(x => x.CommitModel).HasMaxLength(120);
+            entity.Property(x => x.CommitModel).HasMaxLength(256);
             entity.Property(x => x.CommitModelEffort).HasMaxLength(32);
             entity.Property(x => x.CommitModelSpeed).HasMaxLength(32);
             entity.Property(x => x.Status).HasConversion<string>().HasMaxLength(32);
@@ -78,8 +96,13 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
                 .WithMany()
                 .HasForeignKey(x => x.MachineId)
                 .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(x => x.ProviderProfile)
+                .WithMany(x => x.Requests)
+                .HasForeignKey(x => x.ProviderProfileId)
+                .OnDelete(DeleteBehavior.Restrict);
             entity.HasIndex(x => new { x.ProjectId, x.CreatedAt });
             entity.HasIndex(x => new { x.ProjectId, x.QueueOrder });
+            entity.HasIndex(x => x.ProviderProfileId);
             entity.HasIndex(x => x.Status);
             entity.HasIndex(x => x.DeletedAt);
         });
@@ -88,6 +111,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         {
             entity.Property(x => x.Name).HasMaxLength(80).UseCollation("NOCASE").IsRequired();
             entity.Property(x => x.CodexSessionId).HasMaxLength(80);
+            entity.Property(x => x.OpenHandsConversationId).HasMaxLength(80);
             entity.Property(x => x.DeletedAt);
             entity.HasOne(x => x.Project)
                 .WithMany(x => x.QueueTabs)
@@ -102,11 +126,15 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         modelBuilder.Entity<CodexRun>(entity =>
         {
             entity.Property(x => x.Kind).HasConversion<string>().HasMaxLength(24);
+            entity.Property(x => x.ExecutionRunner).HasConversion<string>().HasMaxLength(32);
+            entity.Property(x => x.ProviderProfileName).HasMaxLength(160);
+            entity.Property(x => x.ProviderSource).HasConversion<string>().HasMaxLength(24);
             entity.Property(x => x.Status).HasConversion<string>().HasMaxLength(32);
-            entity.Property(x => x.Model).HasMaxLength(120).IsRequired();
+            entity.Property(x => x.Model).HasMaxLength(256).IsRequired();
             entity.Property(x => x.ModelEffort).HasMaxLength(32);
             entity.Property(x => x.ModelSpeed).HasMaxLength(32);
             entity.Property(x => x.CodexSessionId).HasMaxLength(80);
+            entity.Property(x => x.OpenHandsConversationId).HasMaxLength(80);
             entity.Property(x => x.CommandPreview).HasMaxLength(2048);
             entity.Property(x => x.RetryAfter);
             entity.Property(x => x.RetryReason).HasMaxLength(512);
@@ -116,6 +144,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
                 .HasForeignKey(x => x.RequestId)
                 .OnDelete(DeleteBehavior.Cascade);
             entity.HasIndex(x => new { x.RequestId, x.Kind });
+            entity.HasIndex(x => x.ProviderProfileId);
             entity.HasIndex(x => x.Status);
         });
     }
