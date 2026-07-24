@@ -8,8 +8,6 @@ namespace CodexQueue.Api.Endpoints;
 
 public static class ApiEndpoints
 {
-    private const string AutomaticModel = "codex-default";
-
     public static void MapCodexQueueApi(this WebApplication app)
     {
         var api = app.MapGroup("/api");
@@ -21,31 +19,9 @@ public static class ApiEndpoints
             var token = configuration["CQ_API_TOKEN"] ?? configuration["Security:ApiToken"];
             var configuredModels = configuration.GetSection("Codex:Models").Get<string[]>();
             var models = configuredModels is { Length: > 0 }
-                ? new[] { AutomaticModelOption }
-                    .Concat(configuredModels.Select(ParseModelOption).Where(x => !string.Equals(x.Model, AutomaticModel, StringComparison.OrdinalIgnoreCase)))
-                    .ToArray()
+                ? configuredModels.Select(ParseModelOption).ToArray()
                 : DefaultModels;
             return new ApiConfigDto(!string.IsNullOrWhiteSpace(token), models);
-        });
-
-        api.MapGet("/machines/{id:guid}/models", async (Guid id, AppDbContext db, ITargetCommandRunner runner, CancellationToken cancellationToken) =>
-        {
-            var machine = await db.Machines.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
-            if (machine is null)
-            {
-                return Results.NotFound();
-            }
-
-            try
-            {
-                var result = await runner.ReadModelsAsync(machine, cancellationToken);
-                var models = ParseModels(result.Output);
-                return Results.Ok(models.Length > 1 ? models : DefaultModels);
-            }
-            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or TimeoutException or IOException)
-            {
-                return Results.Ok(DefaultModels);
-            }
         });
 
         api.MapPost("/auth/verify", () => Results.Ok(new { ok = true }));
@@ -1193,95 +1169,6 @@ public static class ApiEndpoints
         return new RateLimitWindowDto(Math.Clamp(used, 0, 100), duration, resetsAt);
     }
 
-    private static ModelOptionDto[] ParseModels(string output)
-    {
-        var models = new List<ModelOptionDto> { AutomaticModelOption };
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { AutomaticModel };
-        foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Reverse())
-        {
-            try
-            {
-                using var document = JsonDocument.Parse(line);
-                var root = document.RootElement;
-                if (!root.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.Number || id.GetInt32() != 2
-                    || !root.TryGetProperty("result", out var result)
-                    || !result.TryGetProperty("data", out var data)
-                    || data.ValueKind != JsonValueKind.Array)
-                {
-                    continue;
-                }
-
-                foreach (var model in data.EnumerateArray())
-                {
-                    if (model.ValueKind != JsonValueKind.Object
-                        || model.TryGetProperty("hidden", out var hidden) && hidden.ValueKind == JsonValueKind.True)
-                    {
-                        continue;
-                    }
-
-                    var modelId = GetStringProperty(model, "model") ?? GetStringProperty(model, "id");
-                    if (string.IsNullOrWhiteSpace(modelId) || !seen.Add(modelId))
-                    {
-                        continue;
-                    }
-
-                    var efforts = model.TryGetProperty("supportedReasoningEfforts", out var effortValues)
-                        ? ParseReasoningEfforts(effortValues)
-                        : [];
-                    var defaultEffort = GetStringProperty(model, "defaultReasoningEffort");
-                    models.Add(new ModelOptionDto(
-                        GetStringProperty(model, "displayName") ?? modelId,
-                        modelId,
-                        SupportsPriority(model),
-                        efforts.Length == 0 ? null : efforts,
-                        defaultEffort));
-                }
-
-                return models.ToArray();
-            }
-            catch (JsonException)
-            {
-                // The process preview and stderr may be mixed into the captured output.
-            }
-        }
-
-        return [AutomaticModelOption];
-    }
-
-    private static string? GetStringProperty(JsonElement element, string name) =>
-        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
-            ? value.GetString()
-            : null;
-
-    private static string[] ParseReasoningEfforts(JsonElement values)
-    {
-        if (values.ValueKind != JsonValueKind.Array)
-        {
-            return [];
-        }
-
-        return values.EnumerateArray()
-            .Select(value => value.ValueKind == JsonValueKind.String
-                ? value.GetString()
-                : value.ValueKind == JsonValueKind.Object ? GetStringProperty(value, "reasoningEffort") : null)
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Select(value => value!)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-    }
-
-    private static bool SupportsPriority(JsonElement model)
-    {
-        if (!model.TryGetProperty("serviceTiers", out var tiers) || tiers.ValueKind != JsonValueKind.Array)
-        {
-            return false;
-        }
-
-        return tiers.EnumerateArray().Any(tier =>
-            tier.ValueKind == JsonValueKind.String && string.Equals(tier.GetString(), "priority", StringComparison.OrdinalIgnoreCase)
-            || tier.ValueKind == JsonValueKind.Object && string.Equals(GetStringProperty(tier, "id"), "priority", StringComparison.OrdinalIgnoreCase));
-    }
-
     private static void Apply(SaveMachineRequest input, TargetMachine machine)
     {
         machine.Name = input.Name.Trim();
@@ -1329,7 +1216,7 @@ public static class ApiEndpoints
             return "xhigh";
         }
 
-        return normalized is "none" or "minimal" or "low" or "medium" or "high" or "xhigh" or "max" or "ultra" ? normalized : null;
+        return normalized is "low" or "medium" or "high" or "xhigh" or "ultra" ? normalized : null;
     }
 
     private static bool SupportsUltraEffort(string? model) =>
@@ -1674,8 +1561,15 @@ public static class ApiEndpoints
         return new ModelOptionDto(value, value, false);
     }
 
-    private static readonly ModelOptionDto AutomaticModelOption = new("Codex default (automatic)", AutomaticModel, false);
-
-    private static readonly ModelOptionDto[] DefaultModels = [AutomaticModelOption];
+    private static readonly ModelOptionDto[] DefaultModels =
+    {
+        new("GPT-5.6 Sol", "gpt-5.6-sol", true),
+        new("GPT-5.6 Terra", "gpt-5.6-terra", true),
+        new("GPT-5.6 Luna", "gpt-5.6-luna", true),
+        new("GPT-5.5", "gpt-5.5", true),
+        new("GPT-5.4", "gpt-5.4", true),
+        new("GPT-5.4 Mini", "gpt-5.4-mini", true),
+        new("GPT-5.3 Codex Spark", "gpt-5.3-codex-spark", false)
+    };
 
 }

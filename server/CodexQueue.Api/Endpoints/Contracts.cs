@@ -200,12 +200,7 @@ public sealed record SuggestGitCommitMessageRequest(string Model, string? ModelE
 
 public sealed record SuggestGitCommitMessageDto(string Message, string Output);
 
-public sealed record ModelOptionDto(
-    string Label,
-    string Model,
-    bool SupportsPriority,
-    IReadOnlyList<string>? SupportedEfforts = null,
-    string? DefaultEffort = null);
+public sealed record ModelOptionDto(string Label, string Model, bool SupportsPriority);
 
 public sealed record ApiConfigDto(bool RequiresToken, IReadOnlyList<ModelOptionDto> Models);
 

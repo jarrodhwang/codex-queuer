@@ -92,8 +92,6 @@ Codex runs over Windows SSH use `danger-full-access` because both native Windows
 - Separate commit session means exactly that: the follow-up commit prompt runs in a different Codex session and cannot see the earlier request chat unless you disable separate commit sessions.
 - Deleting an inactive named tab retires its saved context and keeps its request records out of the base view. Tabs with active requests must be completed, cancelled, or cleared first.
 
-Model selection is refreshed from each target machine's Codex `app-server` model catalog. The picker includes a `Codex default (automatic)` option that omits `-m` so the installed Codex CLI can choose its current default model. If catalog discovery is unavailable, that automatic option remains usable and custom model IDs are still accepted.
-
 ## Security Notes
 
 - Set `CQ_API_TOKEN` in `.env` for any non-private deployment.
