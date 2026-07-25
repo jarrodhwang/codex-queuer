@@ -322,6 +322,42 @@ public sealed class OpenHandsCommandRunnerTests
     }
 
     [Fact]
+    public void ResolveTargetLocalAiBaseUrl_UsesLoopbackOnDockerHostSshTarget()
+    {
+        var machine = new TargetMachine
+        {
+            Kind = MachineKind.Ssh,
+            Host = "host.docker.internal",
+        };
+
+        var result = OpenHandsCommandRunner.ResolveTargetLocalAiBaseUrl(
+            machine,
+            "http://host.docker.internal:11434/v1");
+
+        Assert.Equal("http://127.0.0.1:11434/v1", result);
+    }
+
+    [Theory]
+    [InlineData(MachineKind.Local, "host.docker.internal", "http://host.docker.internal:11434/v1")]
+    [InlineData(MachineKind.Ssh, "devbox.internal", "http://host.docker.internal:11434/v1")]
+    [InlineData(MachineKind.Ssh, "host.docker.internal", "http://ollama.internal:11434/v1")]
+    public void ResolveTargetLocalAiBaseUrl_PreservesAddressesOutsideDockerHostCase(
+        MachineKind kind,
+        string machineHost,
+        string baseUrl)
+    {
+        var machine = new TargetMachine
+        {
+            Kind = kind,
+            Host = machineHost,
+        };
+
+        var result = OpenHandsCommandRunner.ResolveTargetLocalAiBaseUrl(machine, baseUrl);
+
+        Assert.Equal(baseUrl, result);
+    }
+
+    [Fact]
     public void ParseLocalAiProbeResponse_ReportsReachabilityAndModelAvailabilitySeparately()
     {
         const string response =

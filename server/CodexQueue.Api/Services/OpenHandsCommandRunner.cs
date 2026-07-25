@@ -203,9 +203,10 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         }
 
         ValidateExecutionInput(machine, projectPath, model, baseUrl, apiKey);
+        var targetLocalAiBaseUrl = ResolveTargetLocalAiBaseUrl(machine, baseUrl);
         var localAiCheck = await ProbeLocalAiAsync(
             machine,
-            baseUrl,
+            targetLocalAiBaseUrl,
             model,
             cancellationToken);
         EnsureLocalAiPreflightPassed(localAiCheck);
@@ -218,7 +219,7 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 projectPath,
                 runToken,
                 model,
-                baseUrl,
+                targetLocalAiBaseUrl,
                 apiKey,
                 normalizedConversationId,
                 prompt,
@@ -230,7 +231,7 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 projectPath,
                 runToken,
                 model,
-                baseUrl,
+                targetLocalAiBaseUrl,
                 apiKey,
                 normalizedConversationId,
                 prompt,
@@ -385,6 +386,7 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         string? selectedModel,
         CancellationToken cancellationToken)
     {
+        var targetLocalAiBaseUrl = ResolveTargetLocalAiBaseUrl(machine, baseUrl);
         var normalizedModel = string.IsNullOrWhiteSpace(selectedModel)
             ? null
             : AiProviderService.QualifyModel(AiProviderSource.Local, selectedModel);
@@ -392,12 +394,12 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         {
             return await _options.LocalAiProbeOverride(
                 machine,
-                baseUrl,
+                targetLocalAiBaseUrl,
                 normalizedModel,
                 cancellationToken);
         }
 
-        var command = BuildLocalAiProbeCommand(baseUrl);
+        var command = BuildLocalAiProbeCommand(targetLocalAiBaseUrl);
 
         try
         {
@@ -450,6 +452,36 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 null,
                 "Codex Queue could not run the Local AI server check on the selected machine.");
         }
+    }
+
+    public static string ResolveTargetLocalAiBaseUrl(
+        TargetMachine machine,
+        string baseUrl)
+    {
+        ArgumentNullException.ThrowIfNull(machine);
+
+        if (machine.Kind != MachineKind.Ssh
+            || !string.Equals(
+                machine.Host?.Trim(),
+                "host.docker.internal",
+                StringComparison.OrdinalIgnoreCase)
+            || !Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri)
+            || !string.Equals(
+                uri.Host,
+                "host.docker.internal",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return baseUrl;
+        }
+
+        // host.docker.internal is injected into the API container so it can reach
+        // services on the Docker host. An SSH command running on that host does
+        // not inherit Docker's special DNS entry, so use the equivalent loopback
+        // address for both the target-side probe and OpenHands itself.
+        return new UriBuilder(uri)
+        {
+            Host = "127.0.0.1",
+        }.Uri.AbsoluteUri.TrimEnd('/');
     }
 
     public static string BuildLocalAiProbeCommand(string baseUrl)
