@@ -16,7 +16,8 @@ public sealed record QueueAgentRunResult(
     string CommandPreview,
     string? CodexSessionId = null,
     string? OpenHandsConversationId = null,
-    string? RawDiagnosticOutput = null)
+    string? RawDiagnosticOutput = null,
+    bool DiscardOpenHandsConversation = false)
 {
     public bool Success => ExitCode == 0;
 }
@@ -146,6 +147,7 @@ public sealed class OpenHandsQueueAgentRunner(
             result.Output,
             result.CommandPreview,
             OpenHandsConversationId: result.ConversationId,
-            RawDiagnosticOutput: result.RawDiagnosticOutput);
+            RawDiagnosticOutput: result.RawDiagnosticOutput,
+            DiscardOpenHandsConversation: result.DiscardConversation);
     }
 }

@@ -1142,6 +1142,7 @@ public sealed class OpenHandsCommandRunnerTests
         Assert.True(result.LifecycleConversationIdReported);
         Assert.False(result.ReportedAgentMessage);
         Assert.False(result.ReportedAgentActivity);
+        Assert.True(result.DiscardConversation);
         Assert.DoesNotContain("Agent finished", result.Output, StringComparison.Ordinal);
         Assert.Contains("Agent finished", result.RawDiagnosticOutput, StringComparison.Ordinal);
         Assert.Contains(
@@ -1205,6 +1206,7 @@ public sealed class OpenHandsCommandRunnerTests
         Assert.False(result.ReportedAgentMessage);
         Assert.True(result.ReportedAgentActivity);
         Assert.True(result.LifecycleConversationIdReported);
+        Assert.False(result.DiscardConversation);
     }
 
     [Fact]
@@ -1230,6 +1232,7 @@ public sealed class OpenHandsCommandRunnerTests
         Assert.True(result.LifecycleConversationIdReported);
         Assert.False(result.ReportedAgentMessage);
         Assert.False(result.ReportedAgentActivity);
+        Assert.True(result.DiscardConversation);
         Assert.Contains(
             "OpenHandsNoAgentActivity",
             result.Output,
@@ -1379,6 +1382,7 @@ public sealed class OpenHandsCommandRunnerTests
             """
             #!/bin/sh
             awk 'BEGIN { printf "{\"kind\":\"ObservationEvent\",\"content\":\""; for (i = 0; i < 300000; i++) printf "x"; print "\"}" }'
+            printf '%s\n' '{"kind":"MessageEvent","source":"agent","message":"Task complete"}'
             printf '%s\n' 'Conversation ID: 0123456789abcdef0123456789abcdef'
             exit 0
             """);
@@ -1422,6 +1426,7 @@ public sealed class OpenHandsCommandRunnerTests
             """
             #!/bin/sh
             printf '%s\n' "$@" > "$PWD/openhands-arguments.txt"
+            printf '%s\n' '{"kind":"MessageEvent","source":"agent","message":"Continued task complete"}'
             printf '%s\n' 'Conversation ID: 0123456789abcdef0123456789abcdef'
             exit 0
             """);
@@ -1459,6 +1464,8 @@ public sealed class OpenHandsCommandRunnerTests
             var arguments = await File.ReadAllLinesAsync(argumentsPath);
             var resumeIndex = Array.IndexOf(arguments, "--resume");
             Assert.True(result.Success);
+            Assert.True(result.ReportedAgentActivity);
+            Assert.False(result.DiscardConversation);
             Assert.Equal(normalizedId, result.ConversationId);
             Assert.True(resumeIndex >= 0);
             Assert.Equal(normalizedId, arguments[resumeIndex + 1]);
@@ -1471,6 +1478,36 @@ public sealed class OpenHandsCommandRunnerTests
                 priorConversationsDirectory);
             Directory.Delete(testRoot, recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task RunAsync_DoesNotUseStaleFinishedStateForNoOpContinuation()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string conversationId = "0123456789abcdef0123456789abcdef";
+        var result = await RunWithPersistedStateAsync(
+            "finished",
+            """
+            #!/bin/sh
+            printf '%s\n' 'Agent finished'
+            printf '%s\n' 'Conversation ID: 0123456789abcdef0123456789abcdef'
+            exit 0
+            """,
+            conversationId);
+
+        Assert.False(result.Success);
+        Assert.True(result.ReportedError);
+        Assert.False(result.ReportedAgentActivity);
+        Assert.True(result.DiscardConversation);
+        Assert.Equal(conversationId, result.ConversationId);
+        Assert.Contains(
+            OpenHandsCommandRunner.NoAgentActivityErrorCode,
+            result.Output,
+            StringComparison.Ordinal);
     }
 
     [Fact]

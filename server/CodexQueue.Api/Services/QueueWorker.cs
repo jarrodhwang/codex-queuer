@@ -183,7 +183,12 @@ public sealed class QueueWorker(
             return true;
         }
 
-        ResumeRequest(request);
+        var clearNoActivityConversation =
+            await ShouldClearNoActivityOpenHandsConversationAsync(
+                db,
+                request,
+                cancellationToken);
+        ResumeRequest(request, clearNoActivityConversation);
         if (request.Status == QueueStatus.Queued)
         {
             var projectPriorityRequests = await db.Requests
@@ -1216,7 +1221,9 @@ public sealed class QueueWorker(
             .ThenByDescending(x => x.Id)
             .FirstOrDefault();
 
-    private static void ResumeRequest(CodexRequest request)
+    private static void ResumeRequest(
+        CodexRequest request,
+        bool clearNoActivityOpenHandsConversation)
     {
         var requestRun = GetLatestRunOfKind(request.Runs, RunKind.Request);
         var commitRun = GetLatestRunOfKind(request.Runs, RunKind.Commit);
@@ -1239,6 +1246,11 @@ public sealed class QueueWorker(
             request.Runs.Add(requestRun);
         }
 
+        if (clearNoActivityOpenHandsConversation && request.QueueTab is not null)
+        {
+            request.QueueTab.OpenHandsConversationId = null;
+            request.QueueTab.UpdatedAt = DateTimeOffset.UtcNow;
+        }
         ClearRequestRetryState(request);
 
         if (requestRun.Status != QueueStatus.Succeeded)
@@ -1278,6 +1290,56 @@ public sealed class QueueWorker(
         request.Status = QueueStatus.Queued;
         request.FinishedAt = null;
         request.Error = null;
+    }
+
+    private static async Task<bool> ShouldClearNoActivityOpenHandsConversationAsync(
+        AppDbContext db,
+        CodexRequest request,
+        CancellationToken cancellationToken)
+    {
+        var requestRun = GetLatestRunOfKind(request.Runs, RunKind.Request);
+        if (request.ExecutionRunner != ExecutionRunner.OpenHandsCli
+            || requestRun?.Status != QueueStatus.Failed
+            || request.QueueTab?.OpenHandsConversationId is not { } tabConversationId
+            || !string.Equals(
+                requestRun.OpenHandsConversationId,
+                tabConversationId,
+                StringComparison.OrdinalIgnoreCase)
+            || !ContainsOpenHandsErrorCode(
+                requestRun.Output,
+                OpenHandsCommandRunner.NoAgentActivityErrorCode))
+        {
+            return false;
+        }
+
+        var establishedConversationExists =
+            await HasEstablishedOpenHandsConversationAsync(
+                db,
+                request.QueueTabId,
+                tabConversationId,
+                requestRun.Id,
+                cancellationToken);
+        return !establishedConversationExists;
+    }
+
+    private static async Task<bool> HasEstablishedOpenHandsConversationAsync(
+        AppDbContext db,
+        Guid? queueTabId,
+        string conversationId,
+        Guid excludedRunId,
+        CancellationToken cancellationToken)
+    {
+        var priorOutputs = await (
+                from priorRun in db.Runs.AsNoTracking()
+                join priorRequest in db.Requests.AsNoTracking()
+                    on priorRun.RequestId equals priorRequest.Id
+                where priorRun.Id != excludedRunId
+                      && priorRequest.QueueTabId == queueTabId
+                      && priorRun.ExecutionRunner == ExecutionRunner.OpenHandsCli
+                      && priorRun.OpenHandsConversationId == conversationId
+                select priorRun.Output)
+            .ToArrayAsync(cancellationToken);
+        return priorOutputs.Any(ContainsOpenHandsAgentActivity);
     }
 
     private static CodexRun CreateCommitRun(CodexRequest request) =>
@@ -1474,12 +1536,35 @@ public sealed class QueueWorker(
             var conversationId = result.OpenHandsConversationId ?? run.OpenHandsConversationId;
             run.OpenHandsConversationId = conversationId;
             run.RawDiagnosticOutput = TrimOutput(result.RawDiagnosticOutput ?? run.RawDiagnosticOutput);
-            if (kind == RunKind.Request
-                && request.QueueTab is not null
-                && !string.IsNullOrWhiteSpace(conversationId))
+            var establishedConversationExists =
+                result.DiscardOpenHandsConversation
+                && !string.IsNullOrWhiteSpace(conversationId)
+                && await HasEstablishedOpenHandsConversationAsync(
+                    db,
+                    request.QueueTabId,
+                    conversationId,
+                    run.Id,
+                    cancellationToken);
+            if (kind == RunKind.Request && request.QueueTab is not null)
             {
-                request.QueueTab.OpenHandsConversationId = conversationId;
-                request.QueueTab.UpdatedAt = DateTimeOffset.UtcNow;
+                if (!result.Success && result.DiscardOpenHandsConversation)
+                {
+                    if (!establishedConversationExists
+                        && (request.QueueTab.OpenHandsConversationId is null
+                        || string.Equals(
+                            request.QueueTab.OpenHandsConversationId,
+                            conversationId,
+                            StringComparison.OrdinalIgnoreCase)))
+                    {
+                        request.QueueTab.OpenHandsConversationId = null;
+                        request.QueueTab.UpdatedAt = DateTimeOffset.UtcNow;
+                    }
+                }
+                else if (!string.IsNullOrWhiteSpace(conversationId))
+                {
+                    request.QueueTab.OpenHandsConversationId = conversationId;
+                    request.QueueTab.UpdatedAt = DateTimeOffset.UtcNow;
+                }
             }
         }
         run.ExitCode = result.ExitCode;
@@ -1576,6 +1661,99 @@ public sealed class QueueWorker(
         }
 
         return plainTextFallback ?? "OpenHands reported an execution error.";
+    }
+
+    private static bool ContainsOpenHandsErrorCode(string output, string expectedCode)
+    {
+        foreach (var line in output.Split(
+                     '\n',
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(line);
+                var root = document.RootElement;
+                if (string.Equals(
+                        ReadString(root, "kind"),
+                        "ConversationErrorEvent",
+                        StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(
+                        ReadString(root, "code"),
+                        expectedCode,
+                        StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+            catch (JsonException)
+            {
+                // Only trusted structured runner events can invalidate a
+                // conversation; never interpret arbitrary tool output as state.
+            }
+        }
+
+        return false;
+    }
+
+    private static bool ContainsOpenHandsAgentActivity(string output)
+    {
+        foreach (var line in output.Split(
+                     '\n',
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(line);
+                var root = document.RootElement;
+                var kind = ReadString(root, "kind")
+                    ?? ReadString(root, "event_type")
+                    ?? ReadString(root, "type");
+                var source = ReadString(root, "source")
+                    ?? ReadString(root, "sender");
+                if ((kind is "ActionEvent" or "action")
+                    && (string.IsNullOrWhiteSpace(source)
+                        || source.Equals("agent", StringComparison.OrdinalIgnoreCase)
+                        || source.Equals("assistant", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return true;
+                }
+
+                var role = ReadString(root, "role");
+                if ((kind is "MessageEvent" or "message")
+                    && (source?.Equals("agent", StringComparison.OrdinalIgnoreCase) == true
+                        || source?.Equals("assistant", StringComparison.OrdinalIgnoreCase) == true
+                        || role?.Equals("assistant", StringComparison.OrdinalIgnoreCase) == true)
+                    && (HasNonEmptyJsonProperty(root, "message")
+                        || HasNonEmptyJsonProperty(root, "content")))
+                {
+                    return true;
+                }
+            }
+            catch (JsonException)
+            {
+                // Prior activity is established only by safe structured events.
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasNonEmptyJsonProperty(
+        JsonElement value,
+        string propertyName)
+    {
+        if (!value.TryGetProperty(propertyName, out var property))
+        {
+            return false;
+        }
+
+        return property.ValueKind switch
+        {
+            JsonValueKind.String => !string.IsNullOrWhiteSpace(property.GetString()),
+            JsonValueKind.Array => property.GetArrayLength() > 0,
+            JsonValueKind.Object => property.EnumerateObject().Any(),
+            _ => false,
+        };
     }
 
     private sealed record UsageLimitMetadata(

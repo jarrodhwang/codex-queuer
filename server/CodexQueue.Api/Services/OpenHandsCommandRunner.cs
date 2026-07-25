@@ -40,7 +40,8 @@ public sealed record OpenHandsCommandResult(
     bool LifecycleConversationIdReported = false,
     bool ReportedAgentMessage = false,
     bool LifecycleRunCompleted = false,
-    bool ReportedAgentActivity = false)
+    bool ReportedAgentActivity = false,
+    bool DiscardConversation = false)
 {
     public bool Success => ExitCode == 0 && !ReportedError;
 }
@@ -77,6 +78,8 @@ public sealed record OpenHandsCommandOptions(
 
 public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
 {
+    public const string NoAgentActivityErrorCode = "OpenHandsNoAgentActivity";
+
     private const int MaximumCapturedCharacters = 512_000;
     private const int MaximumOutputLineCharacters = 256_000;
     private const int MaximumConversationStateBytes = 2 * 1024 * 1024;
@@ -878,7 +881,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             return await VerifyFinalConversationStateAsync(
                 result,
                 id => ReadLocalConversationStateAsync(environment, id, cancellationToken),
-                onOutput);
+                onOutput,
+                isContinuation: conversationId is not null);
         }
         finally
         {
@@ -1025,7 +1029,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                     projectRoot,
                     id,
                     cancellationToken),
-                onOutput);
+                onOutput,
+                isContinuation: conversationId is not null);
         }
         finally
         {
@@ -1398,7 +1403,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
     private async Task<OpenHandsCommandResult> VerifyFinalConversationStateAsync(
         OpenHandsCommandResult result,
         Func<string, Task<ConversationStateInspection>> inspect,
-        Func<string, Task> onOutput)
+        Func<string, Task> onOutput,
+        bool isContinuation)
     {
         if (result.ExitCode != 0 || result.ReportedError)
         {
@@ -1435,7 +1441,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         if (string.Equals(
                 inspection.ExecutionStatus,
                 "finished",
-                StringComparison.OrdinalIgnoreCase))
+                StringComparison.OrdinalIgnoreCase)
+            && result.ReportedAgentActivity)
         {
             return result with { ConversationId = conversationId, ReportedFinished = true };
         }
@@ -1459,7 +1466,7 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         // A future compatible CLI may emit a typed FINISHED state without using
         // today's local persistence layout. Prefer that explicit event over a
         // filesystem-layout assumption.
-        if (result.ReportedFinished)
+        if (result.ReportedFinished && result.ReportedAgentActivity)
         {
             return result with { ConversationId = conversationId };
         }
@@ -1494,14 +1501,27 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             };
         }
 
-        if (result.LifecycleConversationIdReported
-            && lifecycleFallbackStatusIsCompatible)
+        var noCurrentTurnActivity = result.LifecycleConversationIdReported
+            && !result.ReportedAgentActivity
+            && (lifecycleFallbackStatusIsCompatible
+                || result.ReportedFinished
+                || string.Equals(
+                    inspection.ExecutionStatus,
+                    "finished",
+                    StringComparison.OrdinalIgnoreCase));
+        if (noCurrentTurnActivity)
         {
-            return await WithReportedErrorAsync(
+            var recovery = isContinuation
+                ? "Resume will replace this conversation unless earlier verified agent activity makes it a valid continuation."
+                : "Resume will start a fresh conversation.";
+            var failedResult = await WithReportedErrorAsync(
                 result with { ConversationId = conversationId },
-                "OpenHandsNoAgentActivity",
-                "OpenHands exited without processing the task. It reported a conversation ID but no agent message, action, or tool request. The task was not marked successful; run the OpenHands machine check and verify headless execution on this machine before retrying.",
+                NoAgentActivityErrorCode,
+                "OpenHands exited without processing the task. It reported a conversation ID but no agent message, action, or tool request. "
+                + recovery
+                + " Run the OpenHands machine check and verify that the selected model server provides at least a 22,000-token context window (32,768 or more is recommended) before retrying.",
                 onOutput);
+            return failedResult with { DiscardConversation = true };
         }
 
         return await WithReportedErrorAsync(
