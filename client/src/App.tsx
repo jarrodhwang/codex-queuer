@@ -4413,12 +4413,10 @@ function RequestCard({
           <div className="request-title-row">
             <div className="request-title-stack">
               <span className="request-title truncate" title={request.prompt}>{requestDisplayName(request)}</span>
-              <RunnerChips
+              <RequestExecutionChips
                 executionRunner={request.executionRunner}
                 providerSource={request.providerSource}
                 providerProfileName={request.providerProfileName}
-              />
-              <ModelChips
                 model={request.model}
                 effort={request.modelEffort}
                 speed={request.modelSpeed}
@@ -5271,12 +5269,10 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
             <div className="request-body-header">
               <div className="section-kicker">Request body</div>
               <div className="request-runner-metadata">
-                <RunnerChips
+                <RequestExecutionChips
                   executionRunner={request.executionRunner}
                   providerSource={request.providerSource}
                   providerProfileName={request.providerProfileName}
-                />
-                <ModelChips
                   model={request.model}
                   effort={request.modelEffort}
                   speed={request.modelSpeed}
@@ -5318,12 +5314,10 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
               <div className="run-detail-head">
                 <div className="run-title-stack">
                   <strong>{run.kind}</strong>
-                  <RunnerChips
+                  <RequestExecutionChips
                     executionRunner={run.executionRunner ?? request.executionRunner}
                     providerSource={run.providerSource ?? request.providerSource}
                     providerProfileName={run.providerProfileName ?? request.providerProfileName}
-                  />
-                  <ModelChips
                     model={run.model}
                     effort={run.modelEffort}
                     speed={run.modelSpeed}
@@ -5373,12 +5367,10 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
             <div className="pending-run-row">
               <div className="run-title-stack">
                 <strong>Request</strong>
-                <RunnerChips
+                <RequestExecutionChips
                   executionRunner={request.executionRunner}
                   providerSource={request.providerSource}
                   providerProfileName={request.providerProfileName}
-                />
-                <ModelChips
                   model={request.model}
                   effort={request.modelEffort}
                   speed={request.modelSpeed}
@@ -5548,12 +5540,10 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
                 <div><dt>Elapsed</dt><dd>{elapsed ?? 'Not started'}</dd></div>
                 <div><dt>{finishedAt ? 'Finished' : 'Started'}</dt><dd>{formatDate(finishedAt ?? request.startedAt ?? request.createdAt)}</dd></div>
               </dl>
-              <RunnerChips
+              <RequestExecutionChips
                 executionRunner={request.executionRunner}
                 providerSource={request.providerSource}
                 providerProfileName={request.providerProfileName}
-              />
-              <ModelChips
                 model={request.model}
                 effort={request.modelEffort}
                 speed={request.modelSpeed}
@@ -5963,12 +5953,10 @@ function RequestHistory({
                 <div className="truncate">
                   <div className="project-name truncate" title={request.prompt}>{requestDisplayName(request)}</div>
                   <div className="history-metadata">
-                    <RunnerChips
+                    <RequestExecutionChips
                       executionRunner={request.executionRunner}
                       providerSource={request.providerSource}
                       providerProfileName={request.providerProfileName}
-                    />
-                    <ModelChips
                       model={request.model}
                       effort={request.modelEffort}
                       speed={request.modelSpeed}
@@ -6929,30 +6917,51 @@ function providerSourceLabel(source?: AiProviderSource | null) {
   return null
 }
 
-function RunnerChips({
+function RequestExecutionChips({
   executionRunner,
   providerSource,
   providerProfileName,
+  model,
+  effort,
+  speed,
+  showTuning = true,
 }: {
   executionRunner?: ExecutionRunner
   providerSource?: AiProviderSource | null
   providerProfileName?: string | null
+  model: string
+  effort?: string | null
+  speed?: string | null
+  showTuning?: boolean
 }) {
   const runner = executionRunner ?? 'CodexCli'
-  const sourceLabel = providerSourceLabel(providerSource)
+  const isLocalRunner = runner === 'OpenHandsCli' && providerSource === 'Local'
+  const sourceLabel = isLocalRunner ? 'Local' : providerSourceLabel(providerSource)
+  const profileName = localProfileChipLabel(providerSource, providerProfileName)
 
   return (
-    <div className="runner-chip-row" aria-label="Execution runner">
-      <span className={`model-chip runner-chip runner-chip--${runner === 'OpenHandsCli' ? 'openhands' : 'codex'}`}>
-        {runner === 'OpenHandsCli' ? 'OpenHands CLI' : 'Codex CLI'}
-      </span>
+    <div className="request-execution-chip-row" aria-label="Selected execution and model">
+      {!isLocalRunner && (
+        <span className={`model-chip runner-chip runner-chip--${runner === 'OpenHandsCli' ? 'openhands' : 'codex'}`}>
+          {runner === 'OpenHandsCli' ? 'OpenHands CLI' : 'Codex CLI'}
+        </span>
+      )}
       {sourceLabel && <span className="model-chip runner-chip runner-chip--source">{sourceLabel}</span>}
-      {providerProfileName && <span className="model-chip runner-chip runner-chip--profile">{providerProfileName}</span>}
+      {profileName && <span className="model-chip runner-chip runner-chip--profile">{profileName}</span>}
+      <ModelChipItems model={model} effort={effort} speed={speed} showTuning={showTuning} />
     </div>
   )
 }
 
-function ModelChips({
+function localProfileChipLabel(source?: AiProviderSource | null, profileName?: string | null) {
+  const normalizedName = profileName?.trim()
+  if (!normalizedName) return null
+  return source === 'Local' && normalizedName.toLocaleLowerCase() === 'local ollama'
+    ? 'Ollama'
+    : normalizedName
+}
+
+function ModelChipItems({
   model,
   effort,
   speed,
@@ -6973,10 +6982,28 @@ function ModelChips({
   const normalizedSpeed = speed === 'priority' ? 'x1.5' : speed || 'normal'
 
   return (
-    <div className="model-chip-row" aria-label="Selected model settings">
+    <>
       <span className="model-chip model-chip--model">{showTuning ? model : localModelDisplayName(model)}</span>
       {showTuning && effort && <span className={`model-chip model-chip--effort model-chip--effort-${effort}`}>{effortLabels[effort] ?? effort}</span>}
       {showTuning && <span className={`model-chip model-chip--speed ${speed === 'priority' ? 'model-chip--speed-priority' : ''}`}>{normalizedSpeed}</span>}
+    </>
+  )
+}
+
+function ModelChips({
+  model,
+  effort,
+  speed,
+  showTuning = true,
+}: {
+  model: string
+  effort?: string | null
+  speed?: string | null
+  showTuning?: boolean
+}) {
+  return (
+    <div className="model-chip-row" aria-label="Selected model settings">
+      <ModelChipItems model={model} effort={effort} speed={speed} showTuning={showTuning} />
     </div>
   )
 }
