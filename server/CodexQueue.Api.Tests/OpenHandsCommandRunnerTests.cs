@@ -869,8 +869,12 @@ public sealed class OpenHandsCommandRunnerTests
         AssertSafeJson(action, "ActionEvent", "echo [REDACTED]");
         AssertSafeJson(observation, "ObservationEvent", "tests passed");
         AssertSafeJson(message, "MessageEvent", "Visible final answer");
+        Assert.True(action.ReportedAgentActivity);
+        Assert.False(observation.ReportedAgentActivity);
         Assert.True(message.ReportedAgentMessage);
+        Assert.True(message.ReportedAgentActivity);
         Assert.False(hiddenOnlyMessage.ReportedAgentMessage);
+        Assert.False(hiddenOnlyMessage.ReportedAgentActivity);
 
         var combined = action.Content + observation.Content + message.Content;
         Assert.DoesNotContain(apiKey, combined, StringComparison.Ordinal);
@@ -976,8 +980,10 @@ public sealed class OpenHandsCommandRunnerTests
 
         AssertSafeJson(message, "MessageEvent", "Task complete");
         Assert.True(message.ReportedAgentMessage);
+        Assert.True(message.ReportedAgentActivity);
         AssertSafeJson(finishAction, "ActionEvent", "finish");
         Assert.True(finishAction.ReportedFinished);
+        Assert.True(finishAction.ReportedAgentActivity);
         AssertSafeJson(finishedState, "ConversationStateUpdateEvent", "finished");
         Assert.True(finishedState.ReportedFinished);
         AssertSafeJson(
@@ -1104,6 +1110,7 @@ public sealed class OpenHandsCommandRunnerTests
         Assert.True(result.ReportedFinished);
         Assert.True(result.LifecycleConversationIdReported);
         Assert.True(result.ReportedAgentMessage);
+        Assert.True(result.ReportedAgentActivity);
         Assert.DoesNotContain(
             "ConversationFinalStateUnverified",
             result.Output,
@@ -1111,7 +1118,7 @@ public sealed class OpenHandsCommandRunnerTests
     }
 
     [Fact]
-    public async Task RunAsync_AcceptsCliLifecycleCompletionWhenJsonOmitsFinalState()
+    public async Task RunAsync_RejectsCliLifecycleCompletionWithoutAgentActivity()
     {
         if (OperatingSystem.IsWindows())
         {
@@ -1128,15 +1135,17 @@ public sealed class OpenHandsCommandRunnerTests
             exit 0
             """);
 
-        Assert.True(result.Success);
-        Assert.True(result.ReportedFinished);
+        Assert.False(result.Success);
+        Assert.True(result.ReportedError);
+        Assert.False(result.ReportedFinished);
         Assert.True(result.LifecycleRunCompleted);
         Assert.True(result.LifecycleConversationIdReported);
         Assert.False(result.ReportedAgentMessage);
+        Assert.False(result.ReportedAgentActivity);
         Assert.DoesNotContain("Agent finished", result.Output, StringComparison.Ordinal);
         Assert.Contains("Agent finished", result.RawDiagnosticOutput, StringComparison.Ordinal);
-        Assert.DoesNotContain(
-            "ConversationFinalStateUnverified",
+        Assert.Contains(
+            "OpenHandsNoAgentActivity",
             result.Output,
             StringComparison.Ordinal);
     }
@@ -1194,11 +1203,12 @@ public sealed class OpenHandsCommandRunnerTests
         Assert.True(result.Success);
         Assert.True(result.ReportedFinished);
         Assert.False(result.ReportedAgentMessage);
+        Assert.True(result.ReportedAgentActivity);
         Assert.True(result.LifecycleConversationIdReported);
     }
 
     [Fact]
-    public async Task RunAsync_AcceptsCleanExitWithCliIssuedConversationId()
+    public async Task RunAsync_RejectsCleanExitWithOnlyUserActivityAndConversationId()
     {
         if (OperatingSystem.IsWindows())
         {
@@ -1209,17 +1219,19 @@ public sealed class OpenHandsCommandRunnerTests
             null,
             """
             #!/bin/sh
+            printf '%s\n' '{"kind":"MessageEvent","source":"user","message":"perform the test task"}'
             printf '%s\n' 'Conversation ID: 0123456789abcdef0123456789abcdef'
             exit 0
             """);
 
-        Assert.True(result.Success);
-        Assert.False(result.ReportedError);
-        Assert.True(result.ReportedFinished);
+        Assert.False(result.Success);
+        Assert.True(result.ReportedError);
+        Assert.False(result.ReportedFinished);
         Assert.True(result.LifecycleConversationIdReported);
         Assert.False(result.ReportedAgentMessage);
-        Assert.DoesNotContain(
-            "ConversationFinalStateUnverified",
+        Assert.False(result.ReportedAgentActivity);
+        Assert.Contains(
+            "OpenHandsNoAgentActivity",
             result.Output,
             StringComparison.Ordinal);
     }

@@ -39,7 +39,8 @@ public sealed record OpenHandsCommandResult(
     bool ReportedFinished = false,
     bool LifecycleConversationIdReported = false,
     bool ReportedAgentMessage = false,
-    bool LifecycleRunCompleted = false)
+    bool LifecycleRunCompleted = false,
+    bool ReportedAgentActivity = false)
 {
     public bool Success => ExitCode == 0 && !ReportedError;
 }
@@ -778,6 +779,7 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             StringComparison.OrdinalIgnoreCase)
             || IsFinishAction(eventObject, kind);
         var isAgentMessage = IsVisibleAgentMessage(eventObject, kind);
+        var isAgentActivity = IsAgentActivity(eventObject, kind, isAgentMessage);
         if (!BrowserVisibleEventKinds.Contains(kind))
         {
             return new OpenHandsSafeLine(
@@ -789,7 +791,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                     + Environment.NewLine,
                 isError,
                 isFinished,
-                isAgentMessage);
+                isAgentMessage,
+                isAgentActivity);
         }
 
         JsonObject safe;
@@ -808,7 +811,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             Redact(safe.ToJsonString(), apiKey) + Environment.NewLine,
             isError,
             isFinished,
-            isAgentMessage);
+            isAgentMessage,
+            isAgentActivity);
     }
 
     private async Task<OpenHandsCommandResult> RunLocalAsync(
@@ -1060,6 +1064,7 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         var reportedError = false;
         var reportedFinished = false;
         var reportedAgentMessage = false;
+        var reportedAgentActivity = false;
         var lifecycleConversationIdReported = false;
         var lifecycleRunCompleted = false;
         var conversationId = existingConversationId;
@@ -1098,6 +1103,10 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             if (safeLine.ReportedAgentMessage)
             {
                 reportedAgentMessage = true;
+            }
+            if (safeLine.ReportedAgentActivity)
+            {
+                reportedAgentActivity = true;
             }
             if (safeLine.Content is null)
             {
@@ -1274,7 +1283,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             reportedFinished,
             lifecycleConversationIdReported,
             reportedAgentMessage,
-            lifecycleRunCompleted);
+            lifecycleRunCompleted,
+            reportedAgentActivity);
     }
 
     private static async IAsyncEnumerable<BoundedOutputLine> ReadBoundedLinesAsync(
@@ -1466,15 +1476,15 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 StringComparison.OrdinalIgnoreCase);
         // OpenHands CLI releases have used both JSONL and delimiter-framed
         // multi-line JSON, and some omit a final state event or leave their
-        // persistence briefly non-terminal. Once the process exits zero, no
-        // structured/persisted error exists, and the CLI itself prints an exact
-        // valid conversation ID, treat that lifecycle contract as success.
-        // Resume input alone is not sufficient because it is not a CLI output.
+        // persistence briefly non-terminal. In that compatibility case, require
+        // evidence that the agent actually processed the task. A conversation ID
+        // by itself is also printed after some clean setup/no-op exits.
         if (result.LifecycleConversationIdReported
-            && lifecycleFallbackStatusIsCompatible)
+            && lifecycleFallbackStatusIsCompatible
+            && result.ReportedAgentActivity)
         {
             _logger.LogInformation(
-                "OpenHands exited cleanly with a CLI-issued conversation ID but without a persisted finished state. Lifecycle marker: {LifecycleMarker}; agent message: {AgentMessage}.",
+                "OpenHands exited cleanly with a CLI-issued conversation ID and agent activity but without a persisted finished state. Lifecycle marker: {LifecycleMarker}; agent message: {AgentMessage}.",
                 result.LifecycleRunCompleted,
                 result.ReportedAgentMessage);
             return result with
@@ -1482,6 +1492,16 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 ConversationId = conversationId,
                 ReportedFinished = true,
             };
+        }
+
+        if (result.LifecycleConversationIdReported
+            && lifecycleFallbackStatusIsCompatible)
+        {
+            return await WithReportedErrorAsync(
+                result with { ConversationId = conversationId },
+                "OpenHandsNoAgentActivity",
+                "OpenHands exited without processing the task. It reported a conversation ID but no agent message, action, or tool request. The task was not marked successful; run the OpenHands machine check and verify headless execution on this machine before retrying.",
+                onOutput);
         }
 
         return await WithReportedErrorAsync(
@@ -2375,6 +2395,29 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 || HasVisibleContent(llmMessage["content"]));
     }
 
+    private static bool IsAgentActivity(
+        JsonObject value,
+        string kind,
+        bool isAgentMessage)
+    {
+        if (isAgentMessage)
+        {
+            return true;
+        }
+
+        if (!kind.Equals("ActionEvent", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        // Older OpenHands JSON output omitted source on action events. An action
+        // is agent activity unless the event explicitly attributes it elsewhere.
+        var source = ReadString(value, "source") ?? ReadString(value, "sender");
+        return string.IsNullOrWhiteSpace(source)
+            || source.Equals("agent", StringComparison.OrdinalIgnoreCase)
+            || source.Equals("assistant", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool HasVisibleContent(JsonNode? value)
     {
         if (value is null || FilterVisibleContent(value) is not { } filtered)
@@ -2848,4 +2891,5 @@ public sealed record OpenHandsSafeLine(
     string? Content,
     bool ReportedError,
     bool ReportedFinished = false,
-    bool ReportedAgentMessage = false);
+    bool ReportedAgentMessage = false,
+    bool ReportedAgentActivity = false);
