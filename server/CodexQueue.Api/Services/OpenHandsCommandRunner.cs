@@ -38,7 +38,8 @@ public sealed record OpenHandsCommandResult(
     bool ReportedError,
     bool ReportedFinished = false,
     bool LifecycleConversationIdReported = false,
-    bool ReportedAgentMessage = false)
+    bool ReportedAgentMessage = false,
+    bool LifecycleRunCompleted = false)
 {
     public bool Success => ExitCode == 0 && !ReportedError;
 }
@@ -721,6 +722,15 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         return match.Success ? match.Groups["id"].Value : null;
     }
 
+    public static bool IsLifecycleRunCompleted(string value)
+    {
+        var lifecycleLine = StripAnsi(value).Trim();
+        return string.Equals(
+            lifecycleLine,
+            "Agent finished",
+            StringComparison.OrdinalIgnoreCase);
+    }
+
     public static OpenHandsSafeLine SanitizeOutputLine(string line, string apiKey)
     {
         var redacted = Redact(StripAnsi(line), apiKey).TrimEnd('\r', '\n');
@@ -1042,6 +1052,7 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         var reportedFinished = false;
         var reportedAgentMessage = false;
         var lifecycleConversationIdReported = false;
+        var lifecycleRunCompleted = false;
         var conversationId = existingConversationId;
         var previewLine = "$ " + preview + Environment.NewLine;
         safeOutput.Append(previewLine);
@@ -1105,6 +1116,10 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 {
                     conversationId = discoveredId;
                     lifecycleConversationIdReported = true;
+                }
+                if (IsLifecycleRunCompleted(redactedRaw))
+                {
+                    lifecycleRunCompleted = true;
                 }
 
                 var safeLine = SanitizeOutputLine(line, apiKey);
@@ -1220,7 +1235,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             reportedError,
             reportedFinished,
             lifecycleConversationIdReported,
-            reportedAgentMessage);
+            reportedAgentMessage,
+            lifecycleRunCompleted);
     }
 
     private static async IAsyncEnumerable<BoundedOutputLine> ReadBoundedLinesAsync(
@@ -1400,11 +1416,11 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             return result with { ConversationId = conversationId };
         }
 
-        // Some CLI/SDK combinations omit the final state-update event and leave
-        // persistence briefly non-terminal. In that compatibility case, require
-        // both the CLI lifecycle marker and a visible agent response. The marker
-        // alone is insufficient because the CLI allocates a conversation before
-        // the agent runs and can print its ID after an early clean exit.
+        // The headless CLI prints this exact lifecycle line only after
+        // conversation.run() returns normally; exceptions bypass it. Keep the
+        // non-JSON line out of browser output, but accept it as completion
+        // evidence when paired with the CLI-issued conversation ID. Explicit
+        // JSON or persisted error/stuck states above still take precedence.
         var lifecycleFallbackStatusIsCompatible =
             inspection.ExecutionStatus is null
             || string.Equals(
@@ -1415,6 +1431,24 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 inspection.ExecutionStatus,
                 "running",
                 StringComparison.OrdinalIgnoreCase);
+        if (result.LifecycleRunCompleted
+            && result.LifecycleConversationIdReported
+            && lifecycleFallbackStatusIsCompatible)
+        {
+            _logger.LogInformation(
+                "OpenHands completed with CLI lifecycle evidence but without a persisted finished state.");
+            return result with
+            {
+                ConversationId = conversationId,
+                ReportedFinished = true,
+            };
+        }
+
+        // Some CLI/SDK combinations omit the final state-update event and leave
+        // persistence briefly non-terminal. In that compatibility case, require
+        // both the CLI lifecycle marker and a visible agent response. The marker
+        // alone is insufficient because the CLI allocates a conversation before
+        // the agent runs and can print its ID after an early clean exit.
         if (result.LifecycleConversationIdReported
             && result.ReportedAgentMessage
             && lifecycleFallbackStatusIsCompatible)

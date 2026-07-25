@@ -1005,6 +1005,24 @@ public sealed class OpenHandsCommandRunnerTests
         Assert.Null(OpenHandsCommandRunner.ExtractConversationId(observation));
     }
 
+    [Theory]
+    [InlineData("Agent finished")]
+    [InlineData("  Agent finished  ")]
+    [InlineData("\u001b[32mAgent finished\u001b[0m")]
+    public void IsLifecycleRunCompleted_AcceptsExactCliMarker(string output)
+    {
+        Assert.True(OpenHandsCommandRunner.IsLifecycleRunCompleted(output));
+    }
+
+    [Theory]
+    [InlineData("Agent is working")]
+    [InlineData("Agent finished unexpectedly")]
+    [InlineData("""{"kind":"ObservationEvent","message":"Agent finished"}""")]
+    public void IsLifecycleRunCompleted_RejectsUnrelatedOrStructuredOutput(string output)
+    {
+        Assert.False(OpenHandsCommandRunner.IsLifecycleRunCompleted(output));
+    }
+
     [Fact]
     public async Task RunAsync_UsesPersistedFinishedStateForSuccess()
     {
@@ -1040,6 +1058,37 @@ public sealed class OpenHandsCommandRunnerTests
         Assert.True(result.ReportedFinished);
         Assert.True(result.LifecycleConversationIdReported);
         Assert.True(result.ReportedAgentMessage);
+        Assert.DoesNotContain(
+            "ConversationFinalStateUnverified",
+            result.Output,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_AcceptsCliLifecycleCompletionWhenJsonOmitsFinalState()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunWithPersistedStateAsync(
+            null,
+            """
+            #!/bin/sh
+            printf '%s\n' 'Agent is working'
+            printf '%s\n' 'Agent finished'
+            printf '%s\n' 'Conversation ID: 0123456789abcdef0123456789abcdef'
+            exit 0
+            """);
+
+        Assert.True(result.Success);
+        Assert.True(result.ReportedFinished);
+        Assert.True(result.LifecycleRunCompleted);
+        Assert.True(result.LifecycleConversationIdReported);
+        Assert.False(result.ReportedAgentMessage);
+        Assert.DoesNotContain("Agent finished", result.Output, StringComparison.Ordinal);
+        Assert.Contains("Agent finished", result.RawDiagnosticOutput, StringComparison.Ordinal);
         Assert.DoesNotContain(
             "ConversationFinalStateUnverified",
             result.Output,
@@ -1093,6 +1142,55 @@ public sealed class OpenHandsCommandRunnerTests
             "ConversationFinalStateUnverified",
             result.Output,
             StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_PersistedStuckStateOverridesCliLifecycleCompletion()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunWithPersistedStateAsync(
+            "stuck",
+            """
+            #!/bin/sh
+            printf '%s\n' 'Agent finished'
+            printf '%s\n' 'Conversation ID: 0123456789abcdef0123456789abcdef'
+            exit 0
+            """);
+
+        Assert.False(result.Success);
+        Assert.True(result.ReportedError);
+        Assert.True(result.LifecycleRunCompleted);
+        Assert.True(result.LifecycleConversationIdReported);
+        Assert.Contains("OpenHandsSTUCK", result.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_JsonErrorOverridesCliLifecycleCompletion()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunWithPersistedStateAsync(
+            null,
+            """
+            #!/bin/sh
+            printf '%s\n' '{"kind":"ConversationErrorEvent","message":"model request failed"}'
+            printf '%s\n' 'Agent finished'
+            printf '%s\n' 'Conversation ID: 0123456789abcdef0123456789abcdef'
+            exit 0
+            """);
+
+        Assert.False(result.Success);
+        Assert.True(result.ReportedError);
+        Assert.True(result.LifecycleRunCompleted);
+        Assert.True(result.LifecycleConversationIdReported);
+        Assert.Contains("model request failed", result.Output, StringComparison.Ordinal);
     }
 
     [Theory]
