@@ -731,6 +731,12 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             StringComparison.OrdinalIgnoreCase);
     }
 
+    public static bool IsJsonEventDelimiter(string value) =>
+        string.Equals(
+            StripAnsi(value).Trim(),
+            "--JSON Event--",
+            StringComparison.Ordinal);
+
     public static OpenHandsSafeLine SanitizeOutputLine(string line, string apiKey)
     {
         var redacted = Redact(StripAnsi(line), apiKey).TrimEnd('\r', '\n');
@@ -759,7 +765,10 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 false);
         }
 
-        var kind = ReadString(eventObject, "kind") ?? ReadString(eventObject, "type") ?? "OpenHandsEvent";
+        var kind = NormalizeEventKind(
+            ReadString(eventObject, "kind")
+            ?? ReadString(eventObject, "type")
+            ?? ReadString(eventObject, "event_type"));
         var terminalState = ReadConversationTerminalState(eventObject, kind);
         var isError = terminalState is not null
             && TerminalConversationStates.Contains(terminalState);
@@ -1076,8 +1085,56 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 ex);
         }
 
+        async Task EmitSafeLineAsync(OpenHandsSafeLine safeLine)
+        {
+            if (safeLine.ReportedError)
+            {
+                reportedError = true;
+            }
+            if (safeLine.ReportedFinished)
+            {
+                reportedFinished = true;
+            }
+            if (safeLine.ReportedAgentMessage)
+            {
+                reportedAgentMessage = true;
+            }
+            if (safeLine.Content is null)
+            {
+                return;
+            }
+
+            safeOutput.Append(safeLine.Content);
+            await emitLock.WaitAsync(cancellationToken);
+            try
+            {
+                await onOutput(safeLine.Content);
+            }
+            finally
+            {
+                emitLock.Release();
+            }
+        }
+
+        async Task EmitTruncatedEventAsync()
+        {
+            var truncatedEvent = JsonSerializer.Serialize(new
+            {
+                kind = "ObservationEvent",
+                source = "tool",
+                message =
+                    "OpenHands emitted an oversized output event. "
+                    + "The event was truncated to protect queue memory; inspect the selected machine if more detail is needed.",
+            })
+                + Environment.NewLine;
+            rawOutput.Append("[oversized OpenHands output event truncated]" + Environment.NewLine);
+            await EmitSafeLineAsync(new OpenHandsSafeLine(truncatedEvent, false));
+        }
+
         async Task ReadStreamAsync(StreamReader reader)
         {
+            var prettyJsonEvent = new JsonEventBlockAccumulator(
+                MaximumOutputLineCharacters);
             await foreach (var outputLine in ReadBoundedLinesAsync(
                                reader,
                                cancellationToken))
@@ -1088,26 +1145,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 rawOutput.Append(redactedRaw);
                 if (outputLine.Truncated)
                 {
-                    var truncatedEvent = JsonSerializer.Serialize(new
-                    {
-                        kind = "ObservationEvent",
-                        source = "tool",
-                        message =
-                            "OpenHands emitted an oversized output event. "
-                            + "The event was truncated to protect queue memory; inspect the selected machine if more detail is needed.",
-                    })
-                        + Environment.NewLine;
-                    rawOutput.Append("[oversized OpenHands output event truncated]" + Environment.NewLine);
-                    safeOutput.Append(truncatedEvent);
-                    await emitLock.WaitAsync(cancellationToken);
-                    try
-                    {
-                        await onOutput(truncatedEvent);
-                    }
-                    finally
-                    {
-                        emitLock.Release();
-                    }
+                    prettyJsonEvent.Reset();
+                    await EmitTruncatedEventAsync();
                     continue;
                 }
 
@@ -1122,35 +1161,34 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                     lifecycleRunCompleted = true;
                 }
 
-                var safeLine = SanitizeOutputLine(line, apiKey);
-                if (safeLine.ReportedError)
+                if (IsJsonEventDelimiter(line))
                 {
-                    reportedError = true;
-                }
-                if (safeLine.ReportedFinished)
-                {
-                    reportedFinished = true;
-                }
-                if (safeLine.ReportedAgentMessage)
-                {
-                    reportedAgentMessage = true;
-                }
-
-                if (safeLine.Content is null)
-                {
+                    if (prettyJsonEvent.IsOversized)
+                    {
+                        await EmitTruncatedEventAsync();
+                    }
+                    prettyJsonEvent.Begin();
                     continue;
                 }
 
-                safeOutput.Append(safeLine.Content);
-                await emitLock.WaitAsync(cancellationToken);
-                try
+                if (prettyJsonEvent.IsCollecting)
                 {
-                    await onOutput(safeLine.Content);
+                    var blockState = prettyJsonEvent.Append(StripAnsi(line));
+                    if (blockState == JsonEventBlockState.Complete)
+                    {
+                        await EmitSafeLineAsync(
+                            SanitizeOutputLine(prettyJsonEvent.Content, apiKey));
+                        prettyJsonEvent.Reset();
+                    }
+                    continue;
                 }
-                finally
-                {
-                    emitLock.Release();
-                }
+
+                await EmitSafeLineAsync(SanitizeOutputLine(line, apiKey));
+            }
+
+            if (prettyJsonEvent.IsOversized)
+            {
+                await EmitTruncatedEventAsync();
             }
         }
 
@@ -1416,11 +1454,6 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             return result with { ConversationId = conversationId };
         }
 
-        // The headless CLI prints this exact lifecycle line only after
-        // conversation.run() returns normally; exceptions bypass it. Keep the
-        // non-JSON line out of browser output, but accept it as completion
-        // evidence when paired with the CLI-issued conversation ID. Explicit
-        // JSON or persisted error/stuck states above still take precedence.
         var lifecycleFallbackStatusIsCompatible =
             inspection.ExecutionStatus is null
             || string.Equals(
@@ -1431,30 +1464,19 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 inspection.ExecutionStatus,
                 "running",
                 StringComparison.OrdinalIgnoreCase);
-        if (result.LifecycleRunCompleted
-            && result.LifecycleConversationIdReported
-            && lifecycleFallbackStatusIsCompatible)
-        {
-            _logger.LogInformation(
-                "OpenHands completed with CLI lifecycle evidence but without a persisted finished state.");
-            return result with
-            {
-                ConversationId = conversationId,
-                ReportedFinished = true,
-            };
-        }
-
-        // Some CLI/SDK combinations omit the final state-update event and leave
-        // persistence briefly non-terminal. In that compatibility case, require
-        // both the CLI lifecycle marker and a visible agent response. The marker
-        // alone is insufficient because the CLI allocates a conversation before
-        // the agent runs and can print its ID after an early clean exit.
+        // OpenHands CLI releases have used both JSONL and delimiter-framed
+        // multi-line JSON, and some omit a final state event or leave their
+        // persistence briefly non-terminal. Once the process exits zero, no
+        // structured/persisted error exists, and the CLI itself prints an exact
+        // valid conversation ID, treat that lifecycle contract as success.
+        // Resume input alone is not sufficient because it is not a CLI output.
         if (result.LifecycleConversationIdReported
-            && result.ReportedAgentMessage
             && lifecycleFallbackStatusIsCompatible)
         {
             _logger.LogInformation(
-                "OpenHands completed with lifecycle and agent-message evidence but without a persisted finished state.");
+                "OpenHands exited cleanly with a CLI-issued conversation ID but without a persisted finished state. Lifecycle marker: {LifecycleMarker}; agent message: {AgentMessage}.",
+                result.LifecycleRunCompleted,
+                result.ReportedAgentMessage);
             return result with
             {
                 ConversationId = conversationId,
@@ -2085,7 +2107,14 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
     private static JsonObject BuildSafeMessageEvent(JsonObject source, string kind)
     {
         var safe = new JsonObject { ["kind"] = kind };
-        CopySafeProperty(source, safe, "source");
+        if (source["source"] is { } eventSource)
+        {
+            safe["source"] = eventSource.DeepClone();
+        }
+        else if (source["sender"] is { } eventSender)
+        {
+            safe["source"] = eventSender.DeepClone();
+        }
         CopySafeProperty(source, safe, "timestamp");
         CopySafeProperty(source, safe, "role");
         CopyVisibleProperty(source, safe, "message");
@@ -2212,6 +2241,31 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
     private static string? ReadString(JsonObject value, string name) =>
         value[name] is JsonValue jsonValue && jsonValue.TryGetValue<string>(out var text) ? text : null;
 
+    private static string NormalizeEventKind(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "OpenHandsEvent";
+        }
+
+        var normalized = new string(
+            value.Where(char.IsLetterOrDigit)
+                .Select(char.ToLowerInvariant)
+                .ToArray());
+        return normalized switch
+        {
+            "action" or "actionevent" => "ActionEvent",
+            "agenterror" or "agenterrorevent" => "AgentErrorEvent",
+            "conversationerror" or "conversationerrorevent" => "ConversationErrorEvent",
+            "conversationstate" or "conversationstateupdate"
+                or "conversationstateupdateevent" or "agentstatechanged"
+                or "agentstatechangedevent" => "ConversationStateUpdateEvent",
+            "message" or "messageevent" => "MessageEvent",
+            "observation" or "observationevent" => "ObservationEvent",
+            _ => value,
+        };
+    }
+
     private static string? ReadConversationTerminalState(JsonObject value, string kind)
     {
         if (kind.Equals("ConversationErrorEvent", StringComparison.OrdinalIgnoreCase))
@@ -2226,7 +2280,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
 
         var state = ReadString(value, "execution_status")
             ?? ReadString(value, "state")
-            ?? ReadString(value, "status");
+            ?? ReadString(value, "status")
+            ?? ReadString(value, "agent_state");
         if (state is null && value["conversation_state"] is JsonObject conversationState)
         {
             state = ReadString(conversationState, "execution_status")
@@ -2248,17 +2303,53 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 ?? ReadString(fullState, "state")
                 ?? ReadString(fullState, "status");
         }
+        else if (state is null && key is null)
+        {
+            state = ReadJsonString(value["value"]);
+        }
 
         return state;
     }
 
-    private static bool IsFinishAction(JsonObject value, string kind) =>
-        kind.Equals("ActionEvent", StringComparison.OrdinalIgnoreCase)
-        && value["action"] is JsonObject action
-        && string.Equals(
-            ReadString(action, "kind") ?? ReadString(action, "type"),
-            "FinishAction",
-            StringComparison.OrdinalIgnoreCase);
+    private static bool IsFinishAction(JsonObject value, string kind)
+    {
+        if (!kind.Equals("ActionEvent", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (IsFinishName(ReadString(value, "tool_name")))
+        {
+            return true;
+        }
+
+        if (value["tool_call"] is JsonObject toolCall
+            && IsFinishName(ReadString(toolCall, "name")))
+        {
+            return true;
+        }
+
+        return value["action"] is JsonObject action
+            && IsFinishName(
+                ReadString(action, "kind")
+                ?? ReadString(action, "type")
+                ?? ReadString(action, "action_type")
+                ?? ReadString(action, "name"));
+    }
+
+    private static bool IsFinishName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var normalized = new string(
+            value.Where(char.IsLetterOrDigit)
+                .Select(char.ToLowerInvariant)
+                .ToArray());
+        return normalized is "finish" or "finishaction" or "finishtool";
+    }
 
     private static bool IsVisibleAgentMessage(JsonObject value, string kind)
     {
@@ -2268,7 +2359,7 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         }
 
         var llmMessage = value["llm_message"] as JsonObject;
-        var source = ReadString(value, "source");
+        var source = ReadString(value, "source") ?? ReadString(value, "sender");
         var role = ReadString(value, "role")
             ?? (llmMessage is null ? null : ReadString(llmMessage, "role"));
         if (!string.Equals(source, "agent", StringComparison.OrdinalIgnoreCase)
@@ -2629,6 +2720,101 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 Readable: false,
                 ConversationId: null,
                 ExecutionStatus: null);
+    }
+
+    private enum JsonEventBlockState
+    {
+        Incomplete,
+        Complete,
+        Oversized,
+    }
+
+    private sealed class JsonEventBlockAccumulator(int maximumCharacters)
+    {
+        private readonly StringBuilder _value = new();
+        private bool _started;
+        private bool _insideString;
+        private bool _escaped;
+        private int _depth;
+
+        public bool IsCollecting { get; private set; }
+        public bool IsOversized { get; private set; }
+        public string Content => _value.ToString();
+
+        public void Begin()
+        {
+            Reset();
+            IsCollecting = true;
+        }
+
+        public JsonEventBlockState Append(string line)
+        {
+            if (!IsCollecting)
+            {
+                return JsonEventBlockState.Incomplete;
+            }
+            if (IsOversized)
+            {
+                return JsonEventBlockState.Oversized;
+            }
+            if (_value.Length + line.Length + Environment.NewLine.Length
+                > maximumCharacters)
+            {
+                _value.Clear();
+                IsOversized = true;
+                return JsonEventBlockState.Oversized;
+            }
+
+            _value.Append(line).AppendLine();
+            foreach (var character in line)
+            {
+                if (_insideString)
+                {
+                    if (_escaped)
+                    {
+                        _escaped = false;
+                    }
+                    else if (character == '\\')
+                    {
+                        _escaped = true;
+                    }
+                    else if (character == '"')
+                    {
+                        _insideString = false;
+                    }
+                    continue;
+                }
+
+                if (character == '"')
+                {
+                    _insideString = true;
+                }
+                else if (character is '{' or '[')
+                {
+                    _started = true;
+                    _depth++;
+                }
+                else if (character is '}' or ']')
+                {
+                    _depth--;
+                }
+            }
+
+            return _started && _depth == 0 && !_insideString
+                ? JsonEventBlockState.Complete
+                : JsonEventBlockState.Incomplete;
+        }
+
+        public void Reset()
+        {
+            _value.Clear();
+            _started = false;
+            _insideString = false;
+            _escaped = false;
+            _depth = 0;
+            IsCollecting = false;
+            IsOversized = false;
+        }
     }
 
     private sealed class BoundedTextBuffer(int maximumCharacters)

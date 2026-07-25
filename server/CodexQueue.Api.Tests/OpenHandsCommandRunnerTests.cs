@@ -959,6 +959,35 @@ public sealed class OpenHandsCommandRunnerTests
     }
 
     [Fact]
+    public void SanitizeOutputLine_NormalizesOpenHandsEventTypeSchema()
+    {
+        var message = OpenHandsCommandRunner.SanitizeOutputLine(
+            """{"event_type":"message","sender":"agent","llm_message":{"role":"assistant","content":[{"type":"text","text":"Task complete"}]}}""",
+            AiProviderService.LocalPlaceholderApiKey);
+        var finishAction = OpenHandsCommandRunner.SanitizeOutputLine(
+            """{"event_type":"action","source":"agent","tool_name":"finish"}""",
+            AiProviderService.LocalPlaceholderApiKey);
+        var finishedState = OpenHandsCommandRunner.SanitizeOutputLine(
+            """{"event_type":"agent_state_changed","agent_state":"finished"}""",
+            AiProviderService.LocalPlaceholderApiKey);
+        var conversationError = OpenHandsCommandRunner.SanitizeOutputLine(
+            """{"event_type":"conversation_error","code":"LLMError","detail":"model request failed"}""",
+            AiProviderService.LocalPlaceholderApiKey);
+
+        AssertSafeJson(message, "MessageEvent", "Task complete");
+        Assert.True(message.ReportedAgentMessage);
+        AssertSafeJson(finishAction, "ActionEvent", "finish");
+        Assert.True(finishAction.ReportedFinished);
+        AssertSafeJson(finishedState, "ConversationStateUpdateEvent", "finished");
+        Assert.True(finishedState.ReportedFinished);
+        AssertSafeJson(
+            conversationError,
+            "ConversationErrorEvent",
+            "model request failed",
+            expectedReportedError: true);
+    }
+
+    [Fact]
     public void BuildSafeProcessFailureEvent_DoesNotReflectRawDiagnostics()
     {
         const string rawMarker = "private-traceback-marker-f807";
@@ -1021,6 +1050,23 @@ public sealed class OpenHandsCommandRunnerTests
     public void IsLifecycleRunCompleted_RejectsUnrelatedOrStructuredOutput(string output)
     {
         Assert.False(OpenHandsCommandRunner.IsLifecycleRunCompleted(output));
+    }
+
+    [Theory]
+    [InlineData("--JSON Event--")]
+    [InlineData("  --JSON Event--  ")]
+    [InlineData("\u001b[36m--JSON Event--\u001b[0m")]
+    public void IsJsonEventDelimiter_AcceptsExactCliMarker(string output)
+    {
+        Assert.True(OpenHandsCommandRunner.IsJsonEventDelimiter(output));
+    }
+
+    [Theory]
+    [InlineData("--JSON Event-- extra")]
+    [InlineData("""{"message":"--JSON Event--"}""")]
+    public void IsJsonEventDelimiter_RejectsEmbeddedMarker(string output)
+    {
+        Assert.False(OpenHandsCommandRunner.IsJsonEventDelimiter(output));
     }
 
     [Fact]
@@ -1096,6 +1142,39 @@ public sealed class OpenHandsCommandRunnerTests
     }
 
     [Fact]
+    public async Task RunAsync_ParsesDelimiterFramedMultilineFinishEvent()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunWithPersistedStateAsync(
+            "running",
+            """
+            #!/bin/sh
+            printf '%s\n' '--JSON Event--'
+            printf '%s\n' '{'
+            printf '%s\n' '  "event_type": "action",'
+            printf '%s\n' '  "source": "agent",'
+            printf '%s\n' '  "tool_name": "finish"'
+            printf '%s\n' '}'
+            printf '%s\n' 'Conversation ID: 0123456789abcdef0123456789abcdef'
+            exit 0
+            """);
+
+        Assert.True(result.Success);
+        Assert.True(result.ReportedFinished);
+        Assert.False(result.ReportedAgentMessage);
+        Assert.Contains("\"kind\":\"ActionEvent\"", result.Output, StringComparison.Ordinal);
+        Assert.Contains("--JSON Event--", result.RawDiagnosticOutput, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "ConversationFinalStateUnverified",
+            result.Output,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RunAsync_AcceptsFinishActionWhenPersistedStateIsStillRunning()
     {
         if (OperatingSystem.IsWindows())
@@ -1119,7 +1198,7 @@ public sealed class OpenHandsCommandRunnerTests
     }
 
     [Fact]
-    public async Task RunAsync_RejectsEmptyLifecycleMarkerAsCompletionEvidence()
+    public async Task RunAsync_AcceptsCleanExitWithCliIssuedConversationId()
     {
         if (OperatingSystem.IsWindows())
         {
@@ -1134,11 +1213,12 @@ public sealed class OpenHandsCommandRunnerTests
             exit 0
             """);
 
-        Assert.False(result.Success);
-        Assert.True(result.ReportedError);
+        Assert.True(result.Success);
+        Assert.False(result.ReportedError);
+        Assert.True(result.ReportedFinished);
         Assert.True(result.LifecycleConversationIdReported);
         Assert.False(result.ReportedAgentMessage);
-        Assert.Contains(
+        Assert.DoesNotContain(
             "ConversationFinalStateUnverified",
             result.Output,
             StringComparison.Ordinal);
@@ -1189,6 +1269,34 @@ public sealed class OpenHandsCommandRunnerTests
         Assert.False(result.Success);
         Assert.True(result.ReportedError);
         Assert.True(result.LifecycleRunCompleted);
+        Assert.True(result.LifecycleConversationIdReported);
+        Assert.Contains("model request failed", result.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_DelimiterFramedJsonErrorOverridesCleanExit()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunWithPersistedStateAsync(
+            null,
+            """
+            #!/bin/sh
+            printf '%s\n' '--JSON Event--'
+            printf '%s\n' '{'
+            printf '%s\n' '  "event_type": "conversation_error",'
+            printf '%s\n' '  "code": "LLMError",'
+            printf '%s\n' '  "detail": "model request failed with } inside its JSON string"'
+            printf '%s\n' '}'
+            printf '%s\n' 'Conversation ID: 0123456789abcdef0123456789abcdef'
+            exit 0
+            """);
+
+        Assert.False(result.Success);
+        Assert.True(result.ReportedError);
         Assert.True(result.LifecycleConversationIdReported);
         Assert.Contains("model request failed", result.Output, StringComparison.Ordinal);
     }
