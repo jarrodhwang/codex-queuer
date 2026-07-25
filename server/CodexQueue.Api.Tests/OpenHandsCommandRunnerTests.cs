@@ -860,10 +860,17 @@ public sealed class OpenHandsCommandRunnerTests
             {"kind":"MessageEvent","thought":"private message thought","llm_message":{"role":"assistant","content":[{"type":"reasoning","text":"semantic hidden reasoning"},{"type":"text","text":"Visible final answer"}],"reasoning":"private llm reasoning"}}
             """,
             apiKey);
+        var hiddenOnlyMessage = OpenHandsCommandRunner.SanitizeOutputLine(
+            """
+            {"kind":"MessageEvent","source":"agent","llm_message":{"role":"assistant","content":[{"type":"reasoning","text":"semantic hidden reasoning"}]}}
+            """,
+            apiKey);
 
         AssertSafeJson(action, "ActionEvent", "echo [REDACTED]");
         AssertSafeJson(observation, "ObservationEvent", "tests passed");
         AssertSafeJson(message, "MessageEvent", "Visible final answer");
+        Assert.True(message.ReportedAgentMessage);
+        Assert.False(hiddenOnlyMessage.ReportedAgentMessage);
 
         var combined = action.Content + observation.Content + message.Content;
         Assert.DoesNotContain(apiKey, combined, StringComparison.Ordinal);
@@ -937,12 +944,18 @@ public sealed class OpenHandsCommandRunnerTests
         var finishedCurrentSchema = OpenHandsCommandRunner.SanitizeOutputLine(
             """{"kind":"ConversationStateUpdateEvent","key":"execution_status","value":"finished"}""",
             AiProviderService.LocalPlaceholderApiKey);
+        var finishAction = OpenHandsCommandRunner.SanitizeOutputLine(
+            """{"kind":"ActionEvent","source":"agent","action":{"kind":"FinishAction","message":"Task complete"}}""",
+            AiProviderService.LocalPlaceholderApiKey);
 
         Assert.False(agentError.ReportedError);
         Assert.True(failedState.ReportedError);
         Assert.True(stuckCurrentSchema.ReportedError);
         Assert.False(finishedCurrentSchema.ReportedError);
         Assert.True(finishedCurrentSchema.ReportedFinished);
+        Assert.False(finishAction.ReportedError);
+        Assert.True(finishAction.ReportedFinished);
+        Assert.Contains("Task complete", finishAction.Content, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1007,6 +1020,132 @@ public sealed class OpenHandsCommandRunnerTests
         Assert.Equal("0123456789abcdef0123456789abcdef", result.ConversationId);
         Assert.DoesNotContain("Conversation ID:", result.Output, StringComparison.Ordinal);
         Assert.Contains("Conversation ID:", result.RawDiagnosticOutput, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("idle")]
+    [InlineData("running")]
+    public async Task RunAsync_AcceptsLifecycleAndAgentMessageWhenFinalStateIsNotAvailable(
+        string? executionStatus)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunWithPersistedStateAsync(executionStatus);
+
+        Assert.True(result.Success);
+        Assert.True(result.ReportedFinished);
+        Assert.True(result.LifecycleConversationIdReported);
+        Assert.True(result.ReportedAgentMessage);
+        Assert.DoesNotContain(
+            "ConversationFinalStateUnverified",
+            result.Output,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_AcceptsFinishActionWhenPersistedStateIsStillRunning()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunWithPersistedStateAsync(
+            "running",
+            """
+            #!/bin/sh
+            printf '%s\n' '{"kind":"ActionEvent","source":"agent","action":{"kind":"FinishAction","message":"Task complete"}}'
+            printf '%s\n' 'Conversation ID: 0123456789abcdef0123456789abcdef'
+            exit 0
+            """);
+
+        Assert.True(result.Success);
+        Assert.True(result.ReportedFinished);
+        Assert.False(result.ReportedAgentMessage);
+        Assert.True(result.LifecycleConversationIdReported);
+    }
+
+    [Fact]
+    public async Task RunAsync_RejectsEmptyLifecycleMarkerAsCompletionEvidence()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunWithPersistedStateAsync(
+            null,
+            """
+            #!/bin/sh
+            printf '%s\n' 'Conversation ID: 0123456789abcdef0123456789abcdef'
+            exit 0
+            """);
+
+        Assert.False(result.Success);
+        Assert.True(result.ReportedError);
+        Assert.True(result.LifecycleConversationIdReported);
+        Assert.False(result.ReportedAgentMessage);
+        Assert.Contains(
+            "ConversationFinalStateUnverified",
+            result.Output,
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("paused")]
+    [InlineData("waiting_for_confirmation")]
+    [InlineData("deleting")]
+    [InlineData("future_unknown_state")]
+    public async Task RunAsync_DoesNotOverrideIncompatibleConversationStateWithLifecycleFallback(
+        string executionStatus)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var result = await RunWithPersistedStateAsync(executionStatus);
+
+        Assert.False(result.Success);
+        Assert.True(result.ReportedError);
+        Assert.True(result.LifecycleConversationIdReported);
+        Assert.True(result.ReportedAgentMessage);
+        Assert.Contains(
+            "ConversationFinalStateUnverified",
+            result.Output,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_DoesNotUseResumeInputAsLifecycleCompletionEvidence()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string conversationId = "0123456789abcdef0123456789abcdef";
+        var result = await RunWithPersistedStateAsync(
+            "idle",
+            """
+            #!/bin/sh
+            printf '%s\n' '{"kind":"MessageEvent","source":"agent","message":"Task stopped without a lifecycle marker"}'
+            exit 0
+            """,
+            conversationId);
+
+        Assert.False(result.Success);
+        Assert.True(result.ReportedError);
+        Assert.False(result.LifecycleConversationIdReported);
+        Assert.True(result.ReportedAgentMessage);
+        Assert.Contains(
+            "ConversationFinalStateUnverified",
+            result.Output,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1641,8 +1780,9 @@ public sealed class OpenHandsCommandRunnerTests
     }
 
     private static async Task<OpenHandsCommandResult> RunWithPersistedStateAsync(
-        string executionStatus,
-        string? executableContents = null)
+        string? executionStatus,
+        string? executableContents = null,
+        string? existingConversationId = null)
     {
         const string conversationId = "0123456789abcdef0123456789abcdef";
         var testRoot = Path.Combine(
@@ -1654,10 +1794,17 @@ public sealed class OpenHandsCommandRunnerTests
         var conversationRoot = Path.Combine(conversationsRoot, conversationId);
         var executable = Path.Combine(testRoot, "fake-openhands");
         Directory.CreateDirectory(Path.Combine(projectRoot, ".git"));
-        Directory.CreateDirectory(conversationRoot);
-        await File.WriteAllTextAsync(
-            Path.Combine(conversationRoot, "base_state.json"),
-            JsonSerializer.Serialize(new { execution_status = executionStatus }));
+        if (executionStatus is not null)
+        {
+            Directory.CreateDirectory(conversationRoot);
+            await File.WriteAllTextAsync(
+                Path.Combine(conversationRoot, "base_state.json"),
+                JsonSerializer.Serialize(new
+                {
+                    id = conversationId,
+                    execution_status = executionStatus,
+                }));
+        }
         await File.WriteAllTextAsync(
             executable,
             executableContents
@@ -1694,7 +1841,7 @@ public sealed class OpenHandsCommandRunnerTests
                 "openai/qwen2.5-coder:32b",
                 "http://ollama.test:11434/v1",
                 AiProviderService.LocalPlaceholderApiKey,
-                null,
+                existingConversationId,
                 "perform the test task",
                 alwaysApproveConfirmed: true,
                 _ => Task.CompletedTask,

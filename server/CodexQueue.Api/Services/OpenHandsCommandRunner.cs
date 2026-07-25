@@ -36,7 +36,9 @@ public sealed record OpenHandsCommandResult(
     string CommandPreview,
     string? ConversationId,
     bool ReportedError,
-    bool ReportedFinished = false)
+    bool ReportedFinished = false,
+    bool LifecycleConversationIdReported = false,
+    bool ReportedAgentMessage = false)
 {
     public bool Success => ExitCode == 0 && !ReportedError;
 }
@@ -105,6 +107,11 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
     private static readonly TimeSpan MachineCheckTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan LocalAiProbeTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan FirstOutputTimeout = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan[] FinalStateRetryDelays =
+    [
+        TimeSpan.FromMilliseconds(100),
+        TimeSpan.FromMilliseconds(300),
+    ];
     private static readonly Regex ConversationIdPattern = new(
         @"\A[ \t]*Conversation[ \t]+ID:[ \t]*(?<id>[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})[ \t]*\z",
         RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
@@ -749,7 +756,9 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         var isFinished = string.Equals(
             terminalState,
             "finished",
-            StringComparison.OrdinalIgnoreCase);
+            StringComparison.OrdinalIgnoreCase)
+            || IsFinishAction(eventObject, kind);
+        var isAgentMessage = IsVisibleAgentMessage(eventObject, kind);
         if (!BrowserVisibleEventKinds.Contains(kind))
         {
             return new OpenHandsSafeLine(
@@ -760,7 +769,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 })
                     + Environment.NewLine,
                 isError,
-                isFinished);
+                isFinished,
+                isAgentMessage);
         }
 
         JsonObject safe;
@@ -778,7 +788,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         return new OpenHandsSafeLine(
             Redact(safe.ToJsonString(), apiKey) + Environment.NewLine,
             isError,
-            isFinished);
+            isFinished,
+            isAgentMessage);
     }
 
     private async Task<OpenHandsCommandResult> RunLocalAsync(
@@ -1029,6 +1040,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         var firstOutput = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var reportedError = false;
         var reportedFinished = false;
+        var reportedAgentMessage = false;
+        var lifecycleConversationIdReported = false;
         var conversationId = existingConversationId;
         var previewLine = "$ " + preview + Environment.NewLine;
         safeOutput.Append(previewLine);
@@ -1091,6 +1104,7 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 if (!string.IsNullOrWhiteSpace(discoveredId))
                 {
                     conversationId = discoveredId;
+                    lifecycleConversationIdReported = true;
                 }
 
                 var safeLine = SanitizeOutputLine(line, apiKey);
@@ -1101,6 +1115,10 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 if (safeLine.ReportedFinished)
                 {
                     reportedFinished = true;
+                }
+                if (safeLine.ReportedAgentMessage)
+                {
+                    reportedAgentMessage = true;
                 }
 
                 if (safeLine.Content is null)
@@ -1200,7 +1218,9 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             preview,
             conversationId,
             reportedError,
-            reportedFinished);
+            reportedFinished,
+            lifecycleConversationIdReported,
+            reportedAgentMessage);
     }
 
     private static async IAsyncEnumerable<BoundedOutputLine> ReadBoundedLinesAsync(
@@ -1331,6 +1351,23 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         }
 
         var inspection = await inspect(conversationId);
+        foreach (var delay in FinalStateRetryDelays)
+        {
+            if (result.ReportedFinished
+                || string.Equals(
+                    inspection.ExecutionStatus,
+                    "finished",
+                    StringComparison.OrdinalIgnoreCase)
+                || inspection.ExecutionStatus is { } terminalStatus
+                && TerminalConversationStates.Contains(terminalStatus))
+            {
+                break;
+            }
+
+            await Task.Delay(delay);
+            inspection = await inspect(conversationId);
+        }
+
         if (string.Equals(
                 inspection.ExecutionStatus,
                 "finished",
@@ -1363,10 +1400,38 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             return result with { ConversationId = conversationId };
         }
 
+        // Some CLI/SDK combinations omit the final state-update event and leave
+        // persistence briefly non-terminal. In that compatibility case, require
+        // both the CLI lifecycle marker and a visible agent response. The marker
+        // alone is insufficient because the CLI allocates a conversation before
+        // the agent runs and can print its ID after an early clean exit.
+        var lifecycleFallbackStatusIsCompatible =
+            inspection.ExecutionStatus is null
+            || string.Equals(
+                inspection.ExecutionStatus,
+                "idle",
+                StringComparison.OrdinalIgnoreCase)
+            || string.Equals(
+                inspection.ExecutionStatus,
+                "running",
+                StringComparison.OrdinalIgnoreCase);
+        if (result.LifecycleConversationIdReported
+            && result.ReportedAgentMessage
+            && lifecycleFallbackStatusIsCompatible)
+        {
+            _logger.LogInformation(
+                "OpenHands completed with lifecycle and agent-message evidence but without a persisted finished state.");
+            return result with
+            {
+                ConversationId = conversationId,
+                ReportedFinished = true,
+            };
+        }
+
         return await WithReportedErrorAsync(
             result with { ConversationId = conversationId },
             "ConversationFinalStateUnverified",
-            "OpenHands exited without a verifiable finished conversation state. The task was not marked successful; update or recheck the OpenHands CLI before retrying.",
+            "OpenHands exited cleanly but did not emit a completion marker or a verifiable finished conversation state. The task was not marked successful; rerun the OpenHands machine check before retrying.",
             onOutput);
     }
 
@@ -2153,6 +2218,55 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         return state;
     }
 
+    private static bool IsFinishAction(JsonObject value, string kind) =>
+        kind.Equals("ActionEvent", StringComparison.OrdinalIgnoreCase)
+        && value["action"] is JsonObject action
+        && string.Equals(
+            ReadString(action, "kind") ?? ReadString(action, "type"),
+            "FinishAction",
+            StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsVisibleAgentMessage(JsonObject value, string kind)
+    {
+        if (!kind.Equals("MessageEvent", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var llmMessage = value["llm_message"] as JsonObject;
+        var source = ReadString(value, "source");
+        var role = ReadString(value, "role")
+            ?? (llmMessage is null ? null : ReadString(llmMessage, "role"));
+        if (!string.Equals(source, "agent", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return HasVisibleContent(value["message"])
+            || HasVisibleContent(value["content"])
+            || llmMessage is not null
+            && (HasVisibleContent(llmMessage["message"])
+                || HasVisibleContent(llmMessage["content"]));
+    }
+
+    private static bool HasVisibleContent(JsonNode? value)
+    {
+        if (value is null || FilterVisibleContent(value) is not { } filtered)
+        {
+            return false;
+        }
+
+        return filtered switch
+        {
+            JsonValue scalar => scalar.TryGetValue<string>(out var text)
+                && !string.IsNullOrWhiteSpace(text),
+            JsonArray array => array.Count > 0,
+            JsonObject jsonObject => jsonObject.Count > 0,
+            _ => false,
+        };
+    }
+
     private static string? ReadJsonString(JsonNode? value) =>
         value is JsonValue jsonValue && jsonValue.TryGetValue<string>(out var text)
             ? text
@@ -2513,4 +2627,5 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
 public sealed record OpenHandsSafeLine(
     string? Content,
     bool ReportedError,
-    bool ReportedFinished = false);
+    bool ReportedFinished = false,
+    bool ReportedAgentMessage = false);

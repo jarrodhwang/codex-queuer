@@ -3190,6 +3190,89 @@ function QueueComposer({
                                       ? 'Headless OpenHands requires Full access with explicit confirmation for this release.'
                                       : ''
   const selectedRequestModel = isLocalRunner ? localModel : requestModel.model
+  const localApiPending = loadingLocalModels
+    || Boolean(selectedLocalProfile && !localModelStatus && !localModelError)
+  const openHandsPending = Boolean(localModel)
+    && (checkingOpenHands || (!openHandsMachineStatus && !openHandsMachineError))
+  const localHealthItems = [
+    {
+      key: 'openhands',
+      label: `OpenHands on ${selectedProject.machineName}`,
+      detail: !localModel
+        ? 'Choose a model to check OpenHands.'
+        : checkingOpenHands
+          ? 'Checking OpenHands CLI.'
+          : openHandsMachineError
+            || openHandsMachineStatus?.message
+            || (openHandsMachineStatus?.available ? openHandsMachineStatus.version || 'Available.' : 'Unavailable.'),
+      state: !localModel
+        ? 'idle'
+        : openHandsPending
+          ? 'pending'
+          : openHandsMachineStatus?.available && !openHandsMachineStatus.requiresWsl
+            ? 'ok'
+            : 'bad',
+      icon: <TerminalIcon size={15} />,
+    },
+    {
+      key: 'server',
+      label: 'Local AI server from Codex Queue',
+      detail: localApiPending
+        ? 'Checking Local AI server and models.'
+        : localModelError
+          || localModelStatus?.error
+          || selectedLocalProfile?.baseUrl
+          || 'No Local AI Server profile is configured.',
+      state: !selectedLocalProfile
+        ? 'idle'
+        : localApiPending
+          ? 'pending'
+          : localModelStatus?.healthy
+            ? 'ok'
+            : 'bad',
+      icon: <Server size={15} />,
+    },
+    {
+      key: 'route',
+      label: `Local AI route from ${selectedProject.machineName}`,
+      detail: !localModel
+        ? 'Choose a model to check the target route.'
+        : checkingOpenHands
+          ? 'Checking target-side Local AI reachability.'
+          : openHandsMachineError
+            || openHandsMachineStatus?.targetLocalAiMessage
+            || (targetLocalAiReachable ? 'Reachable.' : 'Unreachable.'),
+      state: !localModel
+        ? 'idle'
+        : openHandsPending
+          ? 'pending'
+          : targetLocalAiReachable
+            ? 'ok'
+            : 'bad',
+      icon: <Network size={15} />,
+    },
+    {
+      key: 'model',
+      label: 'Selected local model',
+      detail: !localModel
+        ? 'Choose an installed model.'
+        : localApiPending || openHandsPending
+          ? 'Verifying the selected model.'
+          : localModelInstalled && targetLocalModelAvailable
+            ? `${localModelDisplayName(localModel)} is installed and visible from ${selectedProject.machineName}.`
+            : openHandsMachineStatus?.targetSelectedModelAvailable === false
+              ? `${localModelDisplayName(localModel)} is not available from ${selectedProject.machineName}.`
+              : 'The selected model could not be verified.',
+      state: !localModel
+        ? 'idle'
+        : localApiPending || openHandsPending
+          ? 'pending'
+          : localModelInstalled && targetLocalModelAvailable
+            ? 'ok'
+            : 'bad',
+      icon: <Code2 size={15} />,
+    },
+  ]
 
   const defaultsChanged =
     requestModel.model !== defaults.requestModel.model ||
@@ -3201,6 +3284,27 @@ function QueueComposer({
     generateCommit !== defaults.generateCommit ||
     separateCommitSession !== defaults.separateCommitSession ||
     permissionMode !== defaults.permissionMode
+
+  const selectRunnerChoice = (nextChoice: RunnerChoice) => {
+    localModelLoadSequenceRef.current += 1
+    setLoadingLocalModels(false)
+    setLocalModelStatus(null)
+    setLocalModelError('')
+    setRunnerChoice(nextChoice)
+    setComposerValidationError('')
+    if (nextChoice === 'Local') {
+      setAttachments([])
+      setAttachmentError('')
+      setGenerateCommit(false)
+      setSeparateCommitSession(false)
+      return
+    }
+    if (nextChoice === 'Codex') {
+      setGenerateCommit(defaults.generateCommit)
+      setSeparateCommitSession(defaults.separateCommitSession)
+      setPermissionMode(defaults.permissionMode)
+    }
+  }
 
   const resetModelSelections = () => {
     localModelLoadSequenceRef.current += 1
@@ -3529,207 +3633,154 @@ function QueueComposer({
             {attachmentError && <span className="error-text">{attachmentError}</span>}
           </div>
         </FieldLabel>
-        <div className="runner-selector-row">
-          <FieldLabel label="Runner">
-            <GlassSelect
-              value={runnerChoice}
-              onChange={(event) => {
-                const nextChoice = event.target.value as RunnerChoice
-                localModelLoadSequenceRef.current += 1
-                setLoadingLocalModels(false)
-                setLocalModelStatus(null)
-                setLocalModelError('')
-                setRunnerChoice(nextChoice)
-                setComposerValidationError('')
-                if (nextChoice === 'Local') {
-                  setAttachments([])
-                  setAttachmentError('')
-                  setGenerateCommit(false)
-                  setSeparateCommitSession(false)
-                  return
-                }
-                if (nextChoice === 'Codex') {
-                  setGenerateCommit(defaults.generateCommit)
-                  setSeparateCommitSession(defaults.separateCommitSession)
-                  setPermissionMode(defaults.permissionMode)
-                }
-              }}
-            >
-              <option value="Codex">Codex / ChatGPT</option>
-              <option value="Claude" disabled>Claude — not enabled yet</option>
-              <option value="Local">Local — OpenHands + Ollama</option>
-            </GlassSelect>
-          </FieldLabel>
-          <div className="runner-selector-summary">
-            <strong>{isLocalRunner ? 'OpenHands CLI' : runnerChoice === 'Claude' ? 'OpenHands CLI · unavailable' : 'Codex CLI'}</strong>
-            <span>
-              {isLocalRunner
-                ? `Runs on ${selectedProject.machineName}; inference uses the selected Local AI Server.`
-                : runnerChoice === 'Claude'
-                  ? 'Anthropic profiles will be enabled in a later increment.'
-                  : `Existing Codex workflow on ${selectedProject.machineName}.`}
-            </span>
-          </div>
-        </div>
-        {isCodexRunner ? (
-          <div className="composer-grid compact">
-            <ModelPicker label="Request" options={config.models} value={requestModel} onChange={setRequestModel} />
-            <ModelPicker label="Commit" options={config.models} value={commitModel} onChange={setCommitModel} disabled={!generateCommit || !separateCommitSession} />
-          </div>
-        ) : isLocalRunner ? (
-          <div className="local-runner-panel">
-            <div className="composer-grid compact local-runner-selectors">
-              <FieldLabel label="Source">
-                <GlassSelect
-                  value={localProfileId}
-                  disabled={localProfiles.length === 0}
-                  onChange={(event) => {
-                    localModelLoadSequenceRef.current += 1
-                    setLoadingLocalModels(false)
-                    setLocalModelStatus(null)
-                    setLocalModelError('')
-                    setLocalProfileId(event.target.value)
-                    setLocalModel('')
-                    setComposerValidationError('')
-                  }}
-                >
-                  {localProfiles.length === 0 && <option value="">No enabled Local profile</option>}
-                  {localProfiles.map((profile) => (
-                    <option key={profile.id} value={profile.id}>{profile.name}</option>
-                  ))}
-                </GlassSelect>
-              </FieldLabel>
-              <FieldLabel label="Model">
-                <div className="local-model-select-row">
-                  <GlassSelect
-                    value={localModel}
-                    disabled={loadingLocalModels || !localModelStatus?.healthy || localModelOptions.length === 0}
-                    onChange={(event) => {
-                      setLocalModel(event.target.value)
-                      setComposerValidationError('')
-                    }}
+        <div className="composer-runtime-layout">
+          <div className="composer-runtime-main">
+            {isCodexRunner ? (
+              <div className="composer-grid compact">
+                <ModelPicker label="Request" options={config.models} value={requestModel} onChange={setRequestModel} />
+                <ModelPicker label="Commit" options={config.models} value={commitModel} onChange={setCommitModel} disabled={!generateCommit || !separateCommitSession} />
+              </div>
+            ) : isLocalRunner ? (
+              <div className="local-runner-panel">
+                <div className="local-runner-toolbar">
+                  <label
+                    className="compact-select-control"
+                    title="Local AI Server profile"
                   >
-                    {!localModel && <option value="">{loadingLocalModels ? 'Discovering models…' : 'Select a model'}</option>}
-                    {localModel && !localModelOptions.some((model) => model.id === localModel) && (
-                      <option value={localModel}>{localModelDisplayName(localModel)} — not installed</option>
-                    )}
-                    {localModelOptions.map((model) => (
-                      <option key={model.id} value={model.id}>{model.name || localModelDisplayName(model.id)}</option>
-                    ))}
-                  </GlassSelect>
+                    <span className="compact-select-icon" aria-hidden="true"><Server size={15} /></span>
+                    <span className="sr-only">Local AI Server profile</span>
+                    <GlassSelect
+                      value={localProfileId}
+                      aria-label="Local AI Server profile"
+                      disabled={localProfiles.length === 0}
+                      onChange={(event) => {
+                        localModelLoadSequenceRef.current += 1
+                        setLoadingLocalModels(false)
+                        setLocalModelStatus(null)
+                        setLocalModelError('')
+                        setLocalProfileId(event.target.value)
+                        setLocalModel('')
+                        setComposerValidationError('')
+                      }}
+                    >
+                      {localProfiles.length === 0 && <option value="">No enabled Local profile</option>}
+                      {localProfiles.map((profile) => (
+                        <option key={profile.id} value={profile.id}>{profile.name}</option>
+                      ))}
+                    </GlassSelect>
+                  </label>
+                  <label
+                    className="compact-select-control compact-select-control--model"
+                    title="OpenHands model"
+                  >
+                    <span className="compact-select-icon" aria-hidden="true"><Code2 size={15} /></span>
+                    <span className="sr-only">OpenHands model</span>
+                    <GlassSelect
+                      value={localModel}
+                      aria-label="OpenHands model"
+                      disabled={loadingLocalModels || !localModelStatus?.healthy || localModelOptions.length === 0}
+                      onChange={(event) => {
+                        setLocalModel(event.target.value)
+                        setComposerValidationError('')
+                      }}
+                    >
+                      {!localModel && <option value="">{loadingLocalModels ? 'Discovering models…' : 'Select a model'}</option>}
+                      {localModel && !localModelOptions.some((model) => model.id === localModel) && (
+                        <option value={localModel}>{localModelDisplayName(localModel)} — not installed</option>
+                      )}
+                      {localModelOptions.map((model) => (
+                        <option key={model.id} value={model.id}>{model.name || localModelDisplayName(model.id)}</option>
+                      ))}
+                    </GlassSelect>
+                  </label>
                   <GlassButton
                     variant="secondary"
                     size="icon"
                     type="button"
                     disabled={!selectedLocalProfile || loadingLocalModels}
-                    title="Refresh Local AI server health and models"
-                    aria-label="Refresh Local AI server health and models"
+                    title="Refresh Local AI health and models"
+                    aria-label="Refresh Local AI health and models"
                     onClick={() => {
                       if (selectedLocalProfile) void loadLocalModels(selectedLocalProfile.id, true)
                     }}
                   >
                     <RefreshCcw size={14} className={loadingLocalModels ? 'action-spinner' : ''} />
                   </GlassButton>
+                  <div className="local-health-strip" role="status" aria-live="polite" aria-label="OpenHands readiness">
+                    {localHealthItems.map((item) => (
+                      <span
+                        key={item.key}
+                        className={`local-health-icon local-health-icon--${item.state}`}
+                        title={`${item.label}: ${item.detail}`}
+                      >
+                        <span aria-hidden="true">{item.icon}</span>
+                        <span className="local-health-dot" aria-hidden="true" />
+                        <span className="sr-only">{item.label}: {item.detail}</span>
+                      </span>
+                    ))}
+                  </div>
                 </div>
-              </FieldLabel>
-            </div>
-            <div className="local-health-grid" aria-live="polite">
-              <div className={`local-health-item ${checkingOpenHands || (!openHandsMachineStatus && !openHandsMachineError) ? 'pending' : openHandsMachineStatus?.available && !openHandsMachineStatus.requiresWsl ? 'ok' : 'bad'}`}>
-                <span>OpenHands on {selectedProject.machineName}</span>
-                <strong>
-                  {checkingOpenHands || (!openHandsMachineStatus && !openHandsMachineError)
-                    ? 'Checking…'
-                    : openHandsMachineStatus?.available && !openHandsMachineStatus.requiresWsl
-                      ? openHandsMachineStatus.version || 'Available'
-                      : 'Unavailable'}
-                </strong>
-                <small>{openHandsMachineError || openHandsMachineStatus?.message || 'Waiting for machine check.'}</small>
+                {localContextWarning && <div className="local-runner-warning"><ShieldAlert size={15} /> <span>{localContextWarning}</span></div>}
+                {localBlockingMessage && !localApiPending && !openHandsPending && (
+                  <div className="local-runner-error" role="alert">{localBlockingMessage}</div>
+                )}
               </div>
-              <div className={`local-health-item ${loadingLocalModels || (selectedLocalProfile && !localModelStatus && !localModelError) ? 'pending' : localModelStatus?.healthy ? 'ok' : 'bad'}`}>
-                <span>Local AI server from Codex Queue</span>
-                <strong>
-                  {loadingLocalModels || (selectedLocalProfile && !localModelStatus && !localModelError)
-                    ? 'Checking…'
-                    : localModelStatus?.healthy
-                      ? 'Reachable'
-                      : selectedLocalProfile
-                        ? 'Unreachable'
-                        : 'Not configured'}
-                </strong>
-                <small>{localModelError || localModelStatus?.error || selectedLocalProfile?.baseUrl || 'No Local profile configured.'}</small>
-              </div>
-              <div className={`local-health-item ${checkingOpenHands || (!openHandsMachineStatus && Boolean(localModel)) ? 'pending' : targetLocalAiReachable ? 'ok' : 'bad'}`}>
-                <span>Local AI server from {selectedProject.machineName}</span>
-                <strong>
-                  {checkingOpenHands || (!openHandsMachineStatus && Boolean(localModel))
-                    ? 'Checking…'
-                    : targetLocalAiReachable
-                      ? 'Reachable'
-                      : 'Unreachable'}
-                </strong>
-                <small>
-                  {openHandsMachineError
-                    || openHandsMachineStatus?.targetLocalAiMessage
-                    || (localModel ? 'Waiting for target-side network check.' : 'Choose a model to check the target route.')}
-                </small>
-              </div>
-              <div className={`local-health-item ${loadingLocalModels || checkingOpenHands || (selectedLocalProfile && !localModelStatus && !localModelError) ? 'pending' : localModelInstalled && targetLocalModelAvailable ? 'ok' : 'bad'}`}>
-                <span>Selected model</span>
-                <strong>
-                  {loadingLocalModels || checkingOpenHands || (selectedLocalProfile && !localModelStatus && !localModelError)
-                    ? 'Discovering…'
-                    : localModelInstalled && targetLocalModelAvailable
-                      ? localModelDisplayName(localModel)
-                      : 'Unavailable'}
-                </strong>
-                <small>
-                  {localModelInstalled && targetLocalModelAvailable
-                    ? `Installed and visible from ${selectedProject.machineName}`
-                    : openHandsMachineStatus?.targetSelectedModelAvailable === false
-                      ? `Not available from ${selectedProject.machineName}`
-                      : localModelInstalled
-                        ? 'Installed; waiting for target-side verification.'
-                        : 'Choose an installed model.'}
-                </small>
-              </div>
-            </div>
-            {localContextWarning && <div className="local-runner-warning"><ShieldAlert size={15} /> <span>{localContextWarning}</span></div>}
-            {localBlockingMessage && permissionMode === 'FullAccess' && (
-              <div className="local-runner-error">{localBlockingMessage}</div>
+            ) : (
+              <div className="local-runner-error">Claude through OpenHands is not enabled in this Local-only release.</div>
             )}
           </div>
-        ) : (
-          <div className="local-runner-error">Claude through OpenHands is not enabled in this Local-only release.</div>
-        )}
+          <div className="runner-icon-switch" role="group" aria-label="Coding agent runner">
+            {([
+              { value: 'Codex', label: 'Codex / ChatGPT', icon: <Code2 size={17} />, disabled: false },
+              { value: 'Claude', label: 'Claude (not enabled)', icon: <Network size={17} />, disabled: true },
+              { value: 'Local', label: 'Local / OpenHands', icon: <TerminalIcon size={17} />, disabled: false },
+            ] as const).map((option) => (
+              <GlassButton
+                key={option.value}
+                className={`runner-icon-button ${runnerChoice === option.value ? 'active' : ''}`}
+                variant={runnerChoice === option.value ? 'primary' : 'secondary'}
+                size="icon"
+                type="button"
+                aria-pressed={runnerChoice === option.value}
+                aria-label={`${option.label} runner`}
+                title={`${option.label} runner`}
+                disabled={option.disabled}
+                onClick={() => selectRunnerChoice(option.value)}
+              >
+                {option.icon}
+              </GlassButton>
+            ))}
+          </div>
+        </div>
         <div className="composer-actions-row">
           <div className="commit-options">
-            <div className="commit-toggle-group" aria-label="Commit options">
-              <label className={`commit-toggle ${isCodexRunner && generateCommit ? 'active' : ''} ${!isCodexRunner || permissionMode === 'ReadOnly' ? 'disabled' : ''}`}>
-                <input
-                  type="checkbox"
-                  checked={isCodexRunner && generateCommit}
-                  disabled={!isCodexRunner || permissionMode === 'ReadOnly'}
-                  onChange={(event) => {
-                    setGenerateCommit(event.target.checked)
-                    if (!event.target.checked) {
-                      setSeparateCommitSession(false)
-                    }
-                  }}
-                />
-                <span className="commit-toggle-icon"><Check size={12} /></span>
-                <span>Generate git commit</span>
-              </label>
-              <label className={`commit-toggle ${isCodexRunner && generateCommit && separateCommitSession ? 'active' : ''} ${!isCodexRunner || !generateCommit || permissionMode === 'ReadOnly' ? 'disabled' : ''}`}>
-                <input
-                  type="checkbox"
-                  checked={isCodexRunner && generateCommit && separateCommitSession}
-                  disabled={!isCodexRunner || !generateCommit || permissionMode === 'ReadOnly'}
-                  onChange={(event) => setSeparateCommitSession(event.target.checked)}
-                />
-                <span className="commit-toggle-icon"><Check size={12} /></span>
-                <span>Separate commit session</span>
-              </label>
-              {isCodexRunner ? (
+            {isCodexRunner ? (
+              <div className="commit-toggle-group" aria-label="Commit options">
+                <label className={`commit-toggle ${generateCommit ? 'active' : ''} ${permissionMode === 'ReadOnly' ? 'disabled' : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={generateCommit}
+                    disabled={permissionMode === 'ReadOnly'}
+                    onChange={(event) => {
+                      setGenerateCommit(event.target.checked)
+                      if (!event.target.checked) {
+                        setSeparateCommitSession(false)
+                      }
+                    }}
+                  />
+                  <span className="commit-toggle-icon"><Check size={12} /></span>
+                  <span>Generate git commit</span>
+                </label>
+                <label className={`commit-toggle ${generateCommit && separateCommitSession ? 'active' : ''} ${!generateCommit || permissionMode === 'ReadOnly' ? 'disabled' : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={generateCommit && separateCommitSession}
+                    disabled={!generateCommit || permissionMode === 'ReadOnly'}
+                    onChange={(event) => setSeparateCommitSession(event.target.checked)}
+                  />
+                  <span className="commit-toggle-icon"><Check size={12} /></span>
+                  <span>Separate commit session</span>
+                </label>
                 <GlassDropdownSelect
                   label="Codex permission"
                   className="permission-mode-select"
@@ -3749,33 +3800,37 @@ function QueueComposer({
                     { value: 'FullAccess', label: 'Full access', icon: <ShieldAlert size={14} /> },
                   ]}
                 />
-              ) : (
-                <FieldLabel label="OpenHands permission">
-                  <GlassSelect
-                    className="permission-mode-select"
-                    value={permissionMode}
-                    onChange={(event) => {
-                      setPermissionMode(event.target.value as PermissionMode)
-                      setComposerValidationError('')
-                    }}
+              </div>
+            ) : isLocalRunner ? (
+              <div className="openhands-compact-options" aria-label="OpenHands safety options">
+                <GlassButton
+                  className={`openhands-permission-button ${permissionMode === 'FullAccess' ? 'active' : ''}`}
+                  variant={permissionMode === 'FullAccess' ? 'primary' : 'secondary'}
+                  size="icon"
+                  type="button"
+                  aria-pressed={permissionMode === 'FullAccess'}
+                  aria-label="Use OpenHands full access"
+                  title={`Use OpenHands full access. Headless OpenHands cannot request action-level approval and runs with ${selectedProject.machineName}'s machine-account permissions. Queueing still requires confirmation.`}
+                  onClick={() => {
+                    setPermissionMode('FullAccess')
+                    setComposerValidationError('')
+                  }}
+                >
+                  <ShieldAlert size={16} />
+                </GlassButton>
+                <span title="Automatic commit generation is unavailable for OpenHands in this release.">
+                  <GlassButton
+                    variant="secondary"
+                    size="icon"
+                    type="button"
+                    disabled
+                    aria-label="Automatic commit generation unavailable for OpenHands"
                   >
-                    <option value="ReadOnly" disabled>Read only — unavailable</option>
-                    <option value="AskForApproval" disabled>Ask for approval — unavailable</option>
-                    <option value="ApproveForMe" disabled>Approve for me — unavailable</option>
-                    <option value="FullAccess">Full access — always approve</option>
-                  </GlassSelect>
-                </FieldLabel>
-              )}
-            </div>
-            {isLocalRunner && (
-              <div className="local-permission-note">
-                <ShieldAlert size={14} />
-                <span>
-                  Headless OpenHands cannot surface action-level approvals yet. It must use Full access and runs with the
-                  selected machine account’s permissions. Automatic commit generation is disabled for this release.
+                    <GitCommit size={16} />
+                  </GlassButton>
                 </span>
               </div>
-            )}
+            ) : null}
           </div>
           <div className="button-row">
             {isCodexRunner && (
