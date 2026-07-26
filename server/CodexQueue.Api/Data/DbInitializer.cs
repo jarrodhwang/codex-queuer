@@ -52,6 +52,12 @@ public static class DbInitializer
         await EnsureColumnAsync(db, "Projects", "DefaultGenerateCommit", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultGenerateCommit\" INTEGER NOT NULL DEFAULT 1", cancellationToken);
         await EnsureColumnAsync(db, "Projects", "DefaultSeparateCommitSession", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultSeparateCommitSession\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnAsync(db, "Projects", "DefaultPermissionMode", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultPermissionMode\" TEXT NOT NULL DEFAULT 'ApproveForMe'", cancellationToken);
+        await EnsureColumnAsync(db, "Projects", "DefaultExecutionRunner", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultExecutionRunner\" TEXT NOT NULL DEFAULT 'CodexCli'", cancellationToken);
+        await EnsureColumnAsync(db, "Projects", "DefaultLocalProviderProfileId", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultLocalProviderProfileId\" TEXT NULL REFERENCES \"AiProviderProfiles\" (\"Id\") ON DELETE SET NULL", cancellationToken);
+        await EnsureColumnAsync(db, "Projects", "DefaultLocalModel", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultLocalModel\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "Projects", "DefaultLocalModelEffort", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultLocalModelEffort\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "Projects", "DefaultLocalModelSpeed", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultLocalModelSpeed\" TEXT NULL", cancellationToken);
+        await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_Projects_DefaultLocalProviderProfileId\" ON \"Projects\" (\"DefaultLocalProviderProfileId\")", cancellationToken);
         await EnsureColumnAsync(db, "Projects", "SeparateQueuesByTab", "ALTER TABLE \"Projects\" ADD COLUMN \"SeparateQueuesByTab\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "ModelEffort", "ALTER TABLE \"Runs\" ADD COLUMN \"ModelEffort\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "ModelSpeed", "ALTER TABLE \"Runs\" ADD COLUMN \"ModelSpeed\" TEXT NULL", cancellationToken);

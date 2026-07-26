@@ -36,6 +36,11 @@ public static class Mapping
             project.DefaultGenerateCommit,
             project.DefaultSeparateCommitSession,
             project.DefaultPermissionMode,
+            project.DefaultExecutionRunner,
+            project.DefaultLocalProviderProfileId,
+            project.DefaultLocalModel,
+            project.DefaultLocalModelEffort,
+            project.DefaultLocalModelSpeed,
             project.SeparateQueuesByTab,
             project.CreatedAt,
             project.UpdatedAt);

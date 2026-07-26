@@ -118,7 +118,11 @@ The UI and machine checks distinguish:
 - Selected model not installed or not visible from that machine
 - Waiting for the shared Local AI slot
 
-Local AI concurrency defaults to one globally across all connected PCs so one large central model is not overloaded. Health and model discovery are cached briefly, but execution still occurs on the selected machine.
+Local AI concurrency defaults to one globally across all connected PCs so one large central model is not overloaded. Opening the Local picker lazily discovers its model catalog once and keeps that result in the browser. It does not automatically rerun the slower OpenHands CLI and target-route checks when a model, project, or refreshed profile object changes. Use the Local card's refresh button when you want to force model discovery and a complete readiness check. Execution still performs its own server-side validation.
+
+`Save defaults` stores the Local runner, provider profile, plain model choice, and supported reasoning effort separately for each project; it does not overwrite that project's Codex request or commit defaults. Local speed is shown as runtime-managed because Ollama/OpenHands has no provider-neutral equivalent to the Codex priority service tier.
+
+The Local resource card normally samples the selected project machine every five seconds while the card is visible. It stops retrying deterministic unsupported/no-sensor results until refresh and backs off transient failures to avoid repeatedly opening slow SSH connections. Linux local and SSH targets can report CPU and RAM utilization, temperatures, GPU utilization/VRAM/temperature/power, and whole-system power when a reliable Psys/system-total or battery-discharge sensor exists. Collection is read-only, uses no `sudo`, and leaves unsupported sensors blank rather than reporting a misleading zero. The resource card monitors the project execution machine, which may differ from the central Ollama host.
 
 ### Headless permissions and execution safety
 

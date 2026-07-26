@@ -32,6 +32,12 @@ public sealed class Project
     public bool DefaultGenerateCommit { get; set; } = true;
     public bool DefaultSeparateCommitSession { get; set; }
     public PermissionMode DefaultPermissionMode { get; set; } = PermissionMode.ApproveForMe;
+    public ExecutionRunner DefaultExecutionRunner { get; set; } = ExecutionRunner.CodexCli;
+    public Guid? DefaultLocalProviderProfileId { get; set; }
+    public AiProviderProfile? DefaultLocalProviderProfile { get; set; }
+    public string? DefaultLocalModel { get; set; }
+    public string? DefaultLocalModelEffort { get; set; }
+    public string? DefaultLocalModelSpeed { get; set; }
     public bool SeparateQueuesByTab { get; set; }
     public Guid MachineId { get; set; }
     public TargetMachine? Machine { get; set; }
@@ -61,6 +67,7 @@ public sealed class AiProviderProfile
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 
     public ICollection<CodexRequest> Requests { get; set; } = new List<CodexRequest>();
+    public ICollection<Project> DefaultProjects { get; set; } = new List<Project>();
 }
 
 public sealed class QueueTab

@@ -438,17 +438,31 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         string? localAiBaseUrl = null,
         string? selectedModel = null)
     {
-        var cliCheck = await TestCliAsync(machine, cancellationToken);
         if (string.IsNullOrWhiteSpace(localAiBaseUrl))
         {
-            return cliCheck;
+            return await TestCliAsync(machine, cancellationToken);
         }
 
-        var localAiCheck = await ProbeLocalAiAsync(
+        // A native Windows target cannot run this OpenHands integration, and its
+        // route probe uses a POSIX shell. Return the WSL requirement immediately
+        // instead of starting a second check that cannot succeed.
+        if (machine.TargetsWindows())
+        {
+            return await TestCliAsync(machine, cancellationToken);
+        }
+
+        // CLI compatibility and the target-side model route are independent.
+        // Running them together keeps an explicit refresh bounded by the slower
+        // check rather than adding both timeouts.
+        var cliCheckTask = TestCliAsync(machine, cancellationToken);
+        var localAiCheckTask = ProbeLocalAiAsync(
             machine,
             localAiBaseUrl,
             selectedModel,
             cancellationToken);
+        await Task.WhenAll(cliCheckTask, localAiCheckTask);
+        var cliCheck = await cliCheckTask;
+        var localAiCheck = await localAiCheckTask;
         return cliCheck with
         {
             TargetLocalAiChecked = true,

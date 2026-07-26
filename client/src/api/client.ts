@@ -13,6 +13,7 @@ import type {
   MachineTest,
   OpenHandsMachineTest,
   MachineRateLimits,
+  MachineResources,
   Project,
   QueueTab,
   QueueDiagnostics,
@@ -113,6 +114,7 @@ export const api = {
     return apiFetch<OpenHandsMachineTest>(`/machines/${id}/openhands/test${query ? `?${query}` : ''}`)
   },
   machineUsage: (id: string) => apiFetch<MachineRateLimits>(`/machines/${id}/usage`),
+  machineResources: (id: string) => apiFetch<MachineResources>(`/machines/${id}/resources`),
   machineFolders: (id: string, path = '') =>
     apiFetch<FileTreeEntry[]>(`/machines/${id}/folders?path=${encodeURIComponent(path)}`),
   projects: () => apiFetch<Project[]>('/projects'),

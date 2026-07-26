@@ -38,6 +38,8 @@ builder.Services.AddCors(options =>
         .AllowAnyMethod());
 });
 builder.Services.AddSingleton<ITargetCommandRunner, TargetCommandRunner>();
+builder.Services.AddSingleton<IResourceTelemetryCommandExecutor, ResourceTelemetryCommandExecutor>();
+builder.Services.AddSingleton<IMachineResourceTelemetryService, MachineResourceTelemetryService>();
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<AiProviderService>();
 builder.Services.AddSingleton<IAiProviderService>(sp => sp.GetRequiredService<AiProviderService>());

@@ -703,6 +703,36 @@ public sealed class OpenHandsCommandRunnerTests
     }
 
     [Fact]
+    public async Task TestMachineAsync_WindowsTargetSkipsPosixLocalAiProbe()
+    {
+        var probeCalls = 0;
+        var runner = new OpenHandsCommandRunner(
+            NullLogger<OpenHandsCommandRunner>.Instance,
+            new OpenHandsCommandOptions(
+                "must-not-launch-openhands",
+                (_, _, _, _) =>
+                {
+                    probeCalls++;
+                    return Task.FromResult(new OpenHandsLocalAiCheck(true, true, "healthy"));
+                }));
+
+        var result = await runner.TestMachineAsync(
+            new TargetMachine
+            {
+                Kind = MachineKind.Ssh,
+                Platform = MachinePlatform.Windows,
+                Host = "windows.example.test",
+            },
+            CancellationToken.None,
+            "http://ollama.example.test:11434/v1",
+            "openai/gpt-oss:20b");
+
+        Assert.True(result.RequiresWsl);
+        Assert.False(result.TargetLocalAiChecked);
+        Assert.Equal(0, probeCalls);
+    }
+
+    [Fact]
     public async Task TestMachineAsync_LocalCliDoesNotInheritProviderOrServerSecrets()
     {
         if (OperatingSystem.IsWindows())

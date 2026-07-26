@@ -2419,6 +2419,8 @@ public sealed class QueueWorker(
               - Do not create Git commits, push, force-push, rewrite history, or alter remote branches.
               - Do not use sudo, administrator elevation, or change machine-level configuration.
               - Do not inspect or access credentials, secret stores, or unrelated environment variables. Use only the inference configuration supplied by the launcher.
+              - When the user asks for a code or file change, make the change in this run. Do not substitute a recipe, sample code, or proposed paths for an edit.
+              - Before finishing an implementation request, inspect the affected files and verify the workspace diff. If no change was made, say so plainly instead of claiming the implementation is complete.
               """
             : "";
         if (!request.GenerateCommit)

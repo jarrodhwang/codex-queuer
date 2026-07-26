@@ -57,6 +57,11 @@ export type Project = {
   defaultGenerateCommit?: boolean | null
   defaultSeparateCommitSession?: boolean | null
   defaultPermissionMode?: PermissionMode | null
+  defaultExecutionRunner?: ExecutionRunner | null
+  defaultLocalProviderProfileId?: string | null
+  defaultLocalModel?: string | null
+  defaultLocalModelEffort?: string | null
+  defaultLocalModelSpeed?: string | null
   separateQueuesByTab: boolean
   createdAt: string
   updatedAt: string
@@ -75,6 +80,11 @@ export type SaveProjectRequest = {
   defaultGenerateCommit?: boolean | null
   defaultSeparateCommitSession?: boolean | null
   defaultPermissionMode?: PermissionMode | null
+  defaultExecutionRunner?: ExecutionRunner | null
+  defaultLocalProviderProfileId?: string | null
+  defaultLocalModel?: string | null
+  defaultLocalModelEffort?: string | null
+  defaultLocalModelSpeed?: string | null
   separateQueuesByTab?: boolean | null
 }
 
@@ -355,6 +365,34 @@ export type MachineRateLimits = {
   available: boolean
   error?: string | null
   limits: RateLimit[]
+}
+
+export type MachineGpuResource = {
+  index: number
+  name: string
+  utilizationPercent?: number | null
+  memoryUsagePercent?: number | null
+  memoryUsedBytes?: number | null
+  memoryTotalBytes?: number | null
+  temperatureCelsius?: number | null
+  powerWatts?: number | null
+}
+
+export type MachineResources = {
+  machineId: string
+  machineName: string
+  available: boolean
+  error?: string | null
+  cpuUsagePercent?: number | null
+  memoryUsagePercent?: number | null
+  memoryUsedBytes?: number | null
+  memoryTotalBytes?: number | null
+  cpuTemperatureCelsius?: number | null
+  systemTemperatureCelsius?: number | null
+  systemPowerWatts?: number | null
+  systemPowerSource?: string | null
+  gpus: MachineGpuResource[]
+  collectedAt: string
 }
 
 export type RateLimit = {

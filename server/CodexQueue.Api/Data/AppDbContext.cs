@@ -40,12 +40,21 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.DefaultGenerateCommit);
             entity.Property(x => x.DefaultSeparateCommitSession);
             entity.Property(x => x.DefaultPermissionMode).HasConversion<string>().HasMaxLength(32);
+            entity.Property(x => x.DefaultExecutionRunner).HasConversion<string>().HasMaxLength(32);
+            entity.Property(x => x.DefaultLocalModel).HasMaxLength(256);
+            entity.Property(x => x.DefaultLocalModelEffort).HasMaxLength(32);
+            entity.Property(x => x.DefaultLocalModelSpeed).HasMaxLength(32);
             entity.Property(x => x.SeparateQueuesByTab);
             entity.HasOne(x => x.Machine)
                 .WithMany(x => x.Projects)
                 .HasForeignKey(x => x.MachineId)
                 .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(x => x.DefaultLocalProviderProfile)
+                .WithMany(x => x.DefaultProjects)
+                .HasForeignKey(x => x.DefaultLocalProviderProfileId)
+                .OnDelete(DeleteBehavior.SetNull);
             entity.HasIndex(x => new { x.MachineId, x.Name }).IsUnique();
+            entity.HasIndex(x => x.DefaultLocalProviderProfileId);
         });
 
         modelBuilder.Entity<AiProviderProfile>(entity =>

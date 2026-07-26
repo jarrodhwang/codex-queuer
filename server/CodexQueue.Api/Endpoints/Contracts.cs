@@ -41,6 +41,11 @@ public sealed record ProjectDto(
     bool DefaultGenerateCommit,
     bool DefaultSeparateCommitSession,
     PermissionMode DefaultPermissionMode,
+    ExecutionRunner DefaultExecutionRunner,
+    Guid? DefaultLocalProviderProfileId,
+    string? DefaultLocalModel,
+    string? DefaultLocalModelEffort,
+    string? DefaultLocalModelSpeed,
     bool SeparateQueuesByTab,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt);
@@ -58,6 +63,11 @@ public sealed record SaveProjectRequest(
     bool? DefaultGenerateCommit,
     bool? DefaultSeparateCommitSession,
     PermissionMode? DefaultPermissionMode,
+    ExecutionRunner? DefaultExecutionRunner,
+    Guid? DefaultLocalProviderProfileId,
+    string? DefaultLocalModel,
+    string? DefaultLocalModelEffort,
+    string? DefaultLocalModelSpeed,
     bool? SeparateQueuesByTab);
 
 public sealed record QueueTabDto(
@@ -227,6 +237,32 @@ public sealed record ModelOptionDto(string Label, string Model, bool SupportsPri
 public sealed record ApiConfigDto(bool RequiresToken, IReadOnlyList<ModelOptionDto> Models);
 
 public sealed record MachineTestDto(bool Success, string Output);
+
+public sealed record GpuResourceTelemetryDto(
+    int Index,
+    string Name,
+    double? UtilizationPercent,
+    double? MemoryUsagePercent,
+    long? MemoryUsedBytes,
+    long? MemoryTotalBytes,
+    double? TemperatureCelsius,
+    double? PowerWatts);
+
+public sealed record MachineResourceTelemetryDto(
+    Guid MachineId,
+    string MachineName,
+    bool Available,
+    string? Error,
+    double? CpuUsagePercent,
+    double? MemoryUsagePercent,
+    long? MemoryUsedBytes,
+    long? MemoryTotalBytes,
+    double? CpuTemperatureCelsius,
+    double? SystemTemperatureCelsius,
+    double? SystemPowerWatts,
+    string? SystemPowerSource,
+    IReadOnlyList<GpuResourceTelemetryDto> Gpus,
+    DateTimeOffset CollectedAt);
 
 public sealed record OpenHandsMachineCheckDto(
     bool Available,

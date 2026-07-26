@@ -163,6 +163,50 @@ public static class ApiEndpoints
             }
         });
 
+        api.MapGet("/machines/{id:guid}/resources", async (
+            Guid id,
+            AppDbContext db,
+            IMachineResourceTelemetryService telemetryService,
+            HttpContext httpContext,
+            CancellationToken cancellationToken) =>
+        {
+            var machine = await db.Machines
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            if (machine is null)
+            {
+                return Results.NotFound();
+            }
+
+            // Resource readings are sampled on demand and must not be replayed from a
+            // browser/proxy cache as if they were current.
+            httpContext.Response.Headers.CacheControl = "no-store";
+            var telemetry = await telemetryService.CollectAsync(machine, cancellationToken);
+            return Results.Ok(new MachineResourceTelemetryDto(
+                machine.Id,
+                machine.Name,
+                telemetry.Available,
+                telemetry.Error,
+                telemetry.CpuUsagePercent,
+                telemetry.MemoryUsagePercent,
+                telemetry.MemoryUsedBytes,
+                telemetry.MemoryTotalBytes,
+                telemetry.CpuTemperatureCelsius,
+                telemetry.SystemTemperatureCelsius,
+                telemetry.SystemPowerWatts,
+                telemetry.SystemPowerSource,
+                telemetry.Gpus.Select(gpu => new GpuResourceTelemetryDto(
+                    gpu.Index,
+                    gpu.Name,
+                    gpu.UtilizationPercent,
+                    gpu.MemoryUsagePercent,
+                    gpu.MemoryUsedBytes,
+                    gpu.MemoryTotalBytes,
+                    gpu.TemperatureCelsius,
+                    gpu.PowerWatts)).ToArray(),
+                telemetry.CollectedAt));
+        });
+
         api.MapGet("/machines/{id:guid}/openhands/test", async (
             Guid id,
             Guid? providerProfileId,
@@ -342,6 +386,7 @@ public static class ApiEndpoints
                 return Results.NotFound();
             }
 
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
             if (await db.Requests.AnyAsync(x => x.ProviderProfileId == id, cancellationToken))
             {
                 return Results.Conflict(new
@@ -350,8 +395,20 @@ public static class ApiEndpoints
                 });
             }
 
+            await db.Projects
+                .Where(x => x.DefaultLocalProviderProfileId == id)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(x => x.DefaultExecutionRunner, ExecutionRunner.CodexCli)
+                        .SetProperty(x => x.DefaultLocalProviderProfileId, (Guid?)null)
+                        .SetProperty(x => x.DefaultLocalModel, (string?)null)
+                        .SetProperty(x => x.DefaultLocalModelEffort, (string?)null)
+                        .SetProperty(x => x.DefaultLocalModelSpeed, (string?)null)
+                        .SetProperty(x => x.UpdatedAt, DateTimeOffset.UtcNow),
+                    cancellationToken);
             db.AiProviderProfiles.Remove(profile);
             await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
             return Results.NoContent();
         });
 
@@ -552,7 +609,11 @@ public static class ApiEndpoints
             return Results.NoContent();
         });
 
-        api.MapPost("/projects", async (SaveProjectRequest input, AppDbContext db, CancellationToken cancellationToken) =>
+        api.MapPost("/projects", async (
+            SaveProjectRequest input,
+            AppDbContext db,
+            IAiProviderService providers,
+            CancellationToken cancellationToken) =>
         {
             if (string.IsNullOrWhiteSpace(input.Name) || string.IsNullOrWhiteSpace(input.Path))
             {
@@ -562,6 +623,12 @@ public static class ApiEndpoints
             if (!await db.Machines.AnyAsync(x => x.Id == input.MachineId, cancellationToken))
             {
                 return Results.BadRequest(new { error = "Machine does not exist." });
+            }
+
+            var localDefaults = await NormalizeLocalProjectDefaultsAsync(input, db, providers, cancellationToken);
+            if (localDefaults.Error is not null)
+            {
+                return Results.BadRequest(new { error = localDefaults.Error });
             }
 
             var project = new Project
@@ -578,6 +645,11 @@ public static class ApiEndpoints
                 DefaultGenerateCommit = input.DefaultPermissionMode != PermissionMode.ReadOnly && (input.DefaultGenerateCommit ?? true),
                 DefaultSeparateCommitSession = input.DefaultPermissionMode != PermissionMode.ReadOnly && (input.DefaultSeparateCommitSession ?? false),
                 DefaultPermissionMode = input.DefaultPermissionMode ?? PermissionMode.ApproveForMe,
+                DefaultExecutionRunner = input.DefaultExecutionRunner ?? ExecutionRunner.CodexCli,
+                DefaultLocalProviderProfileId = localDefaults.ProviderProfileId,
+                DefaultLocalModel = localDefaults.Model,
+                DefaultLocalModelEffort = localDefaults.Effort,
+                DefaultLocalModelSpeed = null,
                 SeparateQueuesByTab = input.SeparateQueuesByTab ?? false
             };
             db.Projects.Add(project);
@@ -586,7 +658,13 @@ public static class ApiEndpoints
             return Results.Created($"/api/projects/{project.Id}", project.ToDto());
         });
 
-        api.MapPut("/projects/{id:guid}", async (Guid id, SaveProjectRequest input, AppDbContext db, IQueueCoordinator queue, CancellationToken cancellationToken) =>
+        api.MapPut("/projects/{id:guid}", async (
+            Guid id,
+            SaveProjectRequest input,
+            AppDbContext db,
+            IQueueCoordinator queue,
+            IAiProviderService providers,
+            CancellationToken cancellationToken) =>
         {
             var project = await db.Projects.Include(x => x.Machine).FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
             if (project is null)
@@ -602,6 +680,52 @@ public static class ApiEndpoints
             if (string.IsNullOrWhiteSpace(input.Name) || string.IsNullOrWhiteSpace(input.Path))
             {
                 return Results.BadRequest(new { error = "Project name and path are required." });
+            }
+
+            var hasLocalDefaultsInput = HasLocalProjectDefaultsInput(input);
+            var requestedDefaultRunner = hasLocalDefaultsInput
+                ? input.DefaultExecutionRunner ?? project.DefaultExecutionRunner
+                : project.DefaultExecutionRunner;
+            if (!Enum.IsDefined(requestedDefaultRunner))
+            {
+                return Results.BadRequest(new { error = "Default execution runner is invalid." });
+            }
+
+            var mergedLocalDefaultsInput = MergeLocalProjectDefaultsInput(
+                input,
+                project,
+                requestedDefaultRunner);
+            var localValuesChanged = hasLocalDefaultsInput
+                && (mergedLocalDefaultsInput.DefaultLocalProviderProfileId != project.DefaultLocalProviderProfileId
+                    || !string.Equals(
+                        NormalizeOptional(mergedLocalDefaultsInput.DefaultLocalModel),
+                        project.DefaultLocalModel,
+                        StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(
+                        NormalizeOpenHandsReasoningEffort(mergedLocalDefaultsInput.DefaultLocalModelEffort),
+                        project.DefaultLocalModelEffort,
+                        StringComparison.OrdinalIgnoreCase)
+                    || (!string.IsNullOrWhiteSpace(mergedLocalDefaultsInput.DefaultLocalModelEffort)
+                        && NormalizeOpenHandsReasoningEffort(mergedLocalDefaultsInput.DefaultLocalModelEffort) is null)
+                    || !string.IsNullOrWhiteSpace(mergedLocalDefaultsInput.DefaultLocalModelSpeed));
+            var mustValidateLocalDefaults = localValuesChanged
+                || (requestedDefaultRunner == ExecutionRunner.OpenHandsCli
+                    && project.DefaultExecutionRunner != ExecutionRunner.OpenHandsCli);
+            var localDefaults = mustValidateLocalDefaults
+                ? await NormalizeLocalProjectDefaultsAsync(
+                    mergedLocalDefaultsInput,
+                    db,
+                    providers,
+                    cancellationToken,
+                    requestedDefaultRunner)
+                : new NormalizedLocalProjectDefaults(
+                    project.DefaultLocalProviderProfileId,
+                    project.DefaultLocalModel,
+                    project.DefaultLocalModelEffort,
+                    null);
+            if (localDefaults.Error is not null)
+            {
+                return Results.BadRequest(new { error = localDefaults.Error });
             }
 
             var normalizedPath = input.Path.Trim();
@@ -648,6 +772,11 @@ public static class ApiEndpoints
             project.DefaultGenerateCommit = input.DefaultPermissionMode != PermissionMode.ReadOnly && (input.DefaultGenerateCommit ?? true);
             project.DefaultSeparateCommitSession = input.DefaultPermissionMode != PermissionMode.ReadOnly && (input.DefaultSeparateCommitSession ?? false);
             project.DefaultPermissionMode = input.DefaultPermissionMode ?? PermissionMode.ApproveForMe;
+            project.DefaultExecutionRunner = requestedDefaultRunner;
+            project.DefaultLocalProviderProfileId = localDefaults.ProviderProfileId;
+            project.DefaultLocalModel = localDefaults.Model;
+            project.DefaultLocalModelEffort = localDefaults.Effort;
+            project.DefaultLocalModelSpeed = null;
             project.SeparateQueuesByTab = input.SeparateQueuesByTab ?? false;
             project.UpdatedAt = DateTimeOffset.UtcNow;
             if (executionContextChanged)
@@ -1764,47 +1893,16 @@ public static class ApiEndpoints
             return new RunnerSelectionValidation(null, normalizedModel, "Selected provider profile does not exist.");
         }
 
-        if (!profile.Enabled)
-        {
-            return new RunnerSelectionValidation(profile, normalizedModel, "Selected provider profile is disabled.");
-        }
-
-        if (profile.Source != AiProviderSource.Local)
+        var profileError = ValidateLocalProviderProfileForOpenHands(profile, providers);
+        if (profileError is not null)
         {
             return new RunnerSelectionValidation(
                 profile,
                 normalizedModel,
-                "This first OpenHands release executes only Local/Ollama profiles. Authenticated cloud profiles remain disabled to prevent credential exposure to agent-launched commands.");
-        }
-
-        if (!string.IsNullOrWhiteSpace(profile.ApiKeyEnvironmentVariable))
-        {
-            return new RunnerSelectionValidation(
-                profile,
-                normalizedModel,
-                "Authenticated Local AI profiles are not available in this release. Use an unauthenticated Ollama endpoint protected by LAN/VPN access.");
+                profileError);
         }
 
         var validation = providers.Validate(profile);
-        if (!validation.IsValid)
-        {
-            return new RunnerSelectionValidation(
-                profile,
-                normalizedModel,
-                "Provider profile is invalid: " + string.Join(" ", validation.Errors));
-        }
-
-        if (profile.ConfiguredContextWindow is not { } configuredContextWindow
-            || configuredContextWindow < AiProviderService.ContextWarningThreshold)
-        {
-            return new RunnerSelectionValidation(
-                profile,
-                normalizedModel,
-                "OpenHands requires a configured Local AI context window of at least "
-                + AiProviderService.ContextWarningThreshold.ToString("N0")
-                + " tokens for reliable project prompts.");
-        }
-
         normalizedModel = AiProviderService.QualifyModel(AiProviderSource.Local, normalizedModel);
         var discovery = await providers.DiscoverModelsAsync(profile, cancellationToken);
         profile.LastHealthStatus = discovery.HealthStatus;
@@ -1943,6 +2041,156 @@ public static class ApiEndpoints
         if (input.Port is < 1 or > 65535)
         {
             return "SSH port must be between 1 and 65535.";
+        }
+
+        return null;
+    }
+
+    internal sealed record NormalizedLocalProjectDefaults(
+        Guid? ProviderProfileId,
+        string? Model,
+        string? Effort,
+        string? Error);
+
+    internal static bool HasLocalProjectDefaultsInput(SaveProjectRequest input) =>
+        input.DefaultExecutionRunner is not null
+        || input.DefaultLocalProviderProfileId is not null
+        || input.DefaultLocalModel is not null
+        || input.DefaultLocalModelEffort is not null
+        || input.DefaultLocalModelSpeed is not null;
+
+    internal static SaveProjectRequest MergeLocalProjectDefaultsInput(
+        SaveProjectRequest input,
+        Project project,
+        ExecutionRunner effectiveRunner)
+    {
+        // ASP.NET binds both an omitted nullable property and an explicit JSON null
+        // to null. Preserve stored fields for genuinely partial updates, but when a
+        // caller supplies a profile/model selection, a null effort means that the
+        // newly selected model has no selectable reasoning effort.
+        var localSelectionSupplied =
+            input.DefaultLocalProviderProfileId is not null
+            || input.DefaultLocalModel is not null;
+        return input with
+        {
+            DefaultExecutionRunner = effectiveRunner,
+            DefaultLocalProviderProfileId =
+                input.DefaultLocalProviderProfileId
+                ?? project.DefaultLocalProviderProfileId,
+            DefaultLocalModel =
+                input.DefaultLocalModel
+                ?? project.DefaultLocalModel,
+            DefaultLocalModelEffort =
+                input.DefaultLocalModelEffort
+                ?? (localSelectionSupplied ? null : project.DefaultLocalModelEffort),
+            DefaultLocalModelSpeed =
+                input.DefaultLocalModelSpeed
+                ?? project.DefaultLocalModelSpeed,
+        };
+    }
+
+    internal static async Task<NormalizedLocalProjectDefaults> NormalizeLocalProjectDefaultsAsync(
+        SaveProjectRequest input,
+        AppDbContext db,
+        IAiProviderService providers,
+        CancellationToken cancellationToken,
+        ExecutionRunner? effectiveRunner = null)
+    {
+        var runner = effectiveRunner ?? input.DefaultExecutionRunner ?? ExecutionRunner.CodexCli;
+        if (!Enum.IsDefined(runner))
+        {
+            return new(null, null, null, "Default execution runner is invalid.");
+        }
+
+        var model = NormalizeOptional(input.DefaultLocalModel);
+        if (input.DefaultLocalProviderProfileId is not { } profileId)
+        {
+            if (runner == ExecutionRunner.OpenHandsCli)
+            {
+                return new(null, null, null, "A Local AI Server profile is required when Local is the default runner.");
+            }
+
+            return new(null, null, null, null);
+        }
+
+        var profile = await db.AiProviderProfiles
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Id == profileId, cancellationToken);
+        if (profile is null || profile.Source != AiProviderSource.Local)
+        {
+            return new(null, null, null, "The selected Local AI Server profile does not exist or is not a Local provider.");
+        }
+
+        var profileError = ValidateLocalProviderProfileForOpenHands(profile, providers);
+        if (profileError is not null)
+        {
+            return new(null, null, null, profileError);
+        }
+
+        if (model is null)
+        {
+            if (runner == ExecutionRunner.OpenHandsCli)
+            {
+                return new(null, null, null, "A Local model is required when Local is the default runner.");
+            }
+
+            return new(profileId, null, null, null);
+        }
+
+        try
+        {
+            model = AiProviderService.QualifyModel(AiProviderSource.Local, model);
+        }
+        catch (ArgumentException ex)
+        {
+            return new(null, null, null, ex.Message);
+        }
+
+        var effort = NormalizeOpenHandsReasoningEffort(input.DefaultLocalModelEffort);
+        if (!string.IsNullOrWhiteSpace(input.DefaultLocalModelEffort) && effort is null)
+        {
+            return new(null, null, null, "Local reasoning effort must be low, medium, or high.");
+        }
+
+        // Ollama/OpenHands has no provider-neutral equivalent to Codex's priority
+        // service tier. Keep the reserved field null until an executable capability
+        // is advertised instead of persisting a control that would do nothing.
+        return new(profileId, model, effort, null);
+    }
+
+    private static string? ValidateLocalProviderProfileForOpenHands(
+        AiProviderProfile profile,
+        IAiProviderService providers)
+    {
+        if (!profile.Enabled)
+        {
+            return "Selected Local AI Server profile is disabled.";
+        }
+
+        if (profile.Source != AiProviderSource.Local)
+        {
+            return "This OpenHands release executes only Local/Ollama profiles. "
+                + "Authenticated cloud profiles remain disabled to prevent credential exposure to agent-launched commands.";
+        }
+
+        if (!string.IsNullOrWhiteSpace(profile.ApiKeyEnvironmentVariable))
+        {
+            return "Authenticated Local AI profiles are not available in this release. "
+                + "Use an unauthenticated Ollama endpoint protected by LAN/VPN access.";
+        }
+
+        var validation = providers.Validate(profile);
+        if (!validation.IsValid)
+        {
+            return "Local AI Server profile is invalid: " + string.Join(" ", validation.Errors);
+        }
+
+        if (profile.ConfiguredContextWindow is not { } configuredContextWindow
+            || configuredContextWindow < AiProviderService.ContextWarningThreshold)
+        {
+            return "OpenHands requires a configured Local AI context window of at least "
+                + AiProviderService.ContextWarningThreshold.ToString("N0")
+                + " tokens for reliable project prompts.";
         }
 
         return null;
