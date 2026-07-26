@@ -77,6 +77,8 @@ public sealed class OpenHandsQueueAgentRunnerTests
             string model,
             string baseUrl,
             string apiKey,
+            int contextWindow,
+            string? reasoningEffort,
             string? conversationId,
             string prompt,
             bool alwaysApproveConfirmed,

@@ -7,7 +7,13 @@ using CodexQueue.Api.Domain;
 
 namespace CodexQueue.Api.Services;
 
-public sealed record AiProviderModel(string Name, string Model);
+public sealed record AiProviderModel(
+    string Name,
+    string Model,
+    int? MaximumContextWindow = null,
+    bool SupportsTools = false,
+    bool SupportsReasoning = false,
+    bool SupportsReasoningEffort = false);
 
 public sealed record AiProviderContextWarning(
     int ConfiguredContextWindow,
@@ -55,8 +61,8 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
 {
     public const string LocalPlaceholderApiKey = "local-llm";
     public const string LocalApiKeyPlaceholder = LocalPlaceholderApiKey;
-    public const int ContextWarningThreshold = 22_000;
-    public const int RecommendedContextWindow = 32_768;
+    public const int ContextWarningThreshold = 65_536;
+    public const int RecommendedContextWindow = 65_536;
     private const int MaximumModelCatalogBytes = 2 * 1024 * 1024;
     private const int MaximumDiscoveredModels = 1_000;
     private const int MaximumModelIdentifierLength = 256;
@@ -174,11 +180,9 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
             configuredContextWindow,
             ContextWarningThreshold,
             RecommendedContextWindow,
-            "The configured context window is below "
+            "The configured context window is below the "
             + ContextWarningThreshold.ToString("N0", CultureInfo.InvariantCulture)
-            + " tokens. OpenHands works best with "
-            + RecommendedContextWindow.ToString("N0", CultureInfo.InvariantCulture)
-            + " tokens or more.");
+            + "-token minimum required for reliable OpenHands project prompts.");
     }
 
     public void ApplyHealth(AiProviderProfile profile, AiProviderDiscoveryResult result)
@@ -413,7 +417,7 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
     private async Task<DiscoveryAttempt> ReadModelsAsync(
         AiProviderProfile profile,
         Uri uri,
-        Func<JsonElement, IReadOnlyList<string>> parser,
+        Func<JsonElement, IReadOnlyList<DiscoveredModel>> parser,
         CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -448,13 +452,25 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
                 stream,
                 cancellationToken: timeout.Token);
             var models = parser(document.RootElement)
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Select(x => x.Trim())
-                .Where(IsSafeModelIdentifier)
-                .Distinct(StringComparer.Ordinal)
-                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                .Where(x => !string.IsNullOrWhiteSpace(x.Name))
+                .Select(x => x with { Name = x.Name.Trim() })
+                .Where(x => IsSafeModelIdentifier(x.Name))
+                .GroupBy(x => x.Name, StringComparer.Ordinal)
+                .Select(x => new DiscoveredModel(
+                    x.Key,
+                    x.Max(model => model.MaximumContextWindow),
+                    x.Any(model => model.SupportsTools),
+                    x.Any(model => model.SupportsReasoning),
+                    x.Any(model => model.SupportsReasoningEffort)))
+                .OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
                 .Take(MaximumDiscoveredModels)
-                .Select(x => new AiProviderModel(x, QualifyModel(profile.Source, x)))
+                .Select(x => new AiProviderModel(
+                    x.Name,
+                    QualifyModel(profile.Source, x.Name),
+                    x.MaximumContextWindow,
+                    x.SupportsTools,
+                    x.SupportsReasoning,
+                    x.SupportsReasoningEffort))
                 .ToArray();
             return DiscoveryAttempt.Succeeded(models);
         }
@@ -496,7 +512,7 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
         }.Uri;
     }
 
-    private static IReadOnlyList<string> ParseOllamaTags(JsonElement root)
+    private static IReadOnlyList<DiscoveredModel> ParseOllamaTags(JsonElement root)
     {
         if (!root.TryGetProperty("models", out var models)
             || models.ValueKind != JsonValueKind.Array)
@@ -506,13 +522,27 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
 
         return models.EnumerateArray()
             .Where(x => x.ValueKind == JsonValueKind.Object)
-            .Select(x => ReadString(x, "name") ?? ReadString(x, "model"))
-            .Where(x => !string.IsNullOrWhiteSpace(x))
-            .Select(x => x!)
+            .Select(x =>
+            {
+                var name = ReadString(x, "name") ?? ReadString(x, "model") ?? "";
+                var capabilities = ReadStringArray(x, "capabilities");
+                var supportsReasoning = capabilities.Contains(
+                    "thinking",
+                    StringComparer.OrdinalIgnoreCase);
+                var family = ReadNestedString(x, "details", "family");
+                return new DiscoveredModel(
+                    name,
+                    ReadPositiveInt32(x, "details", "context_length"),
+                    capabilities.Contains("tools", StringComparer.OrdinalIgnoreCase),
+                    supportsReasoning,
+                    supportsReasoning
+                    && (string.Equals(family, "gptoss", StringComparison.OrdinalIgnoreCase)
+                        || name.StartsWith("gpt-oss", StringComparison.OrdinalIgnoreCase)));
+            })
             .ToArray();
     }
 
-    private static IReadOnlyList<string> ParseOpenAiModels(JsonElement root)
+    private static IReadOnlyList<DiscoveredModel> ParseOpenAiModels(JsonElement root)
     {
         if (!root.TryGetProperty("data", out var models)
             || models.ValueKind != JsonValueKind.Array)
@@ -524,7 +554,7 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
             .Where(x => x.ValueKind == JsonValueKind.Object)
             .Select(x => ReadString(x, "id") ?? ReadString(x, "name"))
             .Where(x => !string.IsNullOrWhiteSpace(x))
-            .Select(x => x!)
+            .Select(x => new DiscoveredModel(x!))
             .ToArray();
     }
 
@@ -558,6 +588,54 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
         && value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;
+
+    private static IReadOnlyList<string> ReadStringArray(
+        JsonElement element,
+        string propertyName) =>
+        element.TryGetProperty(propertyName, out var values)
+        && values.ValueKind == JsonValueKind.Array
+            ? values.EnumerateArray()
+                .Where(x => x.ValueKind == JsonValueKind.String)
+                .Select(x => x.GetString())
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Select(x => x!)
+                .ToArray()
+            : [];
+
+    private static string? ReadNestedString(
+        JsonElement element,
+        string objectPropertyName,
+        string valuePropertyName) =>
+        element.TryGetProperty(objectPropertyName, out var nested)
+        && nested.ValueKind == JsonValueKind.Object
+        && nested.TryGetProperty(valuePropertyName, out var value)
+        && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static int? ReadPositiveInt32(
+        JsonElement element,
+        string objectPropertyName,
+        string valuePropertyName)
+    {
+        if (!element.TryGetProperty(objectPropertyName, out var nested)
+            || nested.ValueKind != JsonValueKind.Object
+            || !nested.TryGetProperty(valuePropertyName, out var value)
+            || !value.TryGetInt32(out var parsed)
+            || parsed <= 0)
+        {
+            return null;
+        }
+
+        return parsed;
+    }
+
+    private sealed record DiscoveredModel(
+        string Name,
+        int? MaximumContextWindow = null,
+        bool SupportsTools = false,
+        bool SupportsReasoning = false,
+        bool SupportsReasoningEffort = false);
 
     private sealed record DiscoveryAttempt(
         bool Reachable,

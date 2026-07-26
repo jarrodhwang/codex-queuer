@@ -266,7 +266,13 @@ public sealed record SaveAiProviderProfileRequest(
     int? ConfiguredContextWindow,
     string? DefaultModel);
 
-public sealed record AiProviderModelDto(string Id, string Name);
+public sealed record AiProviderModelDto(
+    string Id,
+    string Name,
+    int? MaximumContextWindow = null,
+    bool SupportsTools = false,
+    bool SupportsReasoning = false,
+    bool SupportsReasoningEffort = false);
 
 public sealed record AiProviderModelsDto(
     Guid ProfileId,

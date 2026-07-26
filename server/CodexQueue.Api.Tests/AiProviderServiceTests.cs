@@ -128,7 +128,8 @@ public sealed class AiProviderServiceTests
     {
         var service = CreateService(_ => JsonResponse("""{"models":[]}"""));
         var belowThreshold = LocalProfile();
-        belowThreshold.ConfiguredContextWindow = 21_999;
+        belowThreshold.ConfiguredContextWindow =
+            AiProviderService.ContextWarningThreshold - 1;
         var atThreshold = LocalProfile();
         atThreshold.ConfiguredContextWindow = AiProviderService.ContextWarningThreshold;
         var cloud = CloudProfile(AiProviderSource.OpenAi, "OPENAI_API_KEY");
@@ -137,7 +138,9 @@ public sealed class AiProviderServiceTests
         var warning = service.GetContextWarning(belowThreshold);
 
         Assert.NotNull(warning);
-        Assert.Equal(21_999, warning.ConfiguredContextWindow);
+        Assert.Equal(
+            AiProviderService.ContextWarningThreshold - 1,
+            warning.ConfiguredContextWindow);
         Assert.Equal(AiProviderService.ContextWarningThreshold, warning.WarningThreshold);
         Assert.Equal(AiProviderService.RecommendedContextWindow, warning.RecommendedContextWindow);
         Assert.Null(service.GetContextWarning(atThreshold));
@@ -170,7 +173,11 @@ public sealed class AiProviderServiceTests
                   "models": [
                     { "name": "qwen2.5-coder:32b" },
                     { "model": "codestral:22b" },
-                    { "name": "qwen2.5-coder:32b" }
+                    {
+                      "name": "qwen2.5-coder:32b",
+                      "capabilities": ["completion", "tools", "thinking"],
+                      "details": { "context_length": 131072 }
+                    }
                   ]
                 }
                 """);
@@ -193,11 +200,45 @@ public sealed class AiProviderServiceTests
             {
                 Assert.Equal("qwen2.5-coder:32b", model.Name);
                 Assert.Equal("openai/qwen2.5-coder:32b", model.Model);
+                Assert.Equal(131_072, model.MaximumContextWindow);
+                Assert.True(model.SupportsTools);
+                Assert.True(model.SupportsReasoning);
+                Assert.False(model.SupportsReasoningEffort);
             });
         var request = Assert.Single(requests);
         Assert.Equal("http://ollama.test:11434/api/tags", request.Uri);
         Assert.Equal("Bearer", request.Authorization?.Scheme);
         Assert.Equal(AiProviderService.LocalPlaceholderApiKey, request.Authorization?.Parameter);
+    }
+
+    [Fact]
+    public async Task DiscoverModelsAsync_OffersEffortOnlyForGptOssThinkingModels()
+    {
+        var service = CreateService(_ => JsonResponse(
+            """
+            {
+              "models": [
+                {
+                  "name": "gpt-oss:20b",
+                  "capabilities": ["completion", "tools", "thinking"],
+                  "details": {
+                    "family": "gptoss",
+                    "context_length": 131072
+                  }
+                }
+              ]
+            }
+            """));
+
+        var result = await service.DiscoverModelsAsync(
+            LocalProfile(),
+            forceRefresh: true);
+
+        var model = Assert.Single(result.Models);
+        Assert.Equal("gpt-oss:20b", model.Name);
+        Assert.Equal(131_072, model.MaximumContextWindow);
+        Assert.True(model.SupportsReasoning);
+        Assert.True(model.SupportsReasoningEffort);
     }
 
     [Fact]

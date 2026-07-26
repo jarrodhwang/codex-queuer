@@ -310,6 +310,10 @@ export type SaveAiProviderProfileRequest = {
 export type ProviderModel = {
   id: string
   name: string
+  maximumContextWindow?: number | null
+  supportsTools: boolean
+  supportsReasoning: boolean
+  supportsReasoningEffort: boolean
 }
 
 export type ProviderModelsResponse = {

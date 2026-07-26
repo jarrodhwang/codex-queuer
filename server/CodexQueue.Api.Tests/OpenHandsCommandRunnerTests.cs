@@ -50,6 +50,49 @@ public sealed class OpenHandsCommandRunnerTests
         Assert.Equal(apiKey, environment["LLM_API_KEY"]);
         Assert.Equal("openai/qwen2.5-coder:32b", environment["LLM_MODEL"]);
         Assert.Equal("http://ollama.test:11434/v1", environment["LLM_BASE_URL"]);
+        Assert.Equal("65536", environment["LLM_CONTEXT_WINDOW"]);
+    }
+
+    [Fact]
+    public void OllamaExecutionSettings_UseNativeChatProviderAndReasoningEffort()
+    {
+        var environment = OpenHandsCommandRunner.BuildExecutionEnvironment(
+            OpenHandsCommandRunner.ToOllamaChatModel("openai/gpt-oss:20b"),
+            OpenHandsCommandRunner.ToOllamaNativeBaseUrl("http://ollama.test:11434/v1"),
+            "local-llm",
+            "/tmp/openhands-tmux",
+            reasoningEffort: "LOW",
+            bootstrapDirectory: "/tmp/openhands-bootstrap");
+
+        Assert.Equal("ollama_chat/gpt-oss:20b", environment["LLM_MODEL"]);
+        Assert.Equal("http://ollama.test:11434", environment["LLM_BASE_URL"]);
+        Assert.Equal("low", environment["LLM_REASONING_EFFORT"]);
+        Assert.Equal("65536", environment["LLM_CONTEXT_WINDOW"]);
+        Assert.Equal("/tmp/openhands-bootstrap", environment["PYTHONPATH"]);
+        Assert.Equal("1", environment["CODEX_QUEUE_OPENHANDS_BOOTSTRAP"]);
+        Assert.Contains(
+            "LLM_REASONING_EFFORT",
+            OpenHandsCommandRunner.BuildRemoteEnvironmentSanitizer(),
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "CODEX_QUEUE_OPENHANDS_BOOTSTRAP",
+            OpenHandsCommandRunner.BuildRemoteEnvironmentSanitizer(),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildShortLocalTmuxDirectory_LeavesRoomForUnixSocketSuffix()
+    {
+        const string runToken = "0123456789abcdef0123456789abcdef";
+
+        var directory = OpenHandsCommandRunner.BuildShortLocalTmuxDirectory(
+            runToken);
+        var socketPath = Path.Combine(directory, "tmux-99999", "openhands");
+
+        Assert.Contains("cq-oh-" + runToken, directory, StringComparison.Ordinal);
+        Assert.True(
+            System.Text.Encoding.UTF8.GetByteCount(socketPath) <= 100,
+            socketPath);
     }
 
     [Fact]
@@ -677,6 +720,9 @@ public sealed class OpenHandsCommandRunnerTests
             executable,
             """
             #!/bin/sh
+            if [ -n "${CODEX_QUEUE_OPENHANDS_BOOTSTRAP_PROBE_FILE:-}" ]; then
+              printf '%s' 'codex-queue-openhands-bootstrap-v1' > "$CODEX_QUEUE_OPENHANDS_BOOTSTRAP_PROBE_FILE"
+            fi
             if [ -n "${CQ_OPENHANDS_TEST_SERVER_SECRET:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] || [ -n "${LLM_API_KEY:-}" ]; then
               printf '%s\n' 'diagnostic inherited a provider or server secret' >&2
               exit 91
@@ -750,6 +796,9 @@ public sealed class OpenHandsCommandRunnerTests
             executable,
             """
             #!/bin/sh
+            if [ -n "${CODEX_QUEUE_OPENHANDS_BOOTSTRAP_PROBE_FILE:-}" ]; then
+              printf '%s' 'codex-queue-openhands-bootstrap-v1' > "$CODEX_QUEUE_OPENHANDS_BOOTSTRAP_PROBE_FILE"
+            fi
             if [ "$1" = "--version" ]; then
               printf '%s\n' 'dependency warning'
               printf '%s\n' 'OpenHands CLI 9.9.0'
@@ -807,6 +856,9 @@ public sealed class OpenHandsCommandRunnerTests
             executable,
             """
             #!/bin/sh
+            if [ -n "${CODEX_QUEUE_OPENHANDS_BOOTSTRAP_PROBE_FILE:-}" ]; then
+              printf '%s' 'codex-queue-openhands-bootstrap-v1' > "$CODEX_QUEUE_OPENHANDS_BOOTSTRAP_PROBE_FILE"
+            fi
             if [ "$1" = "--version" ]; then
               printf '%s\n' 'OpenHands CLI 9.9.0'
               exit 0
@@ -833,6 +885,60 @@ public sealed class OpenHandsCommandRunnerTests
 
             Assert.False(result.Available);
             Assert.Contains("--always-approve", result.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(testRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TestMachineAsync_RejectsCliThatCannotLoadLocalAiBootstrap()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var testRoot = Path.Combine(
+            AppContext.BaseDirectory,
+            "openhands-machine-bootstrap-tests",
+            Guid.NewGuid().ToString("N"));
+        var executable = Path.Combine(testRoot, "fake-openhands");
+        Directory.CreateDirectory(testRoot);
+        await File.WriteAllTextAsync(
+            executable,
+            """
+            #!/bin/sh
+            if [ "$1" = "--version" ]; then
+              printf '%s\n' 'OpenHands CLI 9.9.0'
+              exit 0
+            fi
+            printf '%s\n' 'usage: openhands --headless --json --override-with-envs --always-approve --resume ID -f FILE'
+            """);
+        File.SetUnixFileMode(
+            executable,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+        try
+        {
+            var runner = new OpenHandsCommandRunner(
+                NullLogger<OpenHandsCommandRunner>.Instance,
+                HealthyLocalAiOptions(executable));
+
+            var result = await runner.TestMachineAsync(
+                new TargetMachine
+                {
+                    Kind = MachineKind.Local,
+                    Platform = MachinePlatform.Linux,
+                },
+                CancellationToken.None);
+
+            Assert.False(result.Available);
+            Assert.Contains(
+                "cannot load Codex Queue's Local AI integration",
+                result.Message,
+                StringComparison.Ordinal);
         }
         finally
         {
@@ -1006,6 +1112,23 @@ public sealed class OpenHandsCommandRunnerTests
         Assert.Contains("SshUnavailable", failure, StringComparison.Ordinal);
         Assert.Contains("Could not reach", failure, StringComparison.Ordinal);
         Assert.DoesNotContain(rawMarker, failure, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildSafeProcessFailureEvent_ReportsTerminalSocketPathFailure()
+    {
+        var failure = OpenHandsCommandRunner.BuildSafeProcessFailureEvent(
+            "openhands",
+            1,
+            "LibTmuxException: new-session: error connecting to /very/long/path "
+            + "(File name too long)");
+
+        Assert.Contains(
+            "OpenHandsTerminalPathTooLong",
+            failure,
+            StringComparison.Ordinal);
+        Assert.Contains("terminal socket", failure, StringComparison.Ordinal);
+        Assert.DoesNotContain("/very/long/path", failure, StringComparison.Ordinal);
     }
 
     [Theory]

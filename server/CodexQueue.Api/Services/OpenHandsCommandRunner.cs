@@ -16,6 +16,8 @@ public interface IOpenHandsCommandRunner
         string model,
         string baseUrl,
         string apiKey,
+        int contextWindow,
+        string? reasoningEffort,
         string? conversationId,
         string prompt,
         bool alwaysApproveConfirmed,
@@ -85,6 +87,65 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
     private const int MaximumConversationStateBytes = 2 * 1024 * 1024;
     private const int MaximumCapturedProcessCharacters = MaximumConversationStateBytes + 4_096;
     private const int MaximumLocalAiProbeBytes = 1024 * 1024;
+    private const string OpenHandsBootstrapFileName = "sitecustomize.py";
+    private const string OpenHandsBootstrapActiveVariable =
+        "CODEX_QUEUE_OPENHANDS_BOOTSTRAP";
+    private const string OpenHandsBootstrapProbeVariable =
+        "CODEX_QUEUE_OPENHANDS_BOOTSTRAP_PROBE_FILE";
+    private const string OpenHandsBootstrapProbeMarker =
+        "codex-queue-openhands-bootstrap-v1";
+    private const string OpenHandsBootstrapScript =
+        """
+        import os
+
+        if os.environ.pop("CODEX_QUEUE_OPENHANDS_BOOTSTRAP", None) == "1":
+            bootstrap_directory = os.path.dirname(os.path.abspath(__file__))
+            if os.path.abspath(os.environ.get("PYTHONPATH", "")) == bootstrap_directory:
+                os.environ.pop("PYTHONPATH", None)
+
+            from openhands_cli.stores import agent_store
+
+            original_apply_llm_overrides = agent_store.apply_llm_overrides
+
+            def apply_codex_queue_llm_overrides(llm, overrides):
+                updated_llm = original_apply_llm_overrides(llm, overrides)
+                updates = {}
+
+                context_window = os.environ.get("LLM_CONTEXT_WINDOW")
+                if context_window:
+                    parsed_context_window = int(context_window)
+                    if parsed_context_window < 65536:
+                        raise ValueError("LLM_CONTEXT_WINDOW must be at least 65536")
+                    updates["litellm_extra_body"] = {
+                        "options": {"num_ctx": parsed_context_window},
+                        "keep_alive": "5m",
+                    }
+
+                reasoning_effort = os.environ.get("LLM_REASONING_EFFORT")
+                if reasoning_effort:
+                    normalized_effort = reasoning_effort.strip().lower()
+                    if normalized_effort not in {"low", "medium", "high"}:
+                        raise ValueError(
+                            "LLM_REASONING_EFFORT must be low, medium, or high"
+                        )
+                    updates["reasoning_effort"] = normalized_effort
+
+                return (
+                    updated_llm.model_copy(update=updates)
+                    if updates
+                    else updated_llm
+                )
+
+            agent_store.apply_llm_overrides = apply_codex_queue_llm_overrides
+
+            probe_file = os.environ.pop(
+                "CODEX_QUEUE_OPENHANDS_BOOTSTRAP_PROBE_FILE",
+                None,
+            )
+            if probe_file:
+                with open(probe_file, "x", encoding="utf-8") as probe:
+                    probe.write("codex-queue-openhands-bootstrap-v1")
+        """;
     private const string RemoteProcessTreeFunctions =
         "kill_openhands_tree() { "
         + "root_pid=$1; case \"$root_pid\" in *[!0-9]*|'') return 64;; esac; "
@@ -196,6 +257,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         string model,
         string baseUrl,
         string apiKey,
+        int contextWindow,
+        string? reasoningEffort,
         string? conversationId,
         string prompt,
         bool alwaysApproveConfirmed,
@@ -222,17 +285,23 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             model,
             cancellationToken);
         EnsureLocalAiPreflightPassed(localAiCheck);
+        var executionModel = ToOllamaChatModel(model);
+        var executionBaseUrl = ToOllamaNativeBaseUrl(targetLocalAiBaseUrl);
+        var normalizedContextWindow = NormalizeContextWindow(contextWindow);
+        var normalizedReasoningEffort = NormalizeReasoningEffort(reasoningEffort);
         var normalizedConversationId = NormalizeOptionalConversationId(conversationId);
         var runToken = Guid.NewGuid().ToString("N");
-        var preview = BuildCommandPreview(model, normalizedConversationId);
+        var preview = BuildCommandPreview(executionModel, normalizedConversationId);
 
         return machine.Kind == MachineKind.Local
             ? await RunLocalAsync(
                 projectPath,
                 runToken,
-                model,
-                targetLocalAiBaseUrl,
+                executionModel,
+                executionBaseUrl,
                 apiKey,
+                normalizedContextWindow,
+                normalizedReasoningEffort,
                 normalizedConversationId,
                 prompt,
                 preview,
@@ -242,14 +311,125 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 machine,
                 projectPath,
                 runToken,
-                model,
-                targetLocalAiBaseUrl,
+                executionModel,
+                executionBaseUrl,
                 apiKey,
+                normalizedContextWindow,
+                normalizedReasoningEffort,
                 normalizedConversationId,
                 prompt,
                 preview,
                 onOutput,
                 cancellationToken);
+    }
+
+    public Task<OpenHandsCommandResult> RunAsync(
+        TargetMachine machine,
+        string projectPath,
+        string model,
+        string baseUrl,
+        string apiKey,
+        string? conversationId,
+        string prompt,
+        bool alwaysApproveConfirmed,
+        Func<string, Task> onOutput,
+        CancellationToken cancellationToken) =>
+        RunAsync(
+            machine,
+            projectPath,
+            model,
+            baseUrl,
+            apiKey,
+            AiProviderService.RecommendedContextWindow,
+            reasoningEffort: null,
+            conversationId,
+            prompt,
+            alwaysApproveConfirmed,
+            onOutput,
+            cancellationToken);
+
+    public static string ToOllamaChatModel(string model)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(model);
+        var normalized = model.Trim();
+        foreach (var prefix in new[] { "openai/", "ollama/", "ollama_chat/" })
+        {
+            if (normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                normalized = normalized[prefix.Length..];
+                break;
+            }
+        }
+
+        return "ollama_chat/" + normalized;
+    }
+
+    public static string ToOllamaNativeBaseUrl(string baseUrl)
+    {
+        if (!AiProviderService.TryNormalizeBaseUrl(
+                AiProviderSource.Local,
+                baseUrl,
+                out var normalized,
+                out var error))
+        {
+            throw new ArgumentException(error, nameof(baseUrl));
+        }
+
+        var uri = new Uri(normalized, UriKind.Absolute);
+        return new UriBuilder(uri)
+        {
+            Path = "/",
+            Query = "",
+            Fragment = "",
+        }.Uri.AbsoluteUri.TrimEnd('/');
+    }
+
+    internal static string? NormalizeReasoningEffort(string? reasoningEffort)
+    {
+        if (string.IsNullOrWhiteSpace(reasoningEffort))
+        {
+            return null;
+        }
+
+        var normalized = reasoningEffort.Trim().ToLowerInvariant();
+        return normalized is "low" or "medium" or "high"
+            ? normalized
+            : throw new ArgumentException(
+                "OpenHands reasoning effort must be low, medium, or high.",
+                nameof(reasoningEffort));
+    }
+
+    public static int NormalizeContextWindow(int contextWindow) =>
+        contextWindow >= AiProviderService.ContextWarningThreshold
+            ? contextWindow
+            : throw new ArgumentOutOfRangeException(
+                nameof(contextWindow),
+                "OpenHands context window must be at least "
+                + AiProviderService.ContextWarningThreshold.ToString("N0")
+                + " tokens.");
+
+    public static string BuildShortLocalTmuxDirectory(string runToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runToken);
+        if (runToken.Length > 64
+            || runToken.Any(character => !char.IsAsciiLetterOrDigit(character)))
+        {
+            throw new ArgumentException(
+                "OpenHands run token is invalid.",
+                nameof(runToken));
+        }
+
+        var temporaryBase = Path.GetTempPath();
+        var candidate = Path.Combine(temporaryBase, "cq-oh-" + runToken);
+        const int tmuxSocketPathBudget = 100;
+        if (Encoding.UTF8.GetByteCount(
+                Path.Combine(candidate, "tmux-99999", "openhands"))
+            > tmuxSocketPathBudget)
+        {
+            candidate = Path.Combine("/tmp", "cq-oh-" + runToken);
+        }
+
+        return candidate;
     }
 
     public async Task<OpenHandsMachineCheck> TestMachineAsync(
@@ -297,14 +477,56 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             timeout.CancelAfter(MachineCheckTimeout);
             ProcessCapture capture;
             string? versionOutput = null;
+            var bootstrapLoaded = true;
             if (machine.Kind == MachineKind.Local)
             {
-                var versionCapture = await RunCapturedProcessAsync(
-                    _options.LocalExecutable,
-                    ["--version"],
-                    null,
-                    null,
-                    timeout.Token);
+                var bootstrapRoot = Path.Combine(
+                    Path.GetTempPath(),
+                    "codex-queue-openhands-check-" + Guid.NewGuid().ToString("N"));
+                var bootstrapPath = Path.Combine(
+                    bootstrapRoot,
+                    OpenHandsBootstrapFileName);
+                var probePath = Path.Combine(bootstrapRoot, "loaded");
+                ProcessCapture versionCapture;
+                try
+                {
+                    Directory.CreateDirectory(bootstrapRoot);
+                    TrySetDirectoryMode(bootstrapRoot);
+                    await File.WriteAllTextAsync(
+                        bootstrapPath,
+                        OpenHandsBootstrapScript,
+                        new UTF8Encoding(false),
+                        timeout.Token);
+                    TrySetFileMode(bootstrapPath);
+                    var bootstrapEnvironment = new Dictionary<string, string>(
+                        BuildDiagnosticEnvironment(),
+                        StringComparer.Ordinal)
+                    {
+                        ["PYTHONPATH"] = bootstrapRoot,
+                        [OpenHandsBootstrapActiveVariable] = "1",
+                        [OpenHandsBootstrapProbeVariable] = probePath,
+                        ["OPENHANDS_SUPPRESS_BANNER"] = "1",
+                    };
+                    versionCapture = await RunCapturedProcessAsync(
+                        _options.LocalExecutable,
+                        ["--version"],
+                        null,
+                        null,
+                        timeout.Token,
+                        bootstrapEnvironment);
+                    bootstrapLoaded = File.Exists(probePath)
+                        && string.Equals(
+                            await File.ReadAllTextAsync(probePath, timeout.Token),
+                            OpenHandsBootstrapProbeMarker,
+                            StringComparison.Ordinal);
+                }
+                finally
+                {
+                    if (Directory.Exists(bootstrapRoot))
+                    {
+                        Directory.Delete(bootstrapRoot, recursive: true);
+                    }
+                }
                 var helpCapture = await RunCapturedProcessAsync(
                     _options.LocalExecutable,
                     ["--help"],
@@ -327,7 +549,9 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                     + "printf '%s\\n' 'OpenHands CLI was not found on this SSH session PATH.' >&2; exit 127; fi";
                 capture = await RunCapturedProcessAsync(
                     "ssh",
-                    BuildSshArguments(machine, command),
+                    BuildSshArguments(
+                        machine,
+                        BuildRemoteBootstrapProbeCommand(command)),
                     null,
                     null,
                     timeout.Token);
@@ -367,6 +591,16 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                     + string.Join(", ", missingFlags)
                     + ".");
             }
+            if (!bootstrapLoaded)
+            {
+                return new OpenHandsMachineCheck(
+                    false,
+                    null,
+                    false,
+                    "Installed OpenHands cannot load Codex Queue's Local AI integration. "
+                    + "Use the Python/uv OpenHands CLI installation so queued runs can apply "
+                    + "the 65,536-token context and supported reasoning effort.");
+            }
 
             var versionLines = (string.IsNullOrWhiteSpace(versionOutput) ? output : versionOutput)
                 .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -379,7 +613,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 true,
                 version,
                 false,
-                "OpenHands CLI is available and supports headless JSON execution.");
+                "OpenHands CLI supports headless JSON execution and Codex Queue's "
+                + "65,536-token Local AI override.");
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -535,6 +770,44 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             + "; if [ \"$probe_size\" -gt " + MaximumLocalAiProbeBytes + " ]; then"
             + " printf '%s\\n' 'Local AI model catalog exceeded the 1 MiB response limit.' >&2; exit 65; fi"
             + "; cat \"$probe_file\"";
+    }
+
+    private static string BuildRemoteBootstrapProbeCommand(
+        string diagnosticCommand)
+    {
+        var encodedBootstrap = Convert.ToBase64String(
+            Encoding.UTF8.GetBytes(OpenHandsBootstrapScript));
+        return TargetCommandRunner.UnixRemotePathSetup
+            + " " + BuildRemoteDiagnosticEnvironmentSanitizer()
+            + "; if ! command -v openhands >/dev/null 2>&1; then "
+            + "printf '%s\\n' 'OpenHands CLI was not found on this SSH session PATH.' >&2; exit 127; fi"
+            + "; umask 077"
+            + "; bootstrap_dir=$(mktemp -d \"${TMPDIR:-/tmp}/codex-queue-openhands-check.XXXXXX\")"
+            + " || { printf '%s\\n' 'Could not create an OpenHands integration check directory.' >&2; exit 74; }"
+            + "; bootstrap_probe=\"$bootstrap_dir/loaded\""
+            + "; cleanup_bootstrap_probe() { status=$?; trap - EXIT HUP INT TERM"
+            + "; rm -rf -- \"$bootstrap_dir\"; exit \"$status\"; }"
+            + "; trap cleanup_bootstrap_probe EXIT HUP INT TERM"
+            + "; decode_bootstrap() { if base64 --help 2>&1 | grep -q -- '--decode'; then base64 --decode; else base64 -D; fi; }"
+            + "; printf '%s' "
+            + TargetCommandRunner.Quote(encodedBootstrap)
+            + " | decode_bootstrap > \"$bootstrap_dir/"
+            + OpenHandsBootstrapFileName
+            + "\""
+            + "; PYTHONPATH=\"$bootstrap_dir\" "
+            + OpenHandsBootstrapActiveVariable
+            + "='1' "
+            + OpenHandsBootstrapProbeVariable
+            + "=\"$bootstrap_probe\" OPENHANDS_SUPPRESS_BANNER='1' "
+            + "openhands --version >/dev/null 2>&1"
+            + "; if [ ! -f \"$bootstrap_probe\" ]"
+            + " || ! grep -Fqx "
+            + TargetCommandRunner.Quote(OpenHandsBootstrapProbeMarker)
+            + " \"$bootstrap_probe\"; then "
+            + "printf '%s\\n' 'Installed OpenHands cannot load the Codex Queue Local AI integration.' >&2; exit 78; fi"
+            + "; rm -rf -- \"$bootstrap_dir\"; trap - EXIT HUP INT TERM"
+            + "; "
+            + diagnosticCommand;
     }
 
     public static OpenHandsLocalAiCheck ParseLocalAiProbeResponse(
@@ -824,6 +1097,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         string model,
         string baseUrl,
         string apiKey,
+        int contextWindow,
+        string? reasoningEffort,
         string? conversationId,
         string prompt,
         string preview,
@@ -847,13 +1122,17 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         EnsureChildPath(projectRoot, temporaryRoot);
         EnsureNoSymbolicLinkDescendant(projectRoot, temporaryParent);
         var taskPath = Path.Combine(temporaryRoot, "task.md");
-        var tmuxDirectory = Path.Combine(temporaryRoot, "tmux");
+        var bootstrapPath = Path.Combine(temporaryRoot, OpenHandsBootstrapFileName);
+        var tmuxDirectory = BuildShortLocalTmuxDirectory(runToken);
         var environment = BuildExecutionEnvironment(
             model,
             baseUrl,
             apiKey,
             tmuxDirectory,
-            projectRoot);
+            projectRoot,
+            reasoningEffort,
+            contextWindow,
+            temporaryRoot);
 
         await EnsureConversationCanResumeAsync(
             conversationId,
@@ -861,12 +1140,24 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
 
         try
         {
-            Directory.CreateDirectory(tmuxDirectory);
+            if (Directory.Exists(tmuxDirectory) || File.Exists(tmuxDirectory))
+            {
+                throw new IOException(
+                    "Could not allocate the per-run OpenHands terminal directory.");
+            }
+            Directory.CreateDirectory(temporaryRoot);
             EnsureNoSymbolicLinkDescendant(projectRoot, temporaryRoot);
+            Directory.CreateDirectory(tmuxDirectory);
             TrySetDirectoryMode(temporaryRoot);
             TrySetDirectoryMode(tmuxDirectory);
             await File.WriteAllTextAsync(taskPath, prompt, new UTF8Encoding(false), cancellationToken);
+            await File.WriteAllTextAsync(
+                bootstrapPath,
+                OpenHandsBootstrapScript,
+                new UTF8Encoding(false),
+                cancellationToken);
             TrySetFileMode(taskPath);
+            TrySetFileMode(bootstrapPath);
             var result = await RunStreamingProcessAsync(
                 _options.LocalExecutable,
                 BuildArguments(conversationId, taskPath),
@@ -888,6 +1179,7 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         {
             await StopTmuxServerAsync(tmuxDirectory);
             DeleteNarrowDirectory(temporaryRoot);
+            DeleteNarrowDirectory(tmuxDirectory);
         }
     }
 
@@ -898,6 +1190,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         string model,
         string baseUrl,
         string apiKey,
+        int contextWindow,
+        string? reasoningEffort,
         string? conversationId,
         string prompt,
         string preview,
@@ -949,18 +1243,24 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 projectRoot + "/.codex-queue/openhands",
             };
         var taskPath = temporaryRoot + "/task.md";
+        var bootstrapPath = temporaryRoot + "/" + OpenHandsBootstrapFileName;
         var environmentPath = temporaryRoot + "/runner.env";
         var pidPath = temporaryRoot + "/openhands.pid";
-        var tmuxDirectory = temporaryRoot + "/tmux";
+        var tmuxDirectory = "/tmp/cq-oh-" + runToken;
         var environmentFile = BuildPosixEnvironmentFile(
             model,
             baseUrl,
             apiKey,
+            contextWindow,
+            reasoningEffort,
             tmuxDirectory,
-            projectRoot);
+            projectRoot,
+            temporaryRoot);
         var uploadInput = Convert.ToBase64String(Encoding.UTF8.GetBytes(prompt))
             + "\n"
             + Convert.ToBase64String(Encoding.UTF8.GetBytes(environmentFile))
+            + "\n"
+            + Convert.ToBase64String(Encoding.UTF8.GetBytes(OpenHandsBootstrapScript))
             + "\n";
 
         var setupCommand = TargetCommandRunner.UnixRemotePathSetup
@@ -968,12 +1268,19 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             + "; for guarded_path in "
             + string.Join(" ", protectedAncestors.Select(TargetCommandRunner.Quote))
             + "; do if [ -L \"$guarded_path\" ]; then printf '%s\\n' 'OpenHands temporary path contains a symbolic link.' >&2; exit 73; fi; done"
-            + "; umask 077; mkdir -p -- " + TargetCommandRunner.Quote(tmuxDirectory)
-            + "; IFS= read -r task_data; IFS= read -r env_data"
+            + "; umask 077; mkdir -p -- " + TargetCommandRunner.Quote(temporaryRoot)
+            + "; mkdir -- " + TargetCommandRunner.Quote(tmuxDirectory)
+            + "; IFS= read -r task_data; IFS= read -r env_data; IFS= read -r bootstrap_data"
             + "; decode_data() { if base64 --help 2>&1 | grep -q -- '--decode'; then base64 --decode; else base64 -D; fi; }"
             + "; printf '%s' \"$task_data\" | decode_data > " + TargetCommandRunner.Quote(taskPath)
             + "; printf '%s' \"$env_data\" | decode_data > " + TargetCommandRunner.Quote(environmentPath)
-            + "; chmod 600 -- " + TargetCommandRunner.Quote(taskPath) + " " + TargetCommandRunner.Quote(environmentPath);
+            + "; printf '%s' \"$bootstrap_data\" | decode_data > " + TargetCommandRunner.Quote(bootstrapPath)
+            + "; chmod 600 -- "
+            + TargetCommandRunner.Quote(taskPath)
+            + " "
+            + TargetCommandRunner.Quote(environmentPath)
+            + " "
+            + TargetCommandRunner.Quote(bootstrapPath);
 
         try
         {
@@ -1001,7 +1308,7 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 + "; cleanup_openhands() { status=$?; trap - EXIT HUP INT TERM"
                 + "; if [ -n \"$child\" ]; then kill_openhands_tree \"$child\"; wait \"$child\" >/dev/null 2>&1 || true; fi"
                 + "; TMUX_TMPDIR=\"$tmux_dir\" tmux -L openhands kill-server >/dev/null 2>&1 || true"
-                + "; rm -rf -- \"$run_dir\"; exit \"$status\"; }"
+                + "; rm -rf -- \"$run_dir\" \"$tmux_dir\"; exit \"$status\"; }"
                 + "; trap cleanup_openhands EXIT HUP INT TERM"
                 + "; set -a; . " + TargetCommandRunner.Quote(environmentPath) + "; set +a"
                 + "; rm -f -- " + TargetCommandRunner.Quote(environmentPath)
@@ -1388,6 +1695,13 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             message =
                 "OpenHands could not reach the Local AI server. Check the Local AI profile, Ollama service, LAN/VPN route, and selected model.";
         }
+        else if (TryClassifyPreAgentFailure(
+                     rawDiagnosticOutput,
+                     out code,
+                     out message))
+        {
+            // The classifier supplied a safe, actionable startup failure.
+        }
         else
         {
             code = "OpenHandsProcessFailed";
@@ -1409,6 +1723,19 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         if (result.ExitCode != 0 || result.ReportedError)
         {
             return result;
+        }
+
+        if (!result.ReportedAgentActivity
+            && TryClassifyPreAgentFailure(
+                result.RawDiagnosticOutput,
+                out var startupCode,
+                out var startupMessage))
+        {
+            return await WithReportedErrorAsync(
+                result,
+                startupCode,
+                startupMessage,
+                onOutput);
         }
 
         if (!TryNormalizeConversationId(result.ConversationId, out var conversationId))
@@ -1519,7 +1846,7 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 NoAgentActivityErrorCode,
                 "OpenHands exited without processing the task. It reported a conversation ID but no agent message, action, or tool request. "
                 + recovery
-                + " Run the OpenHands machine check and verify that the selected model server provides at least a 22,000-token context window (32,768 or more is recommended) before retrying.",
+                + " Run the OpenHands machine check and verify that the selected model server provides at least a 65,536-token context window before retrying.",
                 onOutput);
             return failedResult with { DiscardConversation = true };
         }
@@ -1529,6 +1856,48 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             "ConversationFinalStateUnverified",
             "OpenHands exited cleanly but did not emit a completion marker or a verifiable finished conversation state. The task was not marked successful; rerun the OpenHands machine check before retrying.",
             onOutput);
+    }
+
+    private static bool TryClassifyPreAgentFailure(
+        string rawDiagnosticOutput,
+        out string code,
+        out string message)
+    {
+        if (ContainsDiagnostic(rawDiagnosticOutput, "LLMContextWindowExceed")
+            || ContainsDiagnostic(
+                rawDiagnosticOutput,
+                "configured model has a context window"))
+        {
+            code = "OpenHandsContextWindowExceeded";
+            message =
+                "OpenHands rejected the prompt before inference because the effective model "
+                + "context was too small. Configure and verify at least 65,536 tokens.";
+            return true;
+        }
+
+        if (ContainsDiagnostic(rawDiagnosticOutput, "LibTmuxException")
+            && ContainsDiagnostic(rawDiagnosticOutput, "File name too long"))
+        {
+            code = "OpenHandsTerminalPathTooLong";
+            message =
+                "OpenHands could not create its terminal socket because the temporary path "
+                + "was too long. Update Codex Queue to a build that uses the short per-run "
+                + "terminal directory.";
+            return true;
+        }
+
+        if (ContainsDiagnostic(rawDiagnosticOutput, "Traceback (most recent call last)"))
+        {
+            code = "OpenHandsStartupFailed";
+            message =
+                "OpenHands failed during startup before the agent could process the task. "
+                + "Review the raw run diagnostics and rerun the machine check.";
+            return true;
+        }
+
+        code = "";
+        message = "";
+        return false;
     }
 
     private static async Task<OpenHandsCommandResult> WithReportedErrorAsync(
@@ -1832,13 +2201,14 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         IReadOnlyList<string> arguments,
         string? workingDirectory,
         string? standardInput,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         var startInfo = BuildStartInfo(
             fileName,
             arguments,
             workingDirectory,
-            BuildDiagnosticEnvironment(),
+            environment ?? BuildDiagnosticEnvironment(),
             replaceEnvironment: true);
         using var process = new Process { StartInfo = startInfo };
         process.Start();
@@ -1907,7 +2277,10 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         string baseUrl,
         string apiKey,
         string tmuxDirectory,
-        string? projectRoot = null)
+        string? projectRoot = null,
+        string? reasoningEffort = null,
+        int contextWindow = AiProviderService.RecommendedContextWindow,
+        string? bootstrapDirectory = null)
     {
         var environment = new Dictionary<string, string>(
             BuildDiagnosticEnvironment(),
@@ -1916,6 +2289,16 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         environment["LLM_MODEL"] = model;
         environment["LLM_BASE_URL"] = baseUrl;
         environment["LLM_API_KEY"] = apiKey;
+        environment["LLM_CONTEXT_WINDOW"] = NormalizeContextWindow(contextWindow).ToString();
+        if (!string.IsNullOrWhiteSpace(reasoningEffort))
+        {
+            environment["LLM_REASONING_EFFORT"] = NormalizeReasoningEffort(reasoningEffort)!;
+        }
+        if (!string.IsNullOrWhiteSpace(bootstrapDirectory))
+        {
+            environment["PYTHONPATH"] = bootstrapDirectory;
+            environment[OpenHandsBootstrapActiveVariable] = "1";
+        }
         environment["OPENHANDS_SUPPRESS_BANNER"] = "1";
         if (!string.IsNullOrWhiteSpace(projectRoot))
         {
@@ -1955,9 +2338,13 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             [
                 "LLM_API_KEY",
                 "LLM_BASE_URL",
+                "LLM_CONTEXT_WINDOW",
                 "LLM_MODEL",
+                "LLM_REASONING_EFFORT",
+                OpenHandsBootstrapActiveVariable,
                 "OPENHANDS_SUPPRESS_BANNER",
                 "OPENHANDS_WORK_DIR",
+                "PYTHONPATH",
                 "TMUX_TMPDIR",
             ]);
         }
@@ -1977,14 +2364,33 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
         string model,
         string baseUrl,
         string apiKey,
+        int contextWindow,
+        string? reasoningEffort,
         string tmuxDirectory,
-        string projectRoot) =>
-        "LLM_MODEL=" + TargetCommandRunner.Quote(model) + "\n"
-        + "LLM_BASE_URL=" + TargetCommandRunner.Quote(baseUrl) + "\n"
-        + "LLM_API_KEY=" + TargetCommandRunner.Quote(apiKey) + "\n"
-        + "OPENHANDS_SUPPRESS_BANNER='1'\n"
-        + "OPENHANDS_WORK_DIR=" + TargetCommandRunner.Quote(projectRoot) + "\n"
-        + "TMUX_TMPDIR=" + TargetCommandRunner.Quote(tmuxDirectory) + "\n";
+        string projectRoot,
+        string bootstrapDirectory)
+    {
+        var environment =
+            "LLM_MODEL=" + TargetCommandRunner.Quote(model) + "\n"
+            + "LLM_BASE_URL=" + TargetCommandRunner.Quote(baseUrl) + "\n"
+            + "LLM_API_KEY=" + TargetCommandRunner.Quote(apiKey) + "\n"
+            + "LLM_CONTEXT_WINDOW="
+            + TargetCommandRunner.Quote(NormalizeContextWindow(contextWindow).ToString())
+            + "\n";
+        if (!string.IsNullOrWhiteSpace(reasoningEffort))
+        {
+            environment += "LLM_REASONING_EFFORT="
+                + TargetCommandRunner.Quote(NormalizeReasoningEffort(reasoningEffort)!)
+                + "\n";
+        }
+
+        return environment
+            + "PYTHONPATH=" + TargetCommandRunner.Quote(bootstrapDirectory) + "\n"
+            + OpenHandsBootstrapActiveVariable + "='1'\n"
+            + "OPENHANDS_SUPPRESS_BANNER='1'\n"
+            + "OPENHANDS_WORK_DIR=" + TargetCommandRunner.Quote(projectRoot) + "\n"
+            + "TMUX_TMPDIR=" + TargetCommandRunner.Quote(tmuxDirectory) + "\n";
+    }
 
     private static IReadOnlyList<string> BuildSshArguments(TargetMachine machine, string remoteCommand)
     {
@@ -2077,7 +2483,10 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             + "esac;; esac; fi; "
             + "TMUX_TMPDIR=" + TargetCommandRunner.Quote(tmuxDirectory)
             + " tmux -L openhands kill-server >/dev/null 2>&1 || true; "
-            + "rm -rf -- " + TargetCommandRunner.Quote(temporaryRoot)
+            + "rm -rf -- "
+            + TargetCommandRunner.Quote(temporaryRoot)
+            + " "
+            + TargetCommandRunner.Quote(tmuxDirectory)
             + " || cleanup_status=76; exit \"$cleanup_status\"";
         try
         {

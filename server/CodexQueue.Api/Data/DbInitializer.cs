@@ -385,7 +385,7 @@ public static class DbInitializer
             normalizedBaseUrl = fallbackBaseUrl;
         }
 
-        const int defaultContextWindow = 32_768;
+        const int defaultContextWindow = 65_536;
         var configuredContext = Environment.GetEnvironmentVariable("CQ_LOCAL_AI_CONTEXT_WINDOW");
         if (string.IsNullOrWhiteSpace(configuredContext))
         {

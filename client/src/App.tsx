@@ -2958,6 +2958,7 @@ function QueueComposer({
   const [runnerChoice, setRunnerChoice] = useState<RunnerChoice>('Codex')
   const [localProfileId, setLocalProfileId] = useState('')
   const [localModel, setLocalModel] = useState('')
+  const [localReasoningEffort, setLocalReasoningEffort] = useState('')
   const [localModelStatus, setLocalModelStatus] = useState<ProviderModelsResponse | null>(null)
   const [loadingLocalModels, setLoadingLocalModels] = useState(false)
   const [localModelError, setLocalModelError] = useState('')
@@ -3036,6 +3037,7 @@ function QueueComposer({
       setRequestModel({ model: editingRequest.model, effort: editingRequest.modelEffort || 'medium', speed: editingRequest.modelSpeed || 'normal' })
       setLocalProfileId(editingRequest.providerProfileId ?? '')
       setLocalModel(nextRunnerChoice === 'Local' ? qualifyLocalModelId(editingRequest.model) : '')
+      setLocalReasoningEffort(nextRunnerChoice === 'Local' ? editingRequest.modelEffort || '' : '')
       setCommitModel({
         model: editingRequest.commitModel || defaults.commitModel.model,
         effort: editingRequest.commitModelEffort || defaults.commitModel.effort,
@@ -3065,6 +3067,7 @@ function QueueComposer({
     setRunnerChoice('Codex')
     setRequestModel(defaults.requestModel)
     setLocalModel('')
+    setLocalReasoningEffort('')
     setCommitModel(defaults.commitModel)
     setGenerateCommit(defaults.generateCommit)
     setSeparateCommitSession(defaults.separateCommitSession)
@@ -3079,6 +3082,7 @@ function QueueComposer({
     commitModel,
     generateCommit,
     localModel,
+    localReasoningEffort,
     localProfileId,
     permissionMode,
     prompt,
@@ -3145,13 +3149,32 @@ function QueueComposer({
   const isCodexRunner = runnerChoice === 'Codex'
   const isLocalRunner = runnerChoice === 'Local'
   const localModelInstalled = Boolean(localModel && localModelOptions.some((model) => model.id === localModel))
+  const selectedLocalModelMetadata = localModelOptions.find((model) => model.id === localModel)
+  useEffect(() => {
+    setLocalReasoningEffort((current) => (
+      selectedLocalModelMetadata?.supportsReasoningEffort
+        ? current || 'low'
+        : ''
+    ))
+  }, [
+    selectedLocalModelMetadata?.id,
+    selectedLocalModelMetadata?.supportsReasoningEffort,
+  ])
   const targetLocalAiReachable = openHandsMachineStatus?.targetLocalAiReachable === true
   const targetLocalModelAvailable = openHandsMachineStatus?.targetSelectedModelAvailable === true
   const configuredContextWindow = localModelStatus?.configuredContextWindow ?? selectedLocalProfile?.configuredContextWindow
+  const localToolWarning = selectedLocalModelMetadata?.supportsTools === false
+    ? `${selectedLocalModelMetadata.name} does not advertise tool support, which OpenHands requires to work with project files.`
+    : ''
   const localContextWarning = localModelStatus?.contextWarning
-    || ((configuredContextWindow && configuredContextWindow < 22_000)
-      ? `Configured context is ${configuredContextWindow?.toLocaleString() ?? 'unknown'} tokens. OpenHands needs at least 22,000; 32,768 or more is recommended.`
+    || ((selectedLocalModelMetadata?.maximumContextWindow
+      && selectedLocalModelMetadata.maximumContextWindow < 65_536)
+      ? `${selectedLocalModelMetadata.name} supports at most ${selectedLocalModelMetadata.maximumContextWindow.toLocaleString()} tokens, below this OpenHands setup's 65,536-token requirement.`
       : '')
+    || ((configuredContextWindow && configuredContextWindow < 65_536)
+      ? `Configured context is ${configuredContextWindow.toLocaleString()} tokens. Set it to at least 65,536 before running OpenHands.`
+      : '')
+  const localModelWarning = localToolWarning || localContextWarning
   const localBlockingMessage = !isLocalRunner
     ? ''
     : !selectedLocalProfile
@@ -3168,6 +3191,8 @@ function QueueComposer({
                 ? 'Codex Queue reached the Local AI server, but it has no installed models.'
                 : !localModelInstalled
                   ? 'The selected model is not installed on the Local AI server.'
+                  : localModelWarning
+                    ? localModelWarning
                   : checkingOpenHands
                     ? 'Checking OpenHands CLI and the Local AI route from the selected machine…'
                     : openHandsMachineError
@@ -3311,6 +3336,7 @@ function QueueComposer({
     setRunnerChoice('Codex')
     setRequestModel(defaults.requestModel)
     setLocalModel('')
+    setLocalReasoningEffort('')
     setCommitModel(defaults.commitModel)
     setGenerateCommit(defaults.generateCommit)
     setSeparateCommitSession(defaults.separateCommitSession)
@@ -3339,7 +3365,11 @@ function QueueComposer({
             ? undefined
             : attachmentPayload(attachments),
         model: selectedRequestModel,
-        modelEffort: isCodexRunner ? requestModel.effort : null,
+        modelEffort: isCodexRunner
+          ? requestModel.effort
+          : selectedLocalModelMetadata?.supportsReasoningEffort
+            ? localReasoningEffort || 'low'
+            : null,
         modelSpeed: isCodexRunner ? requestModel.speed : null,
         generateCommit: isCodexRunner && generateCommit,
         separateCommitSession: isCodexRunner && generateCommit && separateCommitSession,
@@ -3382,7 +3412,11 @@ function QueueComposer({
             ? []
             : attachmentPayload(attachments).map(({ name, contentType, size }) => ({ name, contentType, size })),
           model: selectedRequestModel,
-          modelEffort: isCodexRunner ? requestModel.effort : null,
+          modelEffort: isCodexRunner
+            ? requestModel.effort
+            : selectedLocalModelMetadata?.supportsReasoningEffort
+              ? localReasoningEffort || 'low'
+              : null,
           modelSpeed: isCodexRunner ? requestModel.speed : null,
           queueOrder: nextQueueOrder,
           status: 'Queued',
@@ -3660,6 +3694,7 @@ function QueueComposer({
                         setLocalModelError('')
                         setLocalProfileId(event.target.value)
                         setLocalModel('')
+                        setLocalReasoningEffort('')
                         setComposerValidationError('')
                       }}
                     >
@@ -3680,16 +3715,19 @@ function QueueComposer({
                       aria-label="OpenHands model"
                       disabled={loadingLocalModels || !localModelStatus?.healthy || localModelOptions.length === 0}
                       onChange={(event) => {
-                        setLocalModel(event.target.value)
+                        const nextModel = event.target.value
+                        const metadata = localModelOptions.find((model) => model.id === nextModel)
+                        setLocalModel(nextModel)
+                        setLocalReasoningEffort(metadata?.supportsReasoningEffort ? 'low' : '')
                         setComposerValidationError('')
                       }}
                     >
                       {!localModel && <option value="">{loadingLocalModels ? 'Discovering models…' : 'Select a model'}</option>}
                       {localModel && !localModelOptions.some((model) => model.id === localModel) && (
-                        <option value={localModel}>{localModelDisplayName(localModel)} — not installed</option>
+                        <option value={localModel}>{localModelDisplayName(localModel)}</option>
                       )}
                       {localModelOptions.map((model) => (
-                        <option key={model.id} value={model.id}>{model.name || localModelDisplayName(model.id)}</option>
+                        <option key={model.id} value={model.id}>{localModelDisplayName(model.name || model.id)}</option>
                       ))}
                     </GlassSelect>
                   </label>
@@ -3720,8 +3758,23 @@ function QueueComposer({
                     ))}
                   </div>
                 </div>
-                {localContextWarning && <div className="local-runner-warning"><ShieldAlert size={15} /> <span>{localContextWarning}</span></div>}
-                {localBlockingMessage && !localApiPending && !openHandsPending && (
+                {selectedLocalModelMetadata?.supportsReasoningEffort && (
+                  <div className="model-options-row model-options-row--single">
+                    <SegmentedRadio
+                      label="Reasoning effort"
+                      name="OpenHands-reasoning-effort"
+                      value={localReasoningEffort || 'low'}
+                      options={[
+                        { label: 'Low', value: 'low' },
+                        { label: 'Medium', value: 'medium' },
+                        { label: 'High', value: 'high' },
+                      ]}
+                      onChange={setLocalReasoningEffort}
+                    />
+                  </div>
+                )}
+                {localModelWarning && <div className="local-runner-warning"><ShieldAlert size={15} /> <span>{localModelWarning}</span></div>}
+                {localBlockingMessage && localBlockingMessage !== localModelWarning && !localApiPending && !openHandsPending && (
                   <div className="local-runner-error" role="alert">{localBlockingMessage}</div>
                 )}
               </div>

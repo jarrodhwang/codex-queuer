@@ -137,6 +137,8 @@ public sealed class OpenHandsQueueAgentRunner(
             context.Run.Model,
             validation.NormalizedBaseUrl,
             AiProviderService.LocalPlaceholderApiKey,
+            profile.ConfiguredContextWindow ?? AiProviderService.RecommendedContextWindow,
+            context.Run.ModelEffort,
             context.Request.QueueTab?.OpenHandsConversationId,
             context.Prompt,
             context.Request.OpenHandsAlwaysApproveConfirmed,

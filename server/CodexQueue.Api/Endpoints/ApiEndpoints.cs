@@ -385,7 +385,13 @@ public static class ApiEndpoints
                 discovery.CheckedAt,
                 profile.ConfiguredContextWindow,
                 warning?.Message,
-                discovery.Models.Select(x => new AiProviderModelDto(x.Model, x.Name)).ToArray()));
+                discovery.Models.Select(x => new AiProviderModelDto(
+                    x.Model,
+                    x.Name,
+                    x.MaximumContextWindow,
+                    x.SupportsTools,
+                    x.SupportsReasoning,
+                    x.SupportsReasoningEffort)).ToArray()));
         });
 
         api.MapGet("/machines/{id:guid}/usage", async (Guid id, AppDbContext db, ITargetCommandRunner runner, CancellationToken cancellationToken) =>
@@ -1170,7 +1176,9 @@ public static class ApiEndpoints
                 Model = runnerValidation.Model,
                 ModelEffort = input.ExecutionRunner == ExecutionRunner.CodexCli
                     ? NormalizeEffort(input.ModelEffort, input.Model)
-                    : null,
+                    : runnerValidation.SupportsReasoningEffort
+                        ? NormalizeOpenHandsReasoningEffort(input.ModelEffort)
+                        : null,
                 ModelSpeed = input.ExecutionRunner == ExecutionRunner.CodexCli
                     ? NormalizeSpeed(input.ModelSpeed)
                     : null,
@@ -1324,7 +1332,9 @@ public static class ApiEndpoints
             request.Model = runnerValidation.Model;
             request.ModelEffort = executionRunner == ExecutionRunner.CodexCli
                 ? NormalizeEffort(input.ModelEffort, input.Model)
-                : null;
+                : runnerValidation.SupportsReasoningEffort
+                    ? NormalizeOpenHandsReasoningEffort(input.ModelEffort)
+                    : null;
             request.ModelSpeed = executionRunner == ExecutionRunner.CodexCli
                 ? NormalizeSpeed(input.ModelSpeed)
                 : null;
@@ -1784,6 +1794,17 @@ public static class ApiEndpoints
                 "Provider profile is invalid: " + string.Join(" ", validation.Errors));
         }
 
+        if (profile.ConfiguredContextWindow is not { } configuredContextWindow
+            || configuredContextWindow < AiProviderService.ContextWarningThreshold)
+        {
+            return new RunnerSelectionValidation(
+                profile,
+                normalizedModel,
+                "OpenHands requires a configured Local AI context window of at least "
+                + AiProviderService.ContextWarningThreshold.ToString("N0")
+                + " tokens for reliable project prompts.");
+        }
+
         normalizedModel = AiProviderService.QualifyModel(AiProviderSource.Local, normalizedModel);
         var discovery = await providers.DiscoverModelsAsync(profile, cancellationToken);
         profile.LastHealthStatus = discovery.HealthStatus;
@@ -1797,7 +1818,12 @@ public static class ApiEndpoints
                 "Local AI server is offline or unavailable: " + (discovery.Error ?? "health check failed."));
         }
 
-        if (!discovery.Models.Any(x => string.Equals(x.Model, normalizedModel, StringComparison.OrdinalIgnoreCase)))
+        var selectedModel = discovery.Models.FirstOrDefault(
+            x => string.Equals(
+                x.Model,
+                normalizedModel,
+                StringComparison.OrdinalIgnoreCase));
+        if (selectedModel is null)
         {
             return new RunnerSelectionValidation(
                 profile,
@@ -1805,7 +1831,35 @@ public static class ApiEndpoints
                 "Selected model is not installed on the Local AI server.");
         }
 
-        return new RunnerSelectionValidation(profile, normalizedModel, null);
+        if (selectedModel.MaximumContextWindow is { } modelContextWindow
+            && modelContextWindow < AiProviderService.ContextWarningThreshold)
+        {
+            return new RunnerSelectionValidation(
+                profile,
+                normalizedModel,
+                selectedModel.Name
+                + " supports at most "
+                + modelContextWindow.ToString("N0")
+                + " tokens; OpenHands requires at least "
+                + AiProviderService.ContextWarningThreshold.ToString("N0")
+                + ".");
+        }
+
+        if (!selectedModel.SupportsTools)
+        {
+            return new RunnerSelectionValidation(
+                profile,
+                normalizedModel,
+                selectedModel.Name
+                + " does not advertise Ollama tool support, which OpenHands requires "
+                + "to read files and perform actions.");
+        }
+
+        return new RunnerSelectionValidation(
+            profile,
+            normalizedModel,
+            null,
+            selectedModel.SupportsReasoningEffort);
     }
 
     public static bool IsOpenHandsProjectPathScoped(
@@ -1871,7 +1925,8 @@ public static class ApiEndpoints
     private sealed record RunnerSelectionValidation(
         AiProviderProfile? Profile,
         string Model,
-        string? Error);
+        string? Error,
+        bool SupportsReasoningEffort = false);
 
     private static string? Validate(SaveMachineRequest input)
     {
@@ -1907,6 +1962,17 @@ public static class ApiEndpoints
         }
 
         return normalized is "low" or "medium" or "high" or "xhigh" or "ultra" ? normalized : null;
+    }
+
+    private static string? NormalizeOpenHandsReasoningEffort(string? effort)
+    {
+        if (string.IsNullOrWhiteSpace(effort))
+        {
+            return null;
+        }
+
+        var normalized = effort.Trim().ToLowerInvariant();
+        return normalized is "low" or "medium" or "high" ? normalized : null;
     }
 
     private static bool SupportsUltraEffort(string? model) =>
