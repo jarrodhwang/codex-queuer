@@ -1998,6 +1998,12 @@
   background: rgba(90, 200, 250, 0.3);
 }
 
+/* Increase font size for resource metric labels */
+.resource-meter-label,
+.resource-meter-name {
+  font-size: 14px !important;
+}
+
 .selected-folder-label {
   color: var(--text-strong);
   font-size: 12px;
@@ -5296,6 +5302,10 @@
 }
 
 .work-report-file-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
   min-width: 0;
   padding: 0.5rem 0.6rem;
   border: 1px solid var(--line);
@@ -5304,6 +5314,12 @@
   color: var(--muted-strong);
   font: 0.78rem/1.4 var(--mono);
   overflow-wrap: anywhere;
+}
+
+.work-report-file-list li small {
+  color: var(--muted);
+  font: 0.68rem/1 var(--mono);
+  text-transform: lowercase;
 }
 
 .work-report-stage {
