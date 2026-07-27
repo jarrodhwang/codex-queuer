@@ -19,7 +19,7 @@ services:
       CQ_CONTAINER_HOST_MOUNT_ROOT: ${CQ_CONTAINER_HOST_MOUNT_ROOT:-/host/home/jarrod}
       CQ_LOCAL_AI_BASE_URL: ${CQ_LOCAL_AI_BASE_URL:-http://host.docker.internal:11434/v1}
       CQ_LOCAL_AI_DEFAULT_MODEL: ${CQ_LOCAL_AI_DEFAULT_MODEL:-}
-      CQ_LOCAL_AI_CONTEXT_WINDOW: ${CQ_LOCAL_AI_CONTEXT_WINDOW:-65536}
+      CQ_LOCAL_AI_CONTEXT_WINDOW: ${CQ_LOCAL_AI_CONTEXT_WINDOW:-131072}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

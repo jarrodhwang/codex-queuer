@@ -262,7 +262,9 @@ public sealed record MachineResourceTelemetryDto(
     double? SystemPowerWatts,
     string? SystemPowerSource,
     IReadOnlyList<GpuResourceTelemetryDto> Gpus,
-    DateTimeOffset CollectedAt);
+    DateTimeOffset CollectedAt,
+    string? CpuName = null,
+    string? MemoryName = null);
 
 public sealed record OpenHandsMachineCheckDto(
     bool Available,

@@ -61,7 +61,9 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
 {
     public const string LocalPlaceholderApiKey = "local-llm";
     public const string LocalApiKeyPlaceholder = LocalPlaceholderApiKey;
-    public const int ContextWarningThreshold = 65_536;
+    // OpenHands needs a large project prompt window. 32K is the supported
+    // minimum; 64K remains the preferred default for multi-step work.
+    public const int ContextWarningThreshold = 32_768;
     public const int RecommendedContextWindow = 65_536;
     private const int MaximumModelCatalogBytes = 2 * 1024 * 1024;
     private const int MaximumDiscoveredModels = 1_000;

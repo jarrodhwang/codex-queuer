@@ -64,12 +64,59 @@ public sealed class OpenHandsQueueAgentRunnerTests
         Assert.True(result.DiscardOpenHandsConversation);
         Assert.Equal(conversationId, result.OpenHandsConversationId);
         Assert.Equal(conversationId, commandRunner.ObservedConversationId);
+        Assert.Equal(AiProviderService.RecommendedContextWindow, commandRunner.ObservedContextWindow);
+    }
+
+    [Fact]
+    public async Task RunAsync_UsesContextWindowSavedWithTheQueueRun()
+    {
+        var profile = new AiProviderProfile
+        {
+            Name = "Test Ollama",
+            Source = AiProviderSource.Local,
+            BaseUrl = "http://ollama.test:11434/v1",
+            Enabled = true,
+            MaximumConcurrency = 1,
+            ConfiguredContextWindow = AiProviderService.RecommendedContextWindow,
+        };
+        var request = new CodexRequest
+        {
+            ProviderProfile = profile,
+            ProviderProfileId = profile.Id,
+            PermissionMode = PermissionMode.FullAccess,
+            OpenHandsAlwaysApproveConfirmed = true,
+        };
+        var run = new CodexRun
+        {
+            Model = "openai/test-model",
+            ModelSpeed = "32768",
+            ExecutionRunner = ExecutionRunner.OpenHandsCli,
+        };
+        var commandRunner = new StubOpenHandsCommandRunner(
+            new OpenHandsCommandResult(0, "safe output", "", "safe preview", null, ReportedError: false));
+        var runner = new OpenHandsQueueAgentRunner(
+            commandRunner,
+            new HealthyProviderService(profile, run.Model));
+
+        await runner.RunAsync(
+            new QueueAgentRunContext(
+                request,
+                run,
+                new TargetMachine { Kind = MachineKind.Local, Platform = MachinePlatform.Linux },
+                "/test/project",
+                "perform the task",
+                null),
+            _ => Task.CompletedTask,
+            CancellationToken.None);
+
+        Assert.Equal(32_768, commandRunner.ObservedContextWindow);
     }
 
     private sealed class StubOpenHandsCommandRunner(OpenHandsCommandResult result)
         : IOpenHandsCommandRunner
     {
         public string? ObservedConversationId { get; private set; }
+        public int? ObservedContextWindow { get; private set; }
 
         public Task<OpenHandsCommandResult> RunAsync(
             TargetMachine machine,
@@ -86,6 +133,7 @@ public sealed class OpenHandsQueueAgentRunnerTests
             CancellationToken cancellationToken)
         {
             ObservedConversationId = conversationId;
+            ObservedContextWindow = contextWindow;
             return Task.FromResult(result);
         }
 

@@ -28,7 +28,9 @@ public sealed record MachineResourceTelemetry(
     double? SystemPowerWatts,
     string? SystemPowerSource,
     IReadOnlyList<GpuResourceTelemetry> Gpus,
-    DateTimeOffset CollectedAt);
+    DateTimeOffset CollectedAt,
+    string? CpuName = null,
+    string? MemoryName = null);
 
 public interface IMachineResourceTelemetryService
 {
@@ -184,6 +186,8 @@ internal sealed class MachineResourceTelemetryService(
         double? systemTemperature = null;
         double? systemPower = null;
         string? systemPowerSource = null;
+        string? cpuName = null;
+        string? memoryName = null;
         var systemPowerRank = -1;
         var gpus = new List<GpuResourceTelemetry>();
         string? reportedError = null;
@@ -202,6 +206,14 @@ internal sealed class MachineResourceTelemetryService(
             {
                 case "CQ_CPU" when fields.Length >= 2:
                     cpuUsage = ParsePercent(fields[1]);
+                    break;
+
+                case "CQ_CPU_INFO" when fields.Length >= 2:
+                    cpuName = SanitizeName(fields[1], "");
+                    break;
+
+                case "CQ_MEM_INFO" when fields.Length >= 2:
+                    memoryName = SanitizeName(fields[1], "");
                     break;
 
                 case "CQ_MEM" when fields.Length >= 4:
@@ -300,7 +312,9 @@ internal sealed class MachineResourceTelemetryService(
             Round(systemPower),
             systemPowerSource,
             usableGpus,
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow,
+            cpuName,
+            memoryName);
     }
 
     private static GpuResourceTelemetry ParseNvidiaGpu(string[] fields, int fallbackIndex)
@@ -557,6 +571,8 @@ internal sealed class ResourceTelemetryCommandExecutor(
         fi
 
         read -r cpu_label cpu_user cpu_nice cpu_system cpu_idle cpu_iowait cpu_irq cpu_softirq cpu_steal cpu_rest < /proc/stat
+        cpu_name="$(awk -F: '$1 ~ /^[[:space:]]*model name[[:space:]]*$/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }' /proc/cpuinfo)"
+        [ -n "$cpu_name" ] && printf 'CQ_CPU_INFO|%s\n' "$(printf '%s' "$cpu_name" | tr '|\r\n' '   ')"
         cpu_total_1=$((cpu_user + cpu_nice + cpu_system + cpu_idle + cpu_iowait + cpu_irq + cpu_softirq + cpu_steal))
         cpu_idle_1=$((cpu_idle + cpu_iowait))
         sleep 0.20
@@ -577,6 +593,20 @@ internal sealed class ResourceTelemetryCommandExecutor(
         fi
         awk -v total="$mem_total_kb" -v available="$mem_available_kb" \
           'BEGIN { if (total > 0) { used=total-available; printf "CQ_MEM|%.0f|%.0f|%.1f\n", used*1024, total*1024, used*100/total } }'
+        # /proc/meminfo is usable memory and excludes firmware/iGPU reservations.
+        # Round it to the nearest common marketed module capacity for the identity label;
+        # the exact usable GiB remains in CQ_MEM below.
+        memory_capacity="$(awk -v total="$mem_total_kb" 'BEGIN {
+          if (total <= 0) exit
+          gb=total*1024/1000000000
+          count=split("8 16 24 32 48 64 96 128 192 256 384 512", choices, " ")
+          best=choices[1]; distance=(gb-best); if (distance<0) distance=-distance
+          for (i=2; i<=count; i++) { d=gb-choices[i]; if (d<0) d=-d; if (d<distance) { best=choices[i]; distance=d } }
+          printf "%d GB", best
+        }')"
+        memory_info="$(for dimm in /sys/devices/system/edac/mc/mc*/dimm*; do [ -d "$dimm" ] || continue; t="$(cat "$dimm/dimm_type" 2>/dev/null || true)"; s="$(cat "$dimm/dimm_speed" 2>/dev/null || true)"; [ -n "$t$s" ] && { printf '%s %s' "$t" "$s"; break; }; done)"
+        memory_info="${memory_info:-}${memory_info:+ }${memory_capacity}"
+        [ -n "$memory_info" ] && printf 'CQ_MEM_INFO|%s\n' "$(printf '%s' "$memory_info" | tr '|\r\n' '   ')"
 
         for hwmon in /sys/class/hwmon/hwmon*; do
           [ -d "$hwmon" ] || continue
@@ -601,50 +631,6 @@ internal sealed class ResourceTelemetryCommandExecutor(
           zone_type_safe="$(printf '%s' "$zone_type" | tr '|\r\n' '   ')"
           printf 'CQ_TEMP|%s|%s|%s\n' "$zone_type_safe" "$zone_type_safe" "$zone_value"
         done
-
-        system_power_found=0
-        for hwmon in /sys/class/hwmon/hwmon*; do
-          [ -d "$hwmon" ] || continue
-          sensor_name="$(cat "$hwmon/name" 2>/dev/null || printf hwmon)"
-          for input in "$hwmon"/power*_input "$hwmon"/power*_average; do
-            [ -r "$input" ] || continue
-            case "$input" in
-              *_input) label_path="${input%_input}_label" ;;
-              *_average) label_path="${input%_average}_label" ;;
-            esac
-            sensor_label="$(cat "$label_path" 2>/dev/null || true)"
-            normalized_label="$(printf '%s' "$sensor_label" | tr '[:upper:]' '[:lower:]')"
-            case "$normalized_label" in
-              *psys*|*system*power*|*system*input*|*total*power*|*total*input*) ;;
-              *) continue ;;
-            esac
-            power_value="$(cat "$input" 2>/dev/null || true)"
-            case "$power_value" in ''|*[!0-9]*) continue ;; esac
-            power_source_safe="$(printf '%s %s' "$sensor_name" "$sensor_label" | tr '|\r\n' '   ')"
-            printf 'CQ_SYSPOWER|%s|%s\n' "$power_source_safe" "$power_value"
-            system_power_found=1
-          done
-        done
-
-        if [ "$system_power_found" -eq 0 ]; then
-          for supply in /sys/class/power_supply/*; do
-            [ -d "$supply" ] || continue
-            supply_type="$(cat "$supply/type" 2>/dev/null || true)"
-            supply_status="$(cat "$supply/status" 2>/dev/null || true)"
-            [ "$supply_type" = "Battery" ] || continue
-            [ "$supply_status" = "Discharging" ] || continue
-            power_value="$(cat "$supply/power_now" 2>/dev/null || true)"
-            if [ -z "$power_value" ]; then
-              voltage_value="$(cat "$supply/voltage_now" 2>/dev/null || true)"
-              current_value="$(cat "$supply/current_now" 2>/dev/null || true)"
-              power_value="$(awk -v voltage="$voltage_value" -v current="$current_value" \
-                'BEGIN { if (voltage >= 0 && current >= 0) printf "%.0f", voltage*current/1000000 }')"
-            fi
-            case "$power_value" in ''|*[!0-9]*) continue ;; esac
-            printf 'CQ_SYSPOWER|battery discharge|%s\n' "$power_value"
-            break
-          done
-        fi
 
         has_nvidia=0
         if command -v nvidia-smi >/dev/null 2>&1; then

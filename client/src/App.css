@@ -1325,19 +1325,33 @@
   min-width: 0;
 }
 
+.local-model-card {
+  gap: 5px;
+  padding: 7px;
+}
+
+.local-model-card .glass-select-button {
+  min-height: 34px;
+}
+
+.local-model-card .model-picker-title,
+.local-model-card .local-profile-field > span {
+  font-size: 10px;
+}
+
 .local-model-select {
   min-width: 0;
 }
 
-.local-model-select > .glass-field {
+.local-model-select {
   width: 100%;
 }
 
 .local-profile-field {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
 }
 
 .local-profile-field > span {
@@ -1351,8 +1365,29 @@
   letter-spacing: 0.04em;
 }
 
-.local-profile-field > .glass-field {
+.local-profile-field > .glass-select {
   min-width: 0;
+}
+
+.local-picker-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.local-picker-actions .local-health-strip {
+  gap: 3px;
+}
+
+.local-picker-actions .local-health-icon {
+  width: 27px;
+  height: 27px;
+  border-radius: 8px;
+}
+
+.local-picker-actions .glass-button--icon {
+  width: 31px;
+  height: 31px;
 }
 
 .local-capability-note {
@@ -1363,6 +1398,11 @@
 
 .resource-monitor-card {
   align-content: start;
+}
+
+.resource-monitor-card--compact {
+  gap: 5px;
+  padding: 8px 10px;
 }
 
 .resource-monitor-head,
@@ -1414,18 +1454,18 @@
 
 .resource-meter-list {
   display: grid;
-  gap: 6px;
+  gap: 4px;
 }
 
 .resource-meter {
   display: grid;
-  gap: 3px;
+  gap: 2px;
 }
 
 .resource-meter-head {
   min-width: 0;
   gap: 6px;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .resource-meter-label {
@@ -1448,11 +1488,11 @@
 .resource-meter-head strong {
   margin-left: auto;
   color: var(--text-strong);
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .resource-meter-track {
-  height: 6px;
+  height: 5px;
   overflow: hidden;
   border: 1px solid rgba(14, 165, 233, 0.16);
   border-radius: 999px;
@@ -1482,7 +1522,8 @@
   justify-content: flex-end;
   gap: 7px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .resource-meter-details > span:first-child {
@@ -1544,6 +1585,49 @@
   color: var(--muted);
   font-size: 10px;
   text-align: center;
+}
+
+.resource-unavailable--server {
+  min-height: 58px;
+  border-color: rgba(220, 38, 38, 0.28);
+  background: rgba(254, 242, 242, 0.72);
+  color: #b91c1c;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.resource-telemetry-loading {
+  display: grid;
+  gap: 7px;
+  padding: 2px 0;
+}
+
+.resource-telemetry-skeleton {
+  display: grid;
+  grid-template-columns: 17px minmax(70px, 1fr) 30px;
+  align-items: center;
+  gap: 7px;
+}
+
+.resource-telemetry-skeleton-icon,
+.resource-telemetry-skeleton-label,
+.resource-telemetry-skeleton-value,
+.resource-telemetry-skeleton-meter {
+  display: block;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(148, 163, 184, 0.14), rgba(255, 255, 255, 0.78), rgba(148, 163, 184, 0.14));
+  background-size: 220% 100%;
+  animation: resource-telemetry-shimmer 1.1s ease-in-out infinite;
+}
+
+.resource-telemetry-skeleton-icon { width: 17px; height: 17px; }
+.resource-telemetry-skeleton-label { width: min(100%, 180px); height: 13px; }
+.resource-telemetry-skeleton-value { justify-self: end; width: 30px; height: 13px; }
+.resource-telemetry-skeleton-meter { grid-column: 1 / -1; height: 5px; }
+
+@keyframes resource-telemetry-shimmer {
+  to { background-position: -220% 0; }
 }
 
 .resource-monitor-error,
@@ -2097,6 +2181,163 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+/* Local context has five choices, while effort has three. Give context the
+   larger share so labels stay distinct without leaving a wide empty effort row. */
+.model-options-row--local:not(.model-options-row--single) {
+  grid-template-columns: minmax(11rem, 0.65fr) minmax(0, 1.7fr);
+}
+
+.model-options-row--local .segmented-field:last-child .segmented-radio label {
+  font-size: 0.7rem;
+  letter-spacing: -0.01em;
+}
+
+.context-size-picker {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 4px;
+}
+
+.context-size-picker-primary {
+  min-width: 0;
+}
+
+.context-size-more-button {
+  min-height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(93, 222, 255, 0.24);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.5);
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.context-size-more-button:hover,
+.context-size-more-button:focus-visible {
+  border-color: rgba(182, 115, 255, 0.44);
+  background: rgba(255, 255, 255, 0.86);
+  color: var(--text-strong);
+  outline: none;
+}
+
+.context-size-menu {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  z-index: 80;
+  display: grid;
+  min-width: 118px;
+  gap: 3px;
+  padding: 5px;
+  border: 1px solid rgba(93, 222, 255, 0.3);
+  border-radius: 10px;
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.97), rgba(232, 244, 255, 0.92));
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.16), 0 0 20px rgba(32, 217, 242, 0.12);
+}
+
+.context-size-menu button {
+  min-height: 31px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+  padding: 0 8px;
+  text-align: left;
+}
+
+.context-size-menu button:hover:not(:disabled),
+.context-size-menu button:focus-visible {
+  border-color: rgba(93, 222, 255, 0.28);
+  background: rgba(255, 255, 255, 0.72);
+  outline: none;
+}
+
+.context-size-menu button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.context-size-menu button.active,
+.context-size-more-button.active {
+  border-color: rgba(234, 179, 8, 0.48);
+  background: linear-gradient(145deg, rgba(254, 249, 195, 0.96), rgba(250, 204, 21, 0.58));
+  color: #713f12;
+}
+
+/* Context size is a capacity choice, so its selected state becomes more vivid
+   as the requested Ollama num_ctx increases. */
+.model-options-row--local .segmented-field:last-child .segmented-radio label.segmented-radio-option--32768.active {
+  border-color: rgba(202, 138, 4, 0.28);
+  background: linear-gradient(145deg, rgba(254, 249, 195, 0.92), rgba(253, 230, 138, 0.42));
+  color: #854d0e;
+}
+
+.model-options-row--local .segmented-field:last-child .segmented-radio label.segmented-radio-option--65536.active {
+  border-color: rgba(202, 138, 4, 0.38);
+  background: linear-gradient(145deg, rgba(254, 240, 138, 0.94), rgba(250, 204, 21, 0.38));
+  color: #713f12;
+}
+
+.model-options-row--local .segmented-field:last-child .segmented-radio label.segmented-radio-option--131072.active {
+  border-color: rgba(234, 179, 8, 0.48);
+  background: linear-gradient(145deg, rgba(254, 249, 195, 0.96), rgba(250, 204, 21, 0.58));
+  color: #713f12;
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 4px 12px rgba(234, 179, 8, 0.2);
+}
+
+.model-options-row--local .segmented-field:last-child .segmented-radio label.segmented-radio-option--262144.active {
+  border-color: rgba(245, 158, 11, 0.58);
+  background: linear-gradient(145deg, rgba(254, 243, 199, 0.98), rgba(245, 158, 11, 0.68));
+  color: #78350f;
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 4px 14px rgba(245, 158, 11, 0.26);
+}
+
+.context-size-more-button.segmented-radio-option--262144.active,
+.context-size-menu button.segmented-radio-option--262144.active {
+  border-color: rgba(245, 158, 11, 0.58);
+  background: linear-gradient(145deg, rgba(254, 243, 199, 0.98), rgba(245, 158, 11, 0.68));
+  color: #78350f;
+}
+
+.model-options-row--local .segmented-field:last-child .segmented-radio label.segmented-radio-option--524288.active {
+  border-color: rgba(234, 88, 12, 0.62);
+  background: linear-gradient(145deg, rgba(254, 243, 199, 0.98), rgba(251, 146, 60, 0.74));
+  color: #7c2d12;
+  box-shadow: inset 0 1px 0 var(--glass-edge), 0 5px 15px rgba(234, 88, 12, 0.28);
+}
+
+.context-size-more-button.segmented-radio-option--524288.active,
+.context-size-menu button.segmented-radio-option--524288.active {
+  border-color: rgba(234, 88, 12, 0.62);
+  background: linear-gradient(145deg, rgba(254, 243, 199, 0.98), rgba(251, 146, 60, 0.74));
+  color: #7c2d12;
+}
+
+.model-options-row--local .segmented-field:last-child .segmented-radio label.segmented-radio-option--1048576.active {
+  border-color: rgba(234, 88, 12, 0.76);
+  background: linear-gradient(145deg, rgba(254, 249, 195, 1), rgba(251, 191, 36, 0.98));
+  color: #6b2109;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82), 0 5px 17px rgba(234, 88, 12, 0.36);
+}
+
+.context-size-more-button.segmented-radio-option--1048576.active,
+.context-size-menu button.segmented-radio-option--1048576.active {
+  border-color: rgba(234, 88, 12, 0.76);
+  background: linear-gradient(145deg, rgba(254, 249, 195, 1), rgba(251, 191, 36, 0.98));
+  color: #6b2109;
+}
+
 .segmented-field {
   display: grid;
   gap: 4px;
@@ -2104,11 +2345,27 @@
 
 .segmented-field > span {
   color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
   min-width: 0;
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+.segmented-field-info {
+  display: inline-grid;
+  place-items: center;
+  color: var(--accent-strong);
+  cursor: help;
+}
+
+.segmented-field-info:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+  border-radius: 999px;
 }
 
 .segmented-radio {

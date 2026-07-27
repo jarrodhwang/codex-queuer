@@ -204,7 +204,9 @@ public static class ApiEndpoints
                     gpu.MemoryTotalBytes,
                     gpu.TemperatureCelsius,
                     gpu.PowerWatts)).ToArray(),
-                telemetry.CollectedAt));
+                telemetry.CollectedAt,
+                telemetry.CpuName,
+                telemetry.MemoryName));
         });
 
         api.MapGet("/machines/{id:guid}/openhands/test", async (
@@ -649,7 +651,7 @@ public static class ApiEndpoints
                 DefaultLocalProviderProfileId = localDefaults.ProviderProfileId,
                 DefaultLocalModel = localDefaults.Model,
                 DefaultLocalModelEffort = localDefaults.Effort,
-                DefaultLocalModelSpeed = null,
+                DefaultLocalModelSpeed = localDefaults.ContextWindow,
                 SeparateQueuesByTab = input.SeparateQueuesByTab ?? false
             };
             db.Projects.Add(project);
@@ -707,7 +709,12 @@ public static class ApiEndpoints
                         StringComparison.OrdinalIgnoreCase)
                     || (!string.IsNullOrWhiteSpace(mergedLocalDefaultsInput.DefaultLocalModelEffort)
                         && NormalizeOpenHandsReasoningEffort(mergedLocalDefaultsInput.DefaultLocalModelEffort) is null)
-                    || !string.IsNullOrWhiteSpace(mergedLocalDefaultsInput.DefaultLocalModelSpeed));
+                    || !string.Equals(
+                        NormalizeOpenHandsContextWindow(mergedLocalDefaultsInput.DefaultLocalModelSpeed)?.ToString(),
+                        project.DefaultLocalModelSpeed,
+                        StringComparison.Ordinal)
+                    || (!string.IsNullOrWhiteSpace(mergedLocalDefaultsInput.DefaultLocalModelSpeed)
+                        && NormalizeOpenHandsContextWindow(mergedLocalDefaultsInput.DefaultLocalModelSpeed) is null));
             var mustValidateLocalDefaults = localValuesChanged
                 || (requestedDefaultRunner == ExecutionRunner.OpenHandsCli
                     && project.DefaultExecutionRunner != ExecutionRunner.OpenHandsCli);
@@ -722,6 +729,7 @@ public static class ApiEndpoints
                     project.DefaultLocalProviderProfileId,
                     project.DefaultLocalModel,
                     project.DefaultLocalModelEffort,
+                    project.DefaultLocalModelSpeed,
                     null);
             if (localDefaults.Error is not null)
             {
@@ -776,7 +784,7 @@ public static class ApiEndpoints
             project.DefaultLocalProviderProfileId = localDefaults.ProviderProfileId;
             project.DefaultLocalModel = localDefaults.Model;
             project.DefaultLocalModelEffort = localDefaults.Effort;
-            project.DefaultLocalModelSpeed = null;
+            project.DefaultLocalModelSpeed = localDefaults.ContextWindow;
             project.SeparateQueuesByTab = input.SeparateQueuesByTab ?? false;
             project.UpdatedAt = DateTimeOffset.UtcNow;
             if (executionContextChanged)
@@ -1248,6 +1256,7 @@ public static class ApiEndpoints
                 input.ExecutionRunner,
                 input.ProviderProfileId,
                 input.Model,
+                input.ModelSpeed,
                 input.PermissionMode,
                 input.GenerateCommit,
                 input.SeparateCommitSession,
@@ -1310,7 +1319,7 @@ public static class ApiEndpoints
                         : null,
                 ModelSpeed = input.ExecutionRunner == ExecutionRunner.CodexCli
                     ? NormalizeSpeed(input.ModelSpeed)
-                    : null,
+                    : runnerValidation.OpenHandsContextWindow?.ToString(),
                 GenerateCommit = input.ExecutionRunner == ExecutionRunner.CodexCli
                     && input.PermissionMode != PermissionMode.ReadOnly
                     && input.GenerateCommit,
@@ -1410,6 +1419,7 @@ public static class ApiEndpoints
                 executionRunner,
                 input.ProviderProfileId,
                 input.Model,
+                input.ModelSpeed,
                 input.PermissionMode,
                 input.GenerateCommit,
                 input.SeparateCommitSession,
@@ -1466,7 +1476,7 @@ public static class ApiEndpoints
                     : null;
             request.ModelSpeed = executionRunner == ExecutionRunner.CodexCli
                 ? NormalizeSpeed(input.ModelSpeed)
-                : null;
+                : runnerValidation.OpenHandsContextWindow?.ToString();
             request.GenerateCommit = executionRunner == ExecutionRunner.CodexCli
                 && input.PermissionMode != PermissionMode.ReadOnly
                 && input.GenerateCommit;
@@ -1798,6 +1808,7 @@ public static class ApiEndpoints
         ExecutionRunner executionRunner,
         Guid? providerProfileId,
         string model,
+        string? localContextWindow,
         PermissionMode permissionMode,
         bool generateCommit,
         bool separateCommitSession,
@@ -1953,11 +1964,57 @@ public static class ApiEndpoints
                 + "to read files and perform actions.");
         }
 
+        var requestedContextWindow = NormalizeOpenHandsContextWindow(localContextWindow);
+        if (!string.IsNullOrWhiteSpace(localContextWindow) && requestedContextWindow is null)
+        {
+            return new RunnerSelectionValidation(
+                profile,
+                normalizedModel,
+                "Local context size must use a supported preset between 4K and 1M.");
+        }
+
+        requestedContextWindow ??= profile.ConfiguredContextWindow;
+        if (requestedContextWindow is null
+            || requestedContextWindow < AiProviderService.ContextWarningThreshold)
+        {
+            return new RunnerSelectionValidation(
+                profile,
+                normalizedModel,
+                "OpenHands requires a context size of at least "
+                + AiProviderService.ContextWarningThreshold.ToString("N0")
+                + " tokens.");
+        }
+
+        if (profile.ConfiguredContextWindow is { } configuredContextWindow
+            && requestedContextWindow > configuredContextWindow)
+        {
+            return new RunnerSelectionValidation(
+                profile,
+                normalizedModel,
+                "The selected context size exceeds this Local AI server's configured "
+                + configuredContextWindow.ToString("N0")
+                + "-token limit.");
+        }
+
+        if (selectedModel.MaximumContextWindow is { } maximumContextWindow
+            && requestedContextWindow > maximumContextWindow)
+        {
+            return new RunnerSelectionValidation(
+                profile,
+                normalizedModel,
+                "The selected context size exceeds "
+                + selectedModel.Name
+                + "'s "
+                + maximumContextWindow.ToString("N0")
+                + "-token limit.");
+        }
+
         return new RunnerSelectionValidation(
             profile,
             normalizedModel,
             null,
-            selectedModel.SupportsReasoningEffort);
+            selectedModel.SupportsReasoningEffort,
+            requestedContextWindow);
     }
 
     public static bool IsOpenHandsProjectPathScoped(
@@ -2024,7 +2081,8 @@ public static class ApiEndpoints
         AiProviderProfile? Profile,
         string Model,
         string? Error,
-        bool SupportsReasoningEffort = false);
+        bool SupportsReasoningEffort = false,
+        int? OpenHandsContextWindow = null);
 
     private static string? Validate(SaveMachineRequest input)
     {
@@ -2050,6 +2108,7 @@ public static class ApiEndpoints
         Guid? ProviderProfileId,
         string? Model,
         string? Effort,
+        string? ContextWindow,
         string? Error);
 
     internal static bool HasLocalProjectDefaultsInput(SaveProjectRequest input) =>
@@ -2099,7 +2158,7 @@ public static class ApiEndpoints
         var runner = effectiveRunner ?? input.DefaultExecutionRunner ?? ExecutionRunner.CodexCli;
         if (!Enum.IsDefined(runner))
         {
-            return new(null, null, null, "Default execution runner is invalid.");
+            return new(null, null, null, null, "Default execution runner is invalid.");
         }
 
         var model = NormalizeOptional(input.DefaultLocalModel);
@@ -2107,10 +2166,10 @@ public static class ApiEndpoints
         {
             if (runner == ExecutionRunner.OpenHandsCli)
             {
-                return new(null, null, null, "A Local AI Server profile is required when Local is the default runner.");
+                return new(null, null, null, null, "A Local AI Server profile is required when Local is the default runner.");
             }
 
-            return new(null, null, null, null);
+            return new(null, null, null, null, null);
         }
 
         var profile = await db.AiProviderProfiles
@@ -2118,23 +2177,23 @@ public static class ApiEndpoints
             .FirstOrDefaultAsync(x => x.Id == profileId, cancellationToken);
         if (profile is null || profile.Source != AiProviderSource.Local)
         {
-            return new(null, null, null, "The selected Local AI Server profile does not exist or is not a Local provider.");
+            return new(null, null, null, null, "The selected Local AI Server profile does not exist or is not a Local provider.");
         }
 
         var profileError = ValidateLocalProviderProfileForOpenHands(profile, providers);
         if (profileError is not null)
         {
-            return new(null, null, null, profileError);
+            return new(null, null, null, null, profileError);
         }
 
         if (model is null)
         {
             if (runner == ExecutionRunner.OpenHandsCli)
             {
-                return new(null, null, null, "A Local model is required when Local is the default runner.");
+                return new(null, null, null, null, "A Local model is required when Local is the default runner.");
             }
 
-            return new(profileId, null, null, null);
+            return new(profileId, null, null, null, null);
         }
 
         try
@@ -2143,19 +2202,35 @@ public static class ApiEndpoints
         }
         catch (ArgumentException ex)
         {
-            return new(null, null, null, ex.Message);
+            return new(null, null, null, null, ex.Message);
         }
 
         var effort = NormalizeOpenHandsReasoningEffort(input.DefaultLocalModelEffort);
         if (!string.IsNullOrWhiteSpace(input.DefaultLocalModelEffort) && effort is null)
         {
-            return new(null, null, null, "Local reasoning effort must be low, medium, or high.");
+            return new(null, null, null, null, "Local reasoning effort must be low, medium, or high.");
         }
 
-        // Ollama/OpenHands has no provider-neutral equivalent to Codex's priority
-        // service tier. Keep the reserved field null until an executable capability
-        // is advertised instead of persisting a control that would do nothing.
-        return new(profileId, model, effort, null);
+        var contextWindow = NormalizeOpenHandsContextWindow(input.DefaultLocalModelSpeed);
+        if (!string.IsNullOrWhiteSpace(input.DefaultLocalModelSpeed) && contextWindow is null)
+        {
+            return new(null, null, null, null, "Local context size must use a supported preset between 4K and 1M.");
+        }
+
+        contextWindow ??= profile.ConfiguredContextWindow;
+        if (contextWindow is null || contextWindow < AiProviderService.ContextWarningThreshold)
+        {
+            return new(null, null, null, null, "Local context size must be at least "
+                + AiProviderService.ContextWarningThreshold.ToString("N0") + " tokens for OpenHands.");
+        }
+
+        if (profile.ConfiguredContextWindow is { } configuredContextWindow
+            && contextWindow > configuredContextWindow)
+        {
+            return new(null, null, null, null, "Local context size exceeds this Local AI server's configured limit.");
+        }
+
+        return new(profileId, model, effort, contextWindow.ToString(), null);
     }
 
     private static string? ValidateLocalProviderProfileForOpenHands(
@@ -2221,6 +2296,20 @@ public static class ApiEndpoints
 
         var normalized = effort.Trim().ToLowerInvariant();
         return normalized is "low" or "medium" or "high" ? normalized : null;
+    }
+
+    private static int? NormalizeOpenHandsContextWindow(string? contextWindow)
+    {
+        if (string.IsNullOrWhiteSpace(contextWindow))
+        {
+            return null;
+        }
+
+        return int.TryParse(contextWindow.Trim(), out var parsed)
+               && parsed is 4_096 or 8_192 or 16_384 or 32_768 or 65_536
+                   or 131_072 or 262_144 or 524_288 or 1_048_576
+            ? parsed
+            : null;
     }
 
     private static bool SupportsUltraEffort(string? model) =>

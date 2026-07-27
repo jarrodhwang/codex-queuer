@@ -114,8 +114,8 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 context_window = os.environ.get("LLM_CONTEXT_WINDOW")
                 if context_window:
                     parsed_context_window = int(context_window)
-                    if parsed_context_window < 65536:
-                        raise ValueError("LLM_CONTEXT_WINDOW must be at least 65536")
+                    if parsed_context_window < 32768:
+                        raise ValueError("LLM_CONTEXT_WINDOW must be at least 32768")
                     updates["litellm_extra_body"] = {
                         "options": {"num_ctx": parsed_context_window},
                         "keep_alive": "5m",
@@ -613,7 +613,7 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                     false,
                     "Installed OpenHands cannot load Codex Queue's Local AI integration. "
                     + "Use the Python/uv OpenHands CLI installation so queued runs can apply "
-                    + "the 65,536-token context and supported reasoning effort.");
+                    + "the selected Local AI context size and supported reasoning effort.");
             }
 
             var versionLines = (string.IsNullOrWhiteSpace(versionOutput) ? output : versionOutput)
@@ -628,7 +628,7 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 version,
                 false,
                 "OpenHands CLI supports headless JSON execution and Codex Queue's "
-                + "65,536-token Local AI override.");
+                + "per-request Local AI context override.");
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -1860,7 +1860,7 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
                 NoAgentActivityErrorCode,
                 "OpenHands exited without processing the task. It reported a conversation ID but no agent message, action, or tool request. "
                 + recovery
-                + " Run the OpenHands machine check and verify that the selected model server provides at least a 65,536-token context window before retrying.",
+                + " Run the OpenHands machine check and verify that the selected model server supports the selected context size (at least 32,768 tokens) before retrying.",
                 onOutput);
             return failedResult with { DiscardConversation = true };
         }
@@ -1885,7 +1885,7 @@ public sealed class OpenHandsCommandRunner : IOpenHandsCommandRunner
             code = "OpenHandsContextWindowExceeded";
             message =
                 "OpenHands rejected the prompt before inference because the effective model "
-                + "context was too small. Configure and verify at least 65,536 tokens.";
+                + "context was too small. Configure and verify at least 32,768 tokens.";
             return true;
         }
 

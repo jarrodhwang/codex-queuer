@@ -393,6 +393,8 @@ export type MachineResources = {
   systemPowerSource?: string | null
   gpus: MachineGpuResource[]
   collectedAt: string
+  cpuName?: string | null
+  memoryName?: string | null
 }
 
 export type RateLimit = {

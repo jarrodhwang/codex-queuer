@@ -125,10 +125,32 @@ public sealed class OpenHandsQueueAgentRunner(
                 "Local AI server is offline or unavailable: " + (discovery.Error ?? "health check failed."));
         }
 
-        if (!discovery.Models.Any(x =>
-                string.Equals(x.Model, context.Run.Model, StringComparison.OrdinalIgnoreCase)))
+        var selectedModel = discovery.Models.FirstOrDefault(x =>
+            string.Equals(x.Model, context.Run.Model, StringComparison.OrdinalIgnoreCase));
+        if (selectedModel is null)
         {
             throw new InvalidOperationException("Selected model is not installed on the Local AI server.");
+        }
+
+        var contextWindow = profile.ConfiguredContextWindow ?? AiProviderService.RecommendedContextWindow;
+        if (!string.IsNullOrWhiteSpace(context.Run.ModelSpeed))
+        {
+            if (!int.TryParse(context.Run.ModelSpeed, out var requestedContextWindow)
+                || requestedContextWindow < AiProviderService.ContextWarningThreshold
+                || requestedContextWindow > contextWindow)
+            {
+                throw new InvalidOperationException(
+                    "The saved Local context size is invalid or exceeds the Local AI server's configured limit.");
+            }
+
+            contextWindow = requestedContextWindow;
+        }
+
+        if (selectedModel.MaximumContextWindow is { } maximumContextWindow
+            && contextWindow > maximumContextWindow)
+        {
+            throw new InvalidOperationException(
+                "The saved Local context size exceeds the selected model's advertised limit.");
         }
 
         var result = await commandRunner.RunAsync(
@@ -137,7 +159,7 @@ public sealed class OpenHandsQueueAgentRunner(
             context.Run.Model,
             validation.NormalizedBaseUrl,
             AiProviderService.LocalPlaceholderApiKey,
-            profile.ConfiguredContextWindow ?? AiProviderService.RecommendedContextWindow,
+            contextWindow,
             context.Run.ModelEffort,
             context.Request.QueueTab?.OpenHandsConversationId,
             context.Prompt,

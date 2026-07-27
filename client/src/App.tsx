@@ -10,6 +10,7 @@ import {
   ClipboardList,
   Code2,
   Cpu,
+  Ellipsis,
   FileText,
   Folder,
   FolderOpen,
@@ -20,6 +21,7 @@ import {
   GripVertical,
   History,
   Image as ImageIcon,
+  Info,
   Eye,
   ExternalLink,
   Menu,
@@ -61,6 +63,7 @@ import type {
   MachineRateLimits,
   MachineResources,
   MachinePlatform,
+  ModelDiscoveryMode,
   RateLimit,
   ModelOption,
   OpenHandsMachineTest,
@@ -71,6 +74,7 @@ import type {
   QueueDiagnostics,
   QueueTab,
   SaveMachineRequest,
+  SaveAiProviderProfileRequest,
   SaveProjectRequest,
   UpdateQueueRequest,
 } from '@/api/types'
@@ -148,7 +152,32 @@ const emptyMachine: SaveMachineRequest = {
   platform: 'Auto',
 }
 
+const emptyLocalProviderProfile: SaveAiProviderProfileRequest = {
+  name: '',
+  source: 'Local',
+  baseUrl: 'http://host.docker.internal:11434/v1',
+  modelDiscoveryMode: 'Ollama',
+  enabled: true,
+  maximumConcurrency: 1,
+  configuredContextWindow: 131_072,
+  defaultModel: '',
+}
+
 const themeStorageKey = 'codex-queue-theme'
+const minimumOpenHandsContextSize = 32_768
+const defaultOpenHandsContextSize = '65536'
+const localContextSizeOptions = [
+  { label: '4K', value: '4096' },
+  { label: '8K', value: '8192' },
+  { label: '16K', value: '16384' },
+  { label: '32K', value: '32768' },
+  { label: '64K', value: '65536' },
+  { label: '128K', value: '131072' },
+  { label: '256K', value: '262144' },
+  { label: '512K', value: '524288' },
+  { label: '1M', value: '1048576' },
+] as const
+const supportedLocalContextSizes = [4_096, 8_192, 16_384, 32_768, 65_536, 131_072, 262_144, 524_288, 1_048_576]
 const localModelDiscoveryCache = new Map<string, ProviderModelsResponse>()
 
 type CachedOpenHandsReadiness = {
@@ -258,12 +287,24 @@ function projectModelDefaults(project: Project, models: ModelOption[]): ProjectM
       providerProfileId: project.defaultLocalProviderProfileId ?? '',
       model: qualifyLocalModelId(project.defaultLocalModel ?? ''),
       effort: project.defaultLocalModelEffort?.trim() ?? '',
-      speed: project.defaultLocalModelSpeed?.trim() ?? '',
+      speed: normalizeLocalContextSize(project.defaultLocalModelSpeed),
     },
     generateCommit: permissionMode !== 'ReadOnly' && (project.defaultGenerateCommit ?? true),
     separateCommitSession: permissionMode !== 'ReadOnly' && (project.defaultSeparateCommitSession ?? false),
     permissionMode,
   }
+}
+
+function normalizeLocalContextSize(value?: string | null) {
+  return value && supportedLocalContextSizes.includes(Number(value))
+    ? value
+    : defaultOpenHandsContextSize
+}
+
+function formatContextSize(contextSize: number) {
+  return contextSize >= 1_048_576
+    ? `${contextSize / 1_048_576}M`
+    : `${contextSize / 1024}K`
 }
 
 function runnerChoiceForExecutionRunner(runner: ExecutionRunner): RunnerChoice {
@@ -1163,6 +1204,7 @@ function App() {
         theme={theme}
         onToggleTheme={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
         machines={machines}
+        providerProfiles={providerProfiles}
         projects={projects}
         requests={requests}
         now={liveNow}
@@ -1367,6 +1409,7 @@ function LeftSidebar({
   theme,
   onToggleTheme,
   machines,
+  providerProfiles,
   projects,
   requests,
   now,
@@ -1380,6 +1423,7 @@ function LeftSidebar({
   theme: ColorTheme
   onToggleTheme: () => void
   machines: Machine[]
+  providerProfiles: AiProviderProfile[]
   projects: Project[]
   requests: CodexRequest[]
   now: number
@@ -1392,6 +1436,7 @@ function LeftSidebar({
 }) {
   const [projectModalOpen, setProjectModalOpen] = useState(false)
   const [machineModalOpen, setMachineModalOpen] = useState(false)
+  const [providerModalOpen, setProviderModalOpen] = useState(false)
   const [usageModalOpen, setUsageModalOpen] = useState(false)
   const [projectDetailsId, setProjectDetailsId] = useState<string | null>(null)
   const [machineStatuses, setMachineStatuses] = useState<Record<string, { checking: boolean; success?: boolean; output: string }>>({})
@@ -1489,6 +1534,9 @@ function LeftSidebar({
             </GlassButton>
             <GlassButton variant="ghost" size="icon" onClick={() => setMachineModalOpen(true)} title="Manage machine connections">
               <Network size={16} />
+            </GlassButton>
+            <GlassButton variant="ghost" size="icon" onClick={() => setProviderModalOpen(true)} title="Local AI Server settings">
+              <Server size={16} />
             </GlassButton>
           </div>
         </div>
@@ -1591,6 +1639,14 @@ function LeftSidebar({
         <MachineModal
           machines={machines}
           onClose={() => setMachineModalOpen(false)}
+          onChanged={onChanged}
+          onError={onError}
+        />
+      )}
+      {providerModalOpen && (
+        <LocalAiServerModal
+          profiles={providerProfiles}
+          onClose={() => setProviderModalOpen(false)}
           onChanged={onChanged}
           onError={onError}
         />
@@ -1870,6 +1926,130 @@ function parseCodexUsageText(value?: string | null) {
     percentLeft: percentMatch ? Math.min(100, Math.max(0, Number.parseInt(percentMatch[1], 10))) : null,
     resetText: resetMatch ? `resets ${resetMatch[1].trim()}` : null,
   }
+}
+
+function LocalAiServerModal({
+  profiles,
+  onClose,
+  onChanged,
+  onError,
+}: {
+  profiles: AiProviderProfile[]
+  onClose: () => void
+  onChanged: () => Promise<void>
+  onError: (cause: unknown) => void
+}) {
+  const localProfiles = profiles.filter((profile) => profile.source === 'Local')
+  const [draft, setDraft] = useState<SaveAiProviderProfileRequest>(emptyLocalProviderProfile)
+  const [editingId, setEditingId] = useState<string | undefined>()
+  const [deleting, setDeleting] = useState<AiProviderProfile | null>(null)
+
+  const reset = () => {
+    setEditingId(undefined)
+    setDraft(emptyLocalProviderProfile)
+  }
+  const edit = (profile: AiProviderProfile) => {
+    setEditingId(profile.id)
+    setDraft({
+      name: profile.name,
+      source: 'Local',
+      baseUrl: profile.baseUrl,
+      modelDiscoveryMode: profile.modelDiscoveryMode,
+      apiKeyEnvironmentVariable: profile.apiKeyEnvironmentVariable ?? '',
+      enabled: profile.enabled,
+      maximumConcurrency: profile.maximumConcurrency,
+      configuredContextWindow: profile.configuredContextWindow ?? 131_072,
+      defaultModel: profile.defaultModel ?? '',
+    })
+  }
+  const update = <K extends keyof SaveAiProviderProfileRequest>(key: K, value: SaveAiProviderProfileRequest[K]) => {
+    setDraft((current) => ({ ...current, [key]: value }))
+  }
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    try {
+      const saved = await api.saveProviderProfile({
+        ...draft,
+        source: 'Local',
+        apiKeyEnvironmentVariable: draft.apiKeyEnvironmentVariable?.trim() || null,
+        defaultModel: draft.defaultModel?.trim() || null,
+      }, editingId)
+      edit(saved)
+      await onChanged()
+    } catch (cause) {
+      onError(cause)
+    }
+  }
+  const remove = async () => {
+    if (!deleting) return
+    try {
+      await api.deleteProviderProfile(deleting.id)
+      if (editingId === deleting.id) reset()
+      setDeleting(null)
+      await onChanged()
+    } catch (cause) {
+      onError(cause)
+    }
+  }
+
+  return (
+    <Modal title="Local AI Server settings" icon={<Server size={18} />} onClose={onClose} wide>
+      <div className="machine-manager provider-manager">
+        <div className="machine-manager-list">
+          <div className="machine-manager-toolbar">
+            <div>
+              <div className="machine-manager-title">Model servers</div>
+              <div className="meta">{localProfiles.length} Local AI server{localProfiles.length === 1 ? '' : 's'}</div>
+            </div>
+            <GlassButton variant="primary" size="sm" type="button" onClick={reset}><Plus size={13} /> Add server</GlassButton>
+          </div>
+          <div className="machine-list">
+            {localProfiles.map((profile) => (
+              <button key={profile.id} type="button" className={`machine-card ${editingId === profile.id ? 'active' : ''}`} onClick={() => edit(profile)}>
+                <div className="machine-card-main">
+                  <div className="machine-card-icon"><Server size={17} /></div>
+                  <div className="truncate">
+                    <div className="machine-name truncate">{profile.name}</div>
+                    <div className="meta truncate">{profile.baseUrl}</div>
+                  </div>
+                </div>
+                <div className="machine-card-meta">
+                  <span className="machine-chip">{profile.configuredContextWindow ? formatContextSize(profile.configuredContextWindow) : 'No limit'}</span>
+                  <span className="machine-chip">{profile.enabled ? 'Enabled' : 'Disabled'}</span>
+                </div>
+              </button>
+            ))}
+            {localProfiles.length === 0 && <div className="empty-state">No Local AI servers configured</div>}
+          </div>
+        </div>
+        <form className="machine-editor" onSubmit={submit}>
+          <div className="machine-editor-head">
+            <div>
+              <div className="machine-manager-title">{editingId ? 'Edit model server' : 'Add model server'}</div>
+              <div className="meta">Use an Ollama-compatible server reachable from the selected machine.</div>
+            </div>
+            {editingId && <GlassButton variant="danger" size="sm" type="button" onClick={() => setDeleting(localProfiles.find((profile) => profile.id === editingId) ?? null)}><Trash2 size={13} /> Delete</GlassButton>}
+          </div>
+          <div className="settings-section">
+            <div className="settings-section-title">Model server</div>
+            <FieldLabel label="Name"><GlassInput value={draft.name} required onChange={(event) => update('name', event.target.value)} placeholder="Local Ollama" /></FieldLabel>
+            <FieldLabel label="Base URL"><GlassInput value={draft.baseUrl} required onChange={(event) => update('baseUrl', event.target.value)} placeholder="http://host.docker.internal:11434/v1" /></FieldLabel>
+            <div className="form-grid two">
+              <FieldLabel label="Discovery"><GlassSelect value={draft.modelDiscoveryMode} onChange={(event) => update('modelDiscoveryMode', event.target.value as ModelDiscoveryMode)}><option value="Ollama">Ollama</option><option value="Auto">Auto</option><option value="OpenAi">OpenAI-compatible</option></GlassSelect></FieldLabel>
+              <FieldLabel label="Maximum context"><GlassInput value={draft.configuredContextWindow ?? ''} type="number" min={32768} onChange={(event) => update('configuredContextWindow', Number(event.target.value))} /></FieldLabel>
+            </div>
+            <div className="form-grid two">
+              <FieldLabel label="Default model"><GlassInput value={draft.defaultModel ?? ''} onChange={(event) => update('defaultModel', event.target.value)} placeholder="gpt-oss:20b" /></FieldLabel>
+              <FieldLabel label="Concurrency"><GlassInput value={draft.maximumConcurrency} type="number" min={1} onChange={(event) => update('maximumConcurrency', Number(event.target.value))} /></FieldLabel>
+            </div>
+            <label className="checkbox-row"><input type="checkbox" checked={draft.enabled} onChange={(event) => update('enabled', event.target.checked)} /> <span>Enabled for Local Requests</span></label>
+          </div>
+          <div className="machine-editor-actions"><GlassButton variant="primary" type="submit"><Check size={15} /> {editingId ? 'Save server' : 'Add server'}</GlassButton>{editingId && <GlassButton variant="secondary" type="button" onClick={reset}>New server</GlassButton>}</div>
+        </form>
+      </div>
+      {deleting && <ConfirmDialog title="Delete model server?" description={<>Delete <strong>{deleting.name}</strong>? Existing queued Local requests must be cleared first.</>} confirmLabel="Delete server" onCancel={() => setDeleting(null)} onConfirm={remove} />}
+    </Modal>
+  )
 }
 
 function MachineModal({
@@ -3031,6 +3211,7 @@ function QueueComposer({
   const [localProfileId, setLocalProfileId] = useState(defaults.localModel.providerProfileId)
   const [localModel, setLocalModel] = useState(defaults.localModel.model)
   const [localReasoningEffort, setLocalReasoningEffort] = useState(defaults.localModel.effort)
+  const [localContextSize, setLocalContextSize] = useState(defaults.localModel.speed)
   const [localModelStatus, setLocalModelStatus] = useState<ProviderModelsResponse | null>(null)
   const [loadingLocalModels, setLoadingLocalModels] = useState(false)
   const [localModelError, setLocalModelError] = useState('')
@@ -3075,6 +3256,38 @@ function QueueComposer({
     })),
     [localModelStatus],
   )
+  const localModelDropdownOptions = useMemo(() => {
+    const options = localModelOptions.map((model) => ({
+      icon: <Code2 size={14} />,
+      label: localModelDisplayName(model.name || model.id),
+      value: model.id,
+    }))
+    if (!localModel && options.length === 0) {
+      return [{
+        icon: <Code2 size={14} />,
+        label: loadingLocalModels ? 'Discovering models…' : 'Select a model',
+        value: '',
+      }]
+    }
+    if (localModel && !options.some((option) => option.value === localModel)) {
+      options.unshift({ icon: <Code2 size={14} />, label: localModelDisplayName(localModel), value: localModel })
+    }
+    return options
+  }, [loadingLocalModels, localModel, localModelOptions])
+  const localProfileDropdownOptions = useMemo(() => {
+    const options = localProfiles.map((profile) => ({
+      icon: <Server size={14} />,
+      label: profile.name,
+      value: profile.id,
+    }))
+    if (!selectedLocalProfileId) {
+      options.unshift({ icon: <Server size={14} />, label: 'No enabled Local profile', value: '' })
+    }
+    if (localProfileId && localProfileId !== selectedLocalProfileId) {
+      options.unshift({ icon: <Server size={14} />, label: 'Saved profile unavailable', value: localProfileId })
+    }
+    return options
+  }, [localProfileId, localProfiles, selectedLocalProfileId])
 
   const loadLocalModels = useCallback(async (profileId: string, refresh: boolean, profileDefaultModel = '') => {
     const requestSequence = ++localModelLoadSequenceRef.current
@@ -3163,6 +3376,7 @@ function QueueComposer({
       setLocalModelError('')
       setLocalModel(nextRunnerChoice === 'Local' ? qualifyLocalModelId(editingRequest.model) : '')
       setLocalReasoningEffort(nextRunnerChoice === 'Local' ? editingRequest.modelEffort || '' : '')
+      setLocalContextSize(nextRunnerChoice === 'Local' ? normalizeLocalContextSize(editingRequest.modelSpeed) : defaults.localModel.speed)
       setCommitModel({
         model: editingRequest.commitModel || defaults.commitModel.model,
         effort: editingRequest.commitModelEffort || defaults.commitModel.effort,
@@ -3194,6 +3408,7 @@ function QueueComposer({
     setLocalProfileId(defaults.localModel.providerProfileId)
     setLocalModel(defaults.localModel.model)
     setLocalReasoningEffort(defaults.localModel.effort)
+    setLocalContextSize(defaults.localModel.speed)
     setLocalModelStatus(defaults.localModel.providerProfileId
       ? localModelDiscoveryCache.get(defaults.localModel.providerProfileId) ?? null
       : null)
@@ -3213,6 +3428,7 @@ function QueueComposer({
     attachments,
     commitModel,
     generateCommit,
+    localContextSize,
     localModel,
     localReasoningEffort,
     localProfileId,
@@ -3380,24 +3596,51 @@ function QueueComposer({
   ])
   const targetLocalAiReachable = openHandsMachineStatus?.targetLocalAiReachable === true
   const targetLocalModelAvailable = openHandsMachineStatus?.targetSelectedModelAvailable === true
-  const openHandsLastCheckedAt = selectedLocalProfileId && localModel
-    ? openHandsReadinessCache.get(
-        `${selectedProject.machineId}|${selectedLocalProfileId}|${qualifyLocalModelId(localModel)}`,
-      )?.checkedAt
-    : undefined
   const configuredContextWindow = localModelStatus?.configuredContextWindow ?? selectedLocalProfile?.configuredContextWindow
+  const localContextLimit = Math.min(
+    configuredContextWindow ?? Number.POSITIVE_INFINITY,
+    selectedLocalModelMetadata?.maximumContextWindow ?? Number.POSITIVE_INFINITY,
+  )
+  const localContextPresetOptions = localContextSizeOptions.map((option) => {
+    const contextSize = Number(option.value)
+    return {
+      ...option,
+      disabled: contextSize < minimumOpenHandsContextSize || contextSize > localContextLimit,
+      title: contextSize < minimumOpenHandsContextSize
+        ? `OpenHands requires at least ${(minimumOpenHandsContextSize / 1024).toFixed(0)}K tokens.`
+        : contextSize > localContextLimit
+          ? `This model or server supports up to ${localContextLimit.toLocaleString()} tokens.`
+          : option.value === '32768'
+            ? '32K tokens.'
+            : undefined,
+    }
+  })
+  const selectedLocalContextSize = Number(localContextSize)
+  const localContextMaximumLabel = Number.isFinite(localContextLimit)
+    ? formatContextSize(localContextLimit)
+    : 'not discovered yet'
+  const localContextInfo = `Sets Ollama's num_ctx for this queue request. OpenHands requires at least ${formatContextSize(minimumOpenHandsContextSize)}. Maximum available now: ${localContextMaximumLabel}${configuredContextWindow ? ` (server ${formatContextSize(configuredContextWindow)})` : ''}${selectedLocalModelMetadata?.maximumContextWindow ? `; model ${formatContextSize(selectedLocalModelMetadata.maximumContextWindow)}` : ''}.`
   const localToolWarning = selectedLocalModelMetadata?.supportsTools === false
     ? `${selectedLocalModelMetadata.name} does not advertise tool support, which OpenHands requires to work with project files.`
     : ''
-  const localContextWarning = localModelStatus?.contextWarning
+  const localContextWarning = selectedLocalContextSize < minimumOpenHandsContextSize
+    ? `Select 32K or higher. OpenHands requires at least ${minimumOpenHandsContextSize.toLocaleString()} tokens.`
+    : selectedLocalContextSize > localContextLimit
+      ? `The selected context is larger than this model or Local AI server supports.`
+      : localModelStatus?.contextWarning
     || ((selectedLocalModelMetadata?.maximumContextWindow
-      && selectedLocalModelMetadata.maximumContextWindow < 65_536)
-      ? `${selectedLocalModelMetadata.name} supports at most ${selectedLocalModelMetadata.maximumContextWindow.toLocaleString()} tokens, below this OpenHands setup's 65,536-token requirement.`
+      && selectedLocalModelMetadata.maximumContextWindow < minimumOpenHandsContextSize)
+      ? `${selectedLocalModelMetadata.name} supports at most ${selectedLocalModelMetadata.maximumContextWindow.toLocaleString()} tokens, below this OpenHands setup's ${minimumOpenHandsContextSize.toLocaleString()}-token requirement.`
       : '')
-    || ((configuredContextWindow && configuredContextWindow < 65_536)
-      ? `Configured context is ${configuredContextWindow.toLocaleString()} tokens. Set it to at least 65,536 before running OpenHands.`
+    || ((configuredContextWindow && configuredContextWindow < minimumOpenHandsContextSize)
+      ? `Configured context is ${configuredContextWindow.toLocaleString()} tokens. Set it to at least ${minimumOpenHandsContextSize.toLocaleString()} before running OpenHands.`
       : '')
   const localModelWarning = localToolWarning || localContextWarning
+  const selectedLocalServerUnavailable = Boolean(
+    selectedLocalProfile
+    && !loadingLocalModels
+    && (localModelStatus?.status === 'Offline' || Boolean(localModelError && !localModelStatus?.healthy)),
+  )
   const openHandsBlockingMessage = checkingOpenHands
     ? 'Checking OpenHands CLI and the Local AI route from the selected machine…'
     : openHandsMachineError
@@ -3572,7 +3815,8 @@ function QueueComposer({
     defaults.executionRunner !== 'OpenHandsCli' ||
     selectedLocalProfileId !== defaults.localModel.providerProfileId ||
     localModel !== defaults.localModel.model ||
-    localReasoningEffort !== defaults.localModel.effort
+    localReasoningEffort !== defaults.localModel.effort ||
+    localContextSize !== defaults.localModel.speed
   const defaultsChanged = isLocalRunner ? localDefaultsChanged : codexDefaultsChanged
 
   const selectRunnerChoice = (nextChoice: RunnerChoice) => {
@@ -3601,6 +3845,7 @@ function QueueComposer({
     setLocalProfileId(defaults.localModel.providerProfileId)
     setLocalModel(defaults.localModel.model)
     setLocalReasoningEffort(defaults.localModel.effort)
+    setLocalContextSize(defaults.localModel.speed)
     setCommitModel(defaults.commitModel)
     setGenerateCommit(defaults.generateCommit)
     setSeparateCommitSession(defaults.separateCommitSession)
@@ -3632,7 +3877,7 @@ function QueueComposer({
         modelEffort: isCodexRunner
           ? requestModel.effort
           : localReasoningEffortForRequest,
-        modelSpeed: isCodexRunner ? requestModel.speed : null,
+        modelSpeed: isCodexRunner ? requestModel.speed : localContextSize,
         generateCommit: isCodexRunner && generateCommit,
         separateCommitSession: isCodexRunner && generateCommit && separateCommitSession,
         permissionMode,
@@ -3677,7 +3922,7 @@ function QueueComposer({
           modelEffort: isCodexRunner
             ? requestModel.effort
             : localReasoningEffortForRequest,
-          modelSpeed: isCodexRunner ? requestModel.speed : null,
+          modelSpeed: isCodexRunner ? requestModel.speed : localContextSize,
           queueOrder: nextQueueOrder,
           status: 'Queued',
           generateCommit: isCodexRunner && generateCommit,
@@ -3734,7 +3979,11 @@ function QueueComposer({
         setComposerValidationError(localBlockingMessage)
         return
       }
-      setOpenHandsApprovalDialogOpen(true)
+      if (permissionMode === 'FullAccess') {
+        void queueRequest(true)
+      } else {
+        setOpenHandsApprovalDialogOpen(true)
+      }
       return
     }
     if (permissionMode === 'AskForApproval') {
@@ -3815,7 +4064,7 @@ function QueueComposer({
               providerProfileId: selectedLocalProfileId,
               model: localModel,
               effort: selectedLocalModelSupportsReasoningEffort === false ? '' : localReasoningEffort,
-              speed: defaults.localModel.speed,
+              speed: localContextSize,
             },
           }
         : {
@@ -3957,97 +4206,28 @@ function QueueComposer({
               <div className="local-runner-panel">
                 <div className="composer-grid compact local-composer-grid">
                   <div className="model-picker-grid local-model-card">
-                    <div className="model-picker-head">
-                      <span className="model-picker-title">Local request</span>
-                      <label className="local-model-select">
-                        <span className="sr-only">OpenHands model</span>
-                        <GlassSelect
-                          value={localModel}
-                          aria-label="OpenHands model"
-                          disabled={!selectedLocalProfile || localModelOptions.length === 0}
-                          onChange={(event) => {
-                            const nextModel = event.target.value
-                            const metadata = localModelOptions.find((model) => model.id === nextModel)
-                            setLocalModel(nextModel)
-                            setLocalReasoningEffort(metadata?.supportsReasoningEffort ? 'low' : '')
-                            setComposerValidationError('')
-                          }}
-                        >
-                          {!localModel && <option value="">{loadingLocalModels ? 'Discovering models…' : 'Select a model'}</option>}
-                          {localModel && !localModelOptions.some((model) => model.id === localModel) && (
-                            <option value={localModel}>{localModelDisplayName(localModel)}</option>
-                          )}
-                          {localModelOptions.map((model) => (
-                            <option key={model.id} value={model.id}>{localModelDisplayName(model.name || model.id)}</option>
-                          ))}
-                        </GlassSelect>
-                      </label>
-                    </div>
-                    <label className="local-profile-field">
-                      <span><Server size={13} /> Model server</span>
-                      <GlassSelect
+                    <div className="local-profile-field">
+                      <span><Server size={13} /> A.I. Server</span>
+                      <GlassDropdownSelect
                         value={selectedLocalProfileId}
-                        aria-label="Local AI Server profile"
+                        label="Local AI Server profile"
+                        options={localProfileDropdownOptions}
                         disabled={localProfiles.length === 0}
-                        onChange={(event) => {
-                          const nextProfileId = event.target.value
+                        onChange={(nextProfileId) => {
                           const nextProfile = localProfiles.find((profile) => profile.id === nextProfileId)
-                          const cached = localModelDiscoveryCache.get(nextProfileId) ?? null
                           localModelLoadSequenceRef.current += 1
-                          setLoadingLocalModels(false)
-                          setLocalModelStatus(cached)
+                          setLoadingLocalModels(true)
+                          setLocalModelStatus(null)
                           setLocalModelError('')
                           setLocalProfileId(nextProfileId)
                           setLocalModel(qualifyLocalModelId(nextProfile?.defaultModel ?? ''))
                           setLocalReasoningEffort('')
                           setComposerValidationError('')
+                          void loadLocalModels(nextProfileId, true, nextProfile?.defaultModel ?? '')
                         }}
-                      >
-                        {!selectedLocalProfileId && <option value="">No enabled Local profile</option>}
-                        {localProfileId && localProfileId !== selectedLocalProfileId && (
-                          <option value={localProfileId}>Saved profile unavailable</option>
-                        )}
-                        {localProfiles.map((profile) => (
-                          <option key={profile.id} value={profile.id}>{profile.name}</option>
-                        ))}
-                      </GlassSelect>
-                    </label>
-                    <div className={`model-options-row ${selectedLocalModelMetadata?.supportsReasoningEffort ? '' : 'model-options-row--single'}`}>
-                      {selectedLocalModelMetadata?.supportsReasoningEffort && (
-                        <SegmentedRadio
-                          label="Effort"
-                          name="OpenHands-reasoning-effort"
-                          value={localReasoningEffort || 'low'}
-                          options={[
-                            { label: 'Low', value: 'low' },
-                            { label: 'Medium', value: 'medium' },
-                            { label: 'High', value: 'high' },
-                          ]}
-                          onChange={setLocalReasoningEffort}
-                        />
-                      )}
-                      <SegmentedRadio
-                        label="Speed"
-                        name="OpenHands-speed"
-                        value="automatic"
-                        disabled
-                        options={[{ label: 'Runtime managed', value: 'automatic' }]}
-                        onChange={() => undefined}
                       />
-                    </div>
-                    <span className="local-capability-note">
-                      Ollama controls generation speed from the selected model and hardware; it has no Codex priority tier.
-                    </span>
-                  </div>
-
-                  <div className="model-picker-grid resource-monitor-card">
-                    <div className="resource-monitor-head">
-                      <div>
-                        <span className="model-picker-title">System resources</span>
-                        <span className="resource-monitor-target">{selectedProject.machineName}</span>
-                      </div>
-                      <div className="resource-monitor-actions">
-                        <div className="local-health-strip" role="status" aria-live="polite" aria-label="OpenHands readiness">
+                      <div className="local-picker-actions" role="status" aria-live="polite" aria-label="OpenHands readiness">
+                        <div className="local-health-strip">
                           {localHealthItems.map((item) => (
                             <span
                               key={item.key}
@@ -4065,38 +4245,81 @@ function QueueComposer({
                           size="icon"
                           type="button"
                           disabled={loadingMachineResources}
-                          title={selectedLocalProfile
-                            ? 'Refresh models, OpenHands readiness, target route, and resources'
-                            : 'Refresh system resources'}
-                          aria-label={selectedLocalProfile
-                            ? 'Refresh Local model readiness and resources'
-                            : 'Refresh system resources'}
+                          title={selectedLocalProfile ? 'Refresh models, OpenHands readiness, target route, and resources' : 'Refresh system resources'}
+                          aria-label={selectedLocalProfile ? 'Refresh Local model readiness and resources' : 'Refresh system resources'}
                           onClick={() => {
                             setMachineResourceRefreshVersion((current) => current + 1)
-                            if (selectedLocalProfile && !loadingLocalModels && !checkingOpenHands) {
-                              void refreshLocalEnvironment()
-                            }
+                            if (selectedLocalProfile && !loadingLocalModels && !checkingOpenHands) void refreshLocalEnvironment()
                           }}
                         >
-                          <RefreshCcw
-                            size={14}
-                            className={loadingLocalModels || checkingOpenHands || loadingMachineResources ? 'action-spinner' : ''}
-                          />
+                          <RefreshCcw size={15} className={loadingLocalModels || checkingOpenHands || loadingMachineResources ? 'action-spinner' : ''} />
                         </GlassButton>
                       </div>
                     </div>
+                    <div className="model-picker-head">
+                      <span className="model-picker-title">Model</span>
+                      <GlassDropdownSelect
+                        className="local-model-select"
+                        label="OpenHands model"
+                        value={localModel}
+                        options={localModelDropdownOptions}
+                        disabled={!selectedLocalProfile || localModelOptions.length === 0}
+                        onChange={(nextModel) => {
+                          const metadata = localModelOptions.find((model) => model.id === nextModel)
+                          setLocalModel(nextModel)
+                          setLocalReasoningEffort(metadata?.supportsReasoningEffort ? 'low' : '')
+                          setComposerValidationError('')
+                        }}
+                      />
+                    </div>
+                    <div className={`model-options-row model-options-row--local ${selectedLocalModelMetadata?.supportsReasoningEffort ? '' : 'model-options-row--single'}`}>
+                      {selectedLocalModelMetadata?.supportsReasoningEffort && (
+                        <SegmentedRadio
+                          label="Effort"
+                          name="OpenHands-reasoning-effort"
+                          value={localReasoningEffort || 'low'}
+                          options={[
+                            { label: 'Low', value: 'low' },
+                            { label: 'Medium', value: 'medium' },
+                            { label: 'High', value: 'high' },
+                          ]}
+                          onChange={setLocalReasoningEffort}
+                        />
+                      )}
+                        <ContextSizePicker
+                          label="Context size"
+                          helpText={localContextInfo}
+                          name="OpenHands-context-size"
+                        value={localContextSize}
+                        options={localContextPresetOptions}
+                        onChange={setLocalContextSize}
+                      />
+                    </div>
+                  </div>
 
-                    {machineResources ? (
+                  <div className="model-picker-grid resource-monitor-card resource-monitor-card--compact">
+                    {selectedLocalServerUnavailable ? (
+                      <div className="resource-unavailable resource-unavailable--server">
+                        <Server size={16} />
+                        <span>A.I. Server unavailable{localModelError || localModelStatus?.error ? `: ${localModelError || localModelStatus?.error}` : ''}</span>
+                      </div>
+                    ) : loadingMachineResources || loadingLocalModels ? (
+                      <ResourceTelemetryLoading />
+                    ) : machineResources ? (
                       <div className="resource-meter-list">
                         <ResourceMeter
-                          icon={<Cpu size={14} />}
+                          icon={<Cpu size={17} />}
                           label="CPU"
+                          name={machineResources.cpuName || 'Processor details unavailable'}
                           percent={machineResources.cpuUsagePercent}
                           temperature={machineResources.cpuTemperatureCelsius}
                         />
                         <ResourceMeter
-                          icon={<MemoryStick size={14} />}
+                          icon={<MemoryStick size={17} />}
                           label="RAM"
+                          name={machineResources.memoryName || (machineResources.memoryTotalBytes != null
+                            ? `${formatResourceBytes(machineResources.memoryTotalBytes)} installed`
+                            : 'Memory details unavailable')}
                           percent={machineResources.memoryUsagePercent}
                           detail={machineResources.memoryUsedBytes != null && machineResources.memoryTotalBytes != null
                             ? `${formatResourceBytes(machineResources.memoryUsedBytes)} / ${formatResourceBytes(machineResources.memoryTotalBytes)}`
@@ -4105,7 +4328,7 @@ function QueueComposer({
                         {machineResources.gpus.map((gpu) => (
                           <ResourceMeter
                             key={`${gpu.index}:${gpu.name}`}
-                            icon={<GaugeIcon size={14} />}
+                            icon={<GaugeIcon size={17} />}
                             label={machineResources.gpus.length === 1 ? 'GPU' : `GPU ${gpu.index}`}
                             name={gpu.name}
                             percent={gpu.utilizationPercent}
@@ -4119,21 +4342,9 @@ function QueueComposer({
                         {machineResources.gpus.length === 0 && (
                           <div className="resource-unavailable"><GaugeIcon size={14} /> GPU telemetry unavailable</div>
                         )}
-                        <div className="resource-summary-row">
-                          <span title="Whole-system power is shown only when the target exposes a reliable sensor.">
-                            <Zap size={14} /> System power
-                          </span>
-                          <strong>{formatWatts(machineResources.systemPowerWatts)}</strong>
-                          {machineResources.systemPowerSource && <small>{machineResources.systemPowerSource}</small>}
-                          {(machineResources.systemTemperatureCelsius ?? null) !== null && (
-                            <span className="resource-sensor"><Thermometer size={12} /> {formatTemperature(machineResources.systemTemperatureCelsius)}</span>
-                          )}
-                        </div>
                       </div>
                     ) : (
-                      <div className="resource-empty-state">
-                        {loadingMachineResources ? 'Collecting resource telemetry…' : 'Resource telemetry is not available yet.'}
-                      </div>
+                      <div className="resource-empty-state">Resource telemetry is not available yet.</div>
                     )}
                     {machineResourceError && (
                       <span
@@ -4143,15 +4354,6 @@ function QueueComposer({
                         {machineResources?.available
                           ? `Last telemetry sample retained: ${machineResourceError}`
                           : machineResourceError}
-                      </span>
-                    )}
-                    {(machineResources?.collectedAt || localModelStatus?.checkedAt || openHandsLastCheckedAt) && (
-                      <span className="resource-checked-at">
-                        {machineResources?.collectedAt && `Telemetry ${formatDate(machineResources.collectedAt)}`}
-                        {machineResources?.collectedAt && localModelStatus?.checkedAt && ' · '}
-                        {localModelStatus?.checkedAt && `Models ${formatDate(localModelStatus.checkedAt)}`}
-                        {(machineResources?.collectedAt || localModelStatus?.checkedAt) && openHandsLastCheckedAt && ' · '}
-                        {openHandsLastCheckedAt && `Readiness ${formatDate(new Date(openHandsLastCheckedAt).toISOString())}`}
                       </span>
                     )}
                   </div>
@@ -4278,7 +4480,7 @@ function QueueComposer({
                 size="sm"
                 type="button"
                 onClick={saveDefaults}
-                disabled={!defaultsChanged || savingDefaults || (isLocalRunner && (!selectedLocalProfile || !localModel))}
+                disabled={!defaultsChanged || savingDefaults || (isLocalRunner && (!selectedLocalProfile || !localModel || Boolean(localContextWarning)))}
               >
                 <Check size={13} /> {savingDefaults ? 'Saving' : 'Save defaults'}
               </GlassButton>
@@ -4518,6 +4720,22 @@ function supportsUltraEffort(model: string) {
   return /^gpt-5\.6(?:$|[-.])/i.test(model.trim())
 }
 
+function ResourceTelemetryLoading() {
+  return (
+    <div className="resource-telemetry-loading" role="status" aria-label="Loading resource telemetry">
+      <span className="sr-only">Loading resource telemetry</span>
+      {[0, 1, 2].map((item) => (
+        <div key={item} className="resource-telemetry-skeleton" aria-hidden="true">
+          <span className="resource-telemetry-skeleton-icon" />
+          <span className="resource-telemetry-skeleton-label" />
+          <span className="resource-telemetry-skeleton-value" />
+          <span className="resource-telemetry-skeleton-meter" />
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function ResourceMeter({
   icon,
   label,
@@ -4566,6 +4784,7 @@ function ResourceMeter({
 
 function SegmentedRadio({
   label,
+  helpText,
   name,
   value,
   options,
@@ -4573,29 +4792,138 @@ function SegmentedRadio({
   onChange,
 }: {
   label: string
+  helpText?: string
   name: string
   value: string
-  options: Array<{ label: string; value: string }>
+  options: Array<{ label: string; value: string; disabled?: boolean; title?: string }>
   disabled?: boolean
   onChange: (value: string) => void
 }) {
   return (
     <div className="segmented-field" aria-label={label}>
-      <span>{label}</span>
+      <span>
+        {label}
+        {helpText && (
+          <span className="segmented-field-info" title={helpText} tabIndex={0} aria-label={helpText}>
+            <Info size={13} aria-hidden="true" />
+          </span>
+        )}
+      </span>
       <div className="segmented-radio">
         {options.map((option) => (
-          <label key={option.value} className={`segmented-radio-option--${option.value} ${option.value === value ? 'active' : ''}`}>
+          <label
+            key={option.value}
+            className={`segmented-radio-option--${option.value} ${option.value === value ? 'active' : ''} ${disabled || option.disabled ? 'disabled' : ''}`}
+            title={option.title}
+          >
             <input
               type="radio"
               name={name}
               value={option.value}
               checked={option.value === value}
-              disabled={disabled}
+              disabled={disabled || option.disabled}
               onChange={() => onChange(option.value)}
             />
             {option.label}
           </label>
         ))}
+      </div>
+    </div>
+  )
+}
+
+function ContextSizePicker({
+  label,
+  helpText,
+  name,
+  value,
+  options,
+  onChange,
+}: {
+  label: string
+  helpText: string
+  name: string
+  value: string
+  options: Array<{ label: string; value: string; disabled?: boolean; title?: string }>
+  onChange: (value: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const primaryValues = new Set(['32768', '65536', '131072'])
+  const primaryOptions = options.filter((option) => primaryValues.has(option.value))
+  const moreOptions = options.filter((option) => !primaryValues.has(option.value))
+  const selectedMoreOption = moreOptions.find((option) => option.value === value)
+
+  useEffect(() => {
+    if (!open) return
+    const close = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener('pointerdown', close)
+    return () => document.removeEventListener('pointerdown', close)
+  }, [open])
+
+  return (
+    <div className="segmented-field" aria-label={label}>
+      <span>
+        {label}
+        <span className="segmented-field-info" title={helpText} tabIndex={0} aria-label={helpText}>
+          <Info size={13} aria-hidden="true" />
+        </span>
+      </span>
+      <div ref={rootRef} className="context-size-picker">
+        <div className="segmented-radio context-size-picker-primary">
+          {primaryOptions.map((option) => (
+            <label
+              key={option.value}
+              className={`segmented-radio-option--${option.value} ${option.value === value ? 'active' : ''}`}
+              title={option.title}
+            >
+              <input
+                type="radio"
+                name={name}
+                value={option.value}
+                checked={option.value === value}
+                disabled={option.disabled}
+                onChange={() => onChange(option.value)}
+              />
+              {option.label}
+            </label>
+          ))}
+        </div>
+        <button
+          type="button"
+          className={`context-size-more-button ${selectedMoreOption ? `active segmented-radio-option--${selectedMoreOption.value}` : ''}`}
+          aria-label={selectedMoreOption ? `More context sizes; ${selectedMoreOption.label} selected` : 'More context sizes'}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          title="More context sizes"
+          onClick={() => setOpen((current) => !current)}
+        >
+          <Ellipsis size={17} aria-hidden="true" />
+        </button>
+        {open && (
+          <div className="context-size-menu" role="menu" aria-label="More context sizes">
+            {moreOptions.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                role="menuitemradio"
+                aria-checked={option.value === value}
+                disabled={option.disabled}
+                title={option.title}
+                className={option.value === value ? `active segmented-radio-option--${option.value}` : ''}
+                onClick={() => {
+                  onChange(option.value)
+                  setOpen(false)
+                }}
+              >
+                <span>{option.label}</span>
+                {option.value === value && <Check size={14} aria-hidden="true" />}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -5923,10 +6251,34 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
     ? messages.filter((message) => message.text !== primaryMessage)
     : messages
   const commitRun = latestRunWithCommitMetadata(request.runs)
-  const recordedFiles = useMemo(() => recordedFileChanges(request), [request])
-  const noRecordedOpenHandsWrites = requestExecutionRunner(request) === 'OpenHandsCli'
-    && request.status === 'Succeeded'
-    && recordedFiles.length === 0
+  const [workspaceStatus, setWorkspaceStatus] = useState<GitStatus | null>(null)
+  const [workspaceStatusError, setWorkspaceStatusError] = useState('')
+  const [checkingWorkspaceStatus, setCheckingWorkspaceStatus] = useState(false)
+  const workspaceFiles = workspaceStatus?.changes ?? []
+
+  useEffect(() => {
+    let cancelled = false
+    setWorkspaceStatus(null)
+    setWorkspaceStatusError('')
+    setCheckingWorkspaceStatus(true)
+
+    void api.gitStatus(request.projectId, true)
+      .then((status) => {
+        if (!cancelled) setWorkspaceStatus(status)
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setWorkspaceStatusError(cause instanceof Error ? cause.message : 'Could not check the project Git workspace.')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setCheckingWorkspaceStatus(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [request.projectId])
   const finishedAt = request.finishedAt ?? (request.status === 'Succeeded' ? request.runs.map((run) => run.finishedAt).filter(Boolean).sort().at(-1) : null)
   const elapsed = formatDurationBetween(
     request.startedAt ?? request.createdAt,
@@ -5972,10 +6324,9 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
                     : `No formatted ${agentName} response has been published yet. Status and elapsed time will continue to update here.`}
                 </div>
               )}
-              {noRecordedOpenHandsWrites && (
+              {requestExecutionRunner(request) === 'OpenHandsCli' && (
                 <div className="work-report-empty work-report-empty--compact" role="note">
-                  OpenHands completed normally, but its recorded tool log contains no successful file-write action.
-                  Its final response may be guidance rather than an applied workspace change.
+                  OpenHands messages and tool actions are not treated as proof of an edit. The current Git workspace state is shown at right.
                 </div>
               )}
             </section>
@@ -6078,17 +6429,26 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
             <section className="work-report-summary-card work-report-files">
               <div className="work-report-section-head">
                 <div>
-                  <div className="section-kicker">Recorded file changes</div>
-                  <h4>{recordedFiles.length > 0 ? `${recordedFiles.length} recorded` : 'None recorded'}</h4>
+                  <div className="section-kicker">Current Git changes</div>
+                  <h4>{checkingWorkspaceStatus ? 'Checking…' : workspaceStatusError ? 'Unavailable' : `${workspaceFiles.length} current`}</h4>
                 </div>
                 <Code2 size={18} aria-hidden="true" />
               </div>
-              {recordedFiles.length > 0 ? (
+              {checkingWorkspaceStatus ? (
+                <div className="work-report-empty work-report-empty--compact">Checking the project workspace…</div>
+              ) : workspaceStatusError ? (
+                <div className="work-report-empty work-report-empty--compact">{workspaceStatusError}</div>
+              ) : workspaceFiles.length > 0 ? (
                 <ul className="work-report-file-list">
-                  {recordedFiles.map((path) => <li key={path} title={path}>{path}</li>)}
+                  {workspaceFiles.map((change) => (
+                    <li key={`${change.status}:${change.path}`} title={`${change.status}: ${change.path}`}>
+                      <span>{change.path}</span>
+                      <small>{change.status}</small>
+                    </li>
+                  ))}
                 </ul>
               ) : (
-                <div className="work-report-empty work-report-empty--compact">No successful file-write action or structured file change was recorded for this run.</div>
+                <div className="work-report-empty work-report-empty--compact">The project Git workspace is clean.</div>
               )}
             </section>
           </aside>
@@ -6096,76 +6456,6 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
       </div>
     </Modal>
   )
-}
-
-function recordedFileChanges(request: CodexRequest) {
-  const paths = new Set<string>()
-
-  for (const run of request.runs) {
-    const parsed = parseBody(run.output)
-    if (parsed.kind === 'events') {
-      for (const event of parsed.events) {
-        for (const change of event.changes) addRecordedPath(paths, request.projectPath, change.path)
-      }
-    }
-
-    const pendingFileWrites = new Map<string, string>()
-    for (const event of openHandsEventsFromOutput(run.output)) {
-      const kind = stringValue(event.kind) ?? stringValue(event.type)
-      if (kind === 'ActionEvent') {
-        const action = isRecord(event.action) ? event.action : null
-        const command = stringValue(action?.command)?.toLowerCase()
-        const path = stringValue(action?.path)
-        const toolName = stringValue(event.tool_name) ?? stringValue(event.toolCallName)
-        if (toolName === 'file_editor' && command && path && isFileWriteCommand(command)) {
-          for (const key of [stringValue(event.id), stringValue(event.tool_call_id)]) {
-            if (key) pendingFileWrites.set(key, path)
-          }
-        }
-        continue
-      }
-
-      if (kind !== 'ObservationEvent') continue
-      const observation = isRecord(event.observation) ? event.observation : null
-      if (!observation || observation.is_error === true) continue
-      const actionId = stringValue(event.action_id) ?? stringValue(event.tool_call_id)
-      const path = stringValue(observation.path) ?? (actionId ? pendingFileWrites.get(actionId) : undefined)
-      if (path) addRecordedPath(paths, request.projectPath, path)
-    }
-  }
-
-  return [...paths].sort((left, right) => left.localeCompare(right))
-}
-
-function openHandsEventsFromOutput(output: string): Array<Record<string, unknown>> {
-  return normalizeBodyText(output)
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => tryParseJson(line.startsWith('data:') ? line.slice(5).trim() : line))
-    .filter(isRecord)
-}
-
-function isFileWriteCommand(command: string) {
-  return command === 'create'
-    || command === 'str_replace'
-    || command === 'insert'
-    || command === 'undo_edit'
-    || command === 'write'
-    || command === 'edit'
-    || command === 'replace'
-    || command === 'patch'
-    || command === 'delete'
-}
-
-function addRecordedPath(paths: Set<string>, projectPath: string, path: string) {
-  const trimmed = path.trim()
-  if (!trimmed || trimmed === 'unknown path') return
-  const normalizedProjectPath = projectPath.replace(/\/+$/, '')
-  const displayPath = normalizedProjectPath && trimmed.startsWith(`${normalizedProjectPath}/`)
-    ? trimmed.slice(normalizedProjectPath.length + 1)
-    : trimmed.replace(/^\.\//, '')
-  if (displayPath) paths.add(displayPath)
 }
 
 function DetailedCodexAnswers({ output, agentName = 'Codex' }: { output: string; agentName?: string }) {

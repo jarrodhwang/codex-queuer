@@ -29,7 +29,7 @@ public sealed class LocalProjectDefaultsTests
                 profile.Id,
                 "gpt-oss:20b",
                 "HIGH",
-                "priority"),
+                "32768"),
             fixture.Db,
             fixture.Providers,
             CancellationToken.None);
@@ -38,6 +38,7 @@ public sealed class LocalProjectDefaultsTests
         Assert.Equal(profile.Id, result.ProviderProfileId);
         Assert.Equal("openai/gpt-oss:20b", result.Model);
         Assert.Equal("high", result.Effort);
+        Assert.Equal("32768", result.ContextWindow);
     }
 
     [Fact]
@@ -61,6 +62,30 @@ public sealed class LocalProjectDefaultsTests
             CancellationToken.None);
 
         Assert.Equal("Local reasoning effort must be low, medium, or high.", result.Error);
+    }
+
+    [Fact]
+    public async Task NormalizeLocalProjectDefaults_RejectsContextSmallerThanOpenHandsMinimum()
+    {
+        await using var fixture = await LocalDefaultsFixture.CreateAsync();
+        var profile = new AiProviderProfile
+        {
+            Name = "Ollama",
+            Source = AiProviderSource.Local,
+            BaseUrl = "http://localhost:11434",
+            ConfiguredContextWindow = AiProviderService.RecommendedContextWindow,
+        };
+        fixture.Db.AiProviderProfiles.Add(profile);
+        await fixture.Db.SaveChangesAsync();
+
+        var result = await ApiEndpoints.NormalizeLocalProjectDefaultsAsync(
+            CreateRequest(ExecutionRunner.OpenHandsCli, profile.Id, "gpt-oss:20b", "low", "16384"),
+            fixture.Db,
+            fixture.Providers,
+            CancellationToken.None);
+
+        Assert.Contains("at least", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(AiProviderService.ContextWarningThreshold.ToString("N0"), result.Error, StringComparison.Ordinal);
     }
 
     [Fact]
