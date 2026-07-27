@@ -1943,10 +1943,13 @@ function LocalAiServerModal({
   const [draft, setDraft] = useState<SaveAiProviderProfileRequest>(emptyLocalProviderProfile)
   const [editingId, setEditingId] = useState<string | undefined>()
   const [deleting, setDeleting] = useState<AiProviderProfile | null>(null)
+  const [testing, setTesting] = useState(false)
+  const [testMessage, setTestMessage] = useState('')
 
   const reset = () => {
     setEditingId(undefined)
     setDraft(emptyLocalProviderProfile)
+    setTestMessage('')
   }
   const edit = (profile: AiProviderProfile) => {
     setEditingId(profile.id)
@@ -1961,6 +1964,7 @@ function LocalAiServerModal({
       configuredContextWindow: profile.configuredContextWindow ?? 131_072,
       defaultModel: profile.defaultModel ?? '',
     })
+    setTestMessage('')
   }
   const update = <K extends keyof SaveAiProviderProfileRequest>(key: K, value: SaveAiProviderProfileRequest[K]) => {
     setDraft((current) => ({ ...current, [key]: value }))
@@ -1989,6 +1993,23 @@ function LocalAiServerModal({
       await onChanged()
     } catch (cause) {
       onError(cause)
+    }
+  }
+  const test = async () => {
+    if (!editingId) return
+    setTesting(true)
+    setTestMessage('')
+    try {
+      const result = await api.providerModels(editingId, true)
+      const modelCount = result.models.length
+      setTestMessage(result.healthy
+        ? `Connected — ${modelCount} model${modelCount === 1 ? '' : 's'} discovered.`
+        : result.error || 'The server responded but is not healthy.')
+      await onChanged()
+    } catch (cause) {
+      setTestMessage(cause instanceof Error ? cause.message : 'Could not connect to this model server.')
+    } finally {
+      setTesting(false)
     }
   }
 
@@ -2044,7 +2065,12 @@ function LocalAiServerModal({
             </div>
             <label className="checkbox-row"><input type="checkbox" checked={draft.enabled} onChange={(event) => update('enabled', event.target.checked)} /> <span>Enabled for Local Requests</span></label>
           </div>
-          <div className="machine-editor-actions"><GlassButton variant="primary" type="submit"><Check size={15} /> {editingId ? 'Save server' : 'Add server'}</GlassButton>{editingId && <GlassButton variant="secondary" type="button" onClick={reset}>New server</GlassButton>}</div>
+          <div className="machine-editor-actions">
+            <GlassButton variant="primary" type="submit"><Check size={15} /> {editingId ? 'Save server' : 'Add server'}</GlassButton>
+            {editingId && <GlassButton variant="secondary" type="button" onClick={test} disabled={testing}><RefreshCcw size={14} className={testing ? 'action-spinner' : ''} /> {testing ? 'Testing…' : 'Test connection'}</GlassButton>}
+            {editingId && <GlassButton variant="secondary" type="button" onClick={reset}>New server</GlassButton>}
+          </div>
+          {testMessage && <div className={`diagnostics-panel ${testMessage.startsWith('Connected') ? 'diagnostics-panel--ok' : 'diagnostics-panel--bad'}`}>{testMessage}</div>}
         </form>
       </div>
       {deleting && <ConfirmDialog title="Delete model server?" description={<>Delete <strong>{deleting.name}</strong>? Existing queued Local requests must be cleared first.</>} confirmLabel="Delete server" onCancel={() => setDeleting(null)} onConfirm={remove} />}
@@ -3214,6 +3240,7 @@ function QueueComposer({
   const [localContextSize, setLocalContextSize] = useState(defaults.localModel.speed)
   const [localModelStatus, setLocalModelStatus] = useState<ProviderModelsResponse | null>(null)
   const [loadingLocalModels, setLoadingLocalModels] = useState(false)
+  const [switchingLocalServer, setSwitchingLocalServer] = useState(false)
   const [localModelError, setLocalModelError] = useState('')
   const [openHandsMachineStatus, setOpenHandsMachineStatus] = useState<OpenHandsMachineTest | null>(null)
   const [checkingOpenHands, setCheckingOpenHands] = useState(false)
@@ -3233,6 +3260,7 @@ function QueueComposer({
   const [isQueueing, setIsQueueing] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const localModelLoadSequenceRef = useRef(0)
+  const localServerSwitchSequenceRef = useRef(0)
   const openHandsCheckSequenceRef = useRef(0)
   const previousProjectIdRef = useRef(selectedProject.id)
   const previousEditingRequestIdRef = useRef<string | null>(null)
@@ -4215,7 +4243,9 @@ function QueueComposer({
                         disabled={localProfiles.length === 0}
                         onChange={(nextProfileId) => {
                           const nextProfile = localProfiles.find((profile) => profile.id === nextProfileId)
+                          const switchSequence = ++localServerSwitchSequenceRef.current
                           localModelLoadSequenceRef.current += 1
+                          setSwitchingLocalServer(true)
                           setLoadingLocalModels(true)
                           setLocalModelStatus(null)
                           setLocalModelError('')
@@ -4224,6 +4254,11 @@ function QueueComposer({
                           setLocalReasoningEffort('')
                           setComposerValidationError('')
                           void loadLocalModels(nextProfileId, true, nextProfile?.defaultModel ?? '')
+                            .finally(() => {
+                              if (switchSequence === localServerSwitchSequenceRef.current) {
+                                setSwitchingLocalServer(false)
+                              }
+                            })
                         }}
                       />
                       <div className="local-picker-actions" role="status" aria-live="polite" aria-label="OpenHands readiness">
@@ -4303,7 +4338,7 @@ function QueueComposer({
                         <Server size={16} />
                         <span>A.I. Server unavailable{localModelError || localModelStatus?.error ? `: ${localModelError || localModelStatus?.error}` : ''}</span>
                       </div>
-                    ) : loadingMachineResources || loadingLocalModels ? (
+                    ) : switchingLocalServer || (loadingMachineResources && !machineResources) ? (
                       <ResourceTelemetryLoading />
                     ) : machineResources ? (
                       <div className="resource-meter-list">
