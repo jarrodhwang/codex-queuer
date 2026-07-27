@@ -134,6 +134,7 @@ public static class Mapping
             profile.MaximumConcurrency,
             profile.ConfiguredContextWindow,
             profile.DefaultModel,
+            profile.ServerMachineId,
             profile.LastHealthStatus,
             profile.LastHealthAt,
             profile.LastHealthError,

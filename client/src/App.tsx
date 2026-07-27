@@ -63,6 +63,7 @@ import type {
   MachineRateLimits,
   MachineResources,
   MachinePlatform,
+  MachinePowerMode,
   ModelDiscoveryMode,
   RateLimit,
   ModelOption,
@@ -161,6 +162,7 @@ const emptyLocalProviderProfile: SaveAiProviderProfileRequest = {
   maximumConcurrency: 1,
   configuredContextWindow: 131_072,
   defaultModel: '',
+  serverMachineId: null,
 }
 
 const themeStorageKey = 'codex-queue-theme'
@@ -1646,6 +1648,7 @@ function LeftSidebar({
       {providerModalOpen && (
         <LocalAiServerModal
           profiles={providerProfiles}
+          machines={machines}
           onClose={() => setProviderModalOpen(false)}
           onChanged={onChanged}
           onError={onError}
@@ -1930,11 +1933,13 @@ function parseCodexUsageText(value?: string | null) {
 
 function LocalAiServerModal({
   profiles,
+  machines,
   onClose,
   onChanged,
   onError,
 }: {
   profiles: AiProviderProfile[]
+  machines: Machine[]
   onClose: () => void
   onChanged: () => Promise<void>
   onError: (cause: unknown) => void
@@ -1943,8 +1948,9 @@ function LocalAiServerModal({
   const [draft, setDraft] = useState<SaveAiProviderProfileRequest>(emptyLocalProviderProfile)
   const [editingId, setEditingId] = useState<string | undefined>()
   const [deleting, setDeleting] = useState<AiProviderProfile | null>(null)
-  const [testing, setTesting] = useState(false)
+  const [serverStatuses, setServerStatuses] = useState<Record<string, { testing: boolean; success?: boolean; output: string }>>({})
   const [testMessage, setTestMessage] = useState('')
+  const initialChecksStartedRef = useRef(false)
 
   const reset = () => {
     setEditingId(undefined)
@@ -1963,6 +1969,7 @@ function LocalAiServerModal({
       maximumConcurrency: profile.maximumConcurrency,
       configuredContextWindow: profile.configuredContextWindow ?? 131_072,
       defaultModel: profile.defaultModel ?? '',
+      serverMachineId: profile.serverMachineId ?? null,
     })
     setTestMessage('')
   }
@@ -1995,23 +2002,37 @@ function LocalAiServerModal({
       onError(cause)
     }
   }
-  const test = async () => {
-    if (!editingId) return
-    setTesting(true)
+  const test = async (profileId = editingId) => {
+    if (!profileId) return
+    setServerStatuses((current) => ({
+      ...current,
+      [profileId]: { testing: true, success: current[profileId]?.success, output: current[profileId]?.output ?? '' },
+    }))
     setTestMessage('')
     try {
-      const result = await api.providerModels(editingId, true)
+      const result = await api.providerModels(profileId, true)
       const modelCount = result.models.length
-      setTestMessage(result.healthy
+      const output = result.healthy
         ? `Connected — ${modelCount} model${modelCount === 1 ? '' : 's'} discovered.`
-        : result.error || 'The server responded but is not healthy.')
+        : result.error || 'The server responded but is not healthy.'
+      setServerStatuses((current) => ({ ...current, [profileId]: { testing: false, success: result.healthy, output } }))
+      if (profileId === editingId) setTestMessage(output)
       await onChanged()
     } catch (cause) {
-      setTestMessage(cause instanceof Error ? cause.message : 'Could not connect to this model server.')
-    } finally {
-      setTesting(false)
+      const output = cause instanceof Error ? cause.message : 'Could not connect to this model server.'
+      setServerStatuses((current) => ({ ...current, [profileId]: { testing: false, success: false, output } }))
+      if (profileId === editingId) setTestMessage(output)
     }
   }
+  const testAll = async () => {
+    await Promise.all(localProfiles.map((profile) => test(profile.id)))
+  }
+
+  useEffect(() => {
+    if (initialChecksStartedRef.current) return
+    initialChecksStartedRef.current = true
+    void testAll()
+  }, [])
 
   return (
     <Modal title="Local AI Server settings" icon={<Server size={18} />} onClose={onClose} wide>
@@ -2022,7 +2043,10 @@ function LocalAiServerModal({
               <div className="machine-manager-title">Model servers</div>
               <div className="meta">{localProfiles.length} Local AI server{localProfiles.length === 1 ? '' : 's'}</div>
             </div>
-            <GlassButton variant="primary" size="sm" type="button" onClick={reset}><Plus size={13} /> Add server</GlassButton>
+            <div className="button-row">
+              <GlassButton variant="secondary" size="sm" type="button" onClick={testAll} disabled={localProfiles.length === 0 || localProfiles.some((profile) => serverStatuses[profile.id]?.testing)}><Check size={13} /> Check all</GlassButton>
+              <GlassButton variant="primary" size="sm" type="button" onClick={reset}><Plus size={13} /> Add server</GlassButton>
+            </div>
           </div>
           <div className="machine-list">
             {localProfiles.map((profile) => (
@@ -2037,6 +2061,10 @@ function LocalAiServerModal({
                 <div className="machine-card-meta">
                   <span className="machine-chip">{profile.configuredContextWindow ? formatContextSize(profile.configuredContextWindow) : 'No limit'}</span>
                   <span className="machine-chip">{profile.enabled ? 'Enabled' : 'Disabled'}</span>
+                  <span className="machine-runner-check" title={serverStatuses[profile.id]?.output || 'Model server not checked'}>
+                    Status
+                    <span className={`connection-dot ${serverStatuses[profile.id]?.testing ? 'pending' : serverStatuses[profile.id]?.success === true ? 'ok' : serverStatuses[profile.id]?.success === false ? 'bad' : ''}`} />
+                  </span>
                 </div>
               </button>
             ))}
@@ -2063,11 +2091,12 @@ function LocalAiServerModal({
               <FieldLabel label="Default model"><GlassInput value={draft.defaultModel ?? ''} onChange={(event) => update('defaultModel', event.target.value)} placeholder="gpt-oss:20b" /></FieldLabel>
               <FieldLabel label="Concurrency"><GlassInput value={draft.maximumConcurrency} type="number" min={1} onChange={(event) => update('maximumConcurrency', Number(event.target.value))} /></FieldLabel>
             </div>
+            <FieldLabel label="AI server machine"><GlassSelect value={draft.serverMachineId ?? ''} onChange={(event) => update('serverMachineId', event.target.value || null)}><option value="">Not configured</option>{machines.map((machine) => <option key={machine.id} value={machine.id}>{machine.name}</option>)}</GlassSelect></FieldLabel>
             <label className="checkbox-row"><input type="checkbox" checked={draft.enabled} onChange={(event) => update('enabled', event.target.checked)} /> <span>Enabled for Local Requests</span></label>
           </div>
           <div className="machine-editor-actions">
             <GlassButton variant="primary" type="submit"><Check size={15} /> {editingId ? 'Save server' : 'Add server'}</GlassButton>
-            {editingId && <GlassButton variant="secondary" type="button" onClick={test} disabled={testing}><RefreshCcw size={14} className={testing ? 'action-spinner' : ''} /> {testing ? 'Testing…' : 'Test connection'}</GlassButton>}
+            {editingId && <GlassButton variant="secondary" type="button" onClick={() => void test()} disabled={serverStatuses[editingId]?.testing}><RefreshCcw size={14} className={serverStatuses[editingId]?.testing ? 'action-spinner' : ''} /> {serverStatuses[editingId]?.testing ? 'Testing…' : 'Test connection'}</GlassButton>}
             {editingId && <GlassButton variant="secondary" type="button" onClick={reset}>New server</GlassButton>}
           </div>
           {testMessage && <div className={`diagnostics-panel ${testMessage.startsWith('Connected') ? 'diagnostics-panel--ok' : 'diagnostics-panel--bad'}`}>{testMessage}</div>}
@@ -3241,6 +3270,7 @@ function QueueComposer({
   const [localModelStatus, setLocalModelStatus] = useState<ProviderModelsResponse | null>(null)
   const [loadingLocalModels, setLoadingLocalModels] = useState(false)
   const [switchingLocalServer, setSwitchingLocalServer] = useState(false)
+  const [powerMenuOpen, setPowerMenuOpen] = useState(false)
   const [localModelError, setLocalModelError] = useState('')
   const [openHandsMachineStatus, setOpenHandsMachineStatus] = useState<OpenHandsMachineTest | null>(null)
   const [checkingOpenHands, setCheckingOpenHands] = useState(false)
@@ -3531,12 +3561,19 @@ function QueueComposer({
       return
     }
 
+    if (!selectedLocalProfile?.serverMachineId) {
+      setMachineResources(null)
+      setMachineResourceError('Select the machine hosting this A.I. Server in Local AI Server settings.')
+      setLoadingMachineResources(false)
+      return
+    }
+
     let cancelled = false
     let inFlight = false
     let pollingStopped = false
     let retryDelayMs = 5_000
     let timer: number | null = null
-    setMachineResources((current) => current?.machineId === selectedProject.machineId ? current : null)
+    setMachineResources((current) => current?.machineId === selectedLocalProfile.serverMachineId ? current : null)
     setMachineResourceError('')
 
     const schedule = (delayMs: number) => {
@@ -3554,7 +3591,7 @@ function QueueComposer({
       inFlight = true
       setLoadingMachineResources(true)
       try {
-        const result = await api.machineResources(selectedProject.machineId)
+        const result = await api.providerResources(selectedLocalProfileId)
         if (!cancelled) {
           const deterministicUnavailable = !result.available
             && /currently supports Linux|No supported resource sensors/i.test(result.error ?? '')
@@ -3601,7 +3638,7 @@ function QueueComposer({
       if (timer !== null) window.clearTimeout(timer)
       document.removeEventListener('visibilitychange', onVisibilityChange)
     }
-  }, [isLocalRunner, machineResourceRefreshVersion, selectedProject.machineId])
+  }, [isLocalRunner, machineResourceRefreshVersion, selectedLocalProfile?.serverMachineId, selectedLocalProfileId])
   const localModelInstalled = Boolean(localModel && localModelOptions.some((model) => model.id === localModel))
   const selectedLocalModelMetadata = localModelOptions.find((model) => model.id === localModel)
   const selectedLocalModelId = selectedLocalModelMetadata?.id
@@ -4253,6 +4290,7 @@ function QueueComposer({
                           setLocalModel(qualifyLocalModelId(nextProfile?.defaultModel ?? ''))
                           setLocalReasoningEffort('')
                           setComposerValidationError('')
+                          setPowerMenuOpen(false)
                           void loadLocalModels(nextProfileId, true, nextProfile?.defaultModel ?? '')
                             .finally(() => {
                               if (switchSequence === localServerSwitchSequenceRef.current) {
@@ -4262,6 +4300,18 @@ function QueueComposer({
                         }}
                       />
                       <div className="local-picker-actions" role="status" aria-live="polite" aria-label="OpenHands readiness">
+                        <GlassButton
+                          variant="secondary"
+                          size="icon"
+                          type="button"
+                          disabled={!selectedLocalProfile}
+                          title="AI server power mode"
+                          aria-label="AI server power mode"
+                          aria-expanded={powerMenuOpen}
+                          onClick={() => setPowerMenuOpen((current) => !current)}
+                        >
+                          <Zap size={15} />
+                        </GlassButton>
                         <div className="local-health-strip">
                           {localHealthItems.map((item) => (
                             <span
@@ -4289,6 +4339,9 @@ function QueueComposer({
                         >
                           <RefreshCcw size={15} className={loadingLocalModels || checkingOpenHands || loadingMachineResources ? 'action-spinner' : ''} />
                         </GlassButton>
+                        {powerMenuOpen && selectedLocalProfile && (
+                          <PowerModePopover profileId={selectedLocalProfile.id} onClose={() => setPowerMenuOpen(false)} />
+                        )}
                       </div>
                     </div>
                     <div className="model-picker-head">
@@ -4767,6 +4820,55 @@ function ResourceTelemetryLoading() {
           <span className="resource-telemetry-skeleton-meter" />
         </div>
       ))}
+    </div>
+  )
+}
+
+function PowerModePopover({ profileId, onClose }: { profileId: string; onClose: () => void }) {
+  const [snapshot, setSnapshot] = useState<MachinePowerMode | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [updating, setUpdating] = useState('')
+  const [error, setError] = useState('')
+
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      setSnapshot(await api.providerPowerMode(profileId))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not read the power mode.')
+    } finally {
+      setLoading(false)
+    }
+  }, [profileId])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const setMode = async (mode: string) => {
+    setUpdating(mode)
+    setError('')
+    try {
+      setSnapshot(await api.setProviderPowerMode(profileId, mode))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not set the power mode.')
+    } finally {
+      setUpdating('')
+    }
+  }
+
+  return (
+    <div className="power-mode-popover" role="dialog" aria-label="AI server power mode">
+      <div className="power-mode-popover__head"><strong>Power mode</strong><button type="button" onClick={onClose} aria-label="Close power mode"><X size={13} /></button></div>
+      {loading ? <div className="meta">Checking power mode…</div> : error ? <div className="error-text">{error}</div> : <>
+        <div className="meta truncate" title={snapshot?.machineName}>{snapshot?.machineName} · {snapshot?.mode ?? 'Unknown'}</div>
+        <div className="power-mode-options">
+          {[
+            { value: 'power-saver', label: 'Power saver' },
+            { value: 'balanced', label: 'Balanced' },
+            { value: 'performance', label: 'Performance' },
+          ].map((option) => <GlassButton key={option.value} variant={snapshot?.mode === option.value ? 'primary' : 'secondary'} size="sm" type="button" disabled={Boolean(updating)} onClick={() => void setMode(option.value)}>{updating === option.value ? 'Setting…' : option.label}</GlassButton>)}
+        </div>
+      </>}
     </div>
   )
 }

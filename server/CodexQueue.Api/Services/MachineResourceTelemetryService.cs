@@ -88,23 +88,15 @@ internal sealed class MachineResourceTelemetryService(
             }
 
             MachineResourceTelemetry telemetry;
-            if (machine.Platform is MachinePlatform.Windows or MachinePlatform.MacOs
-                || (machine.Kind == MachineKind.Local && !OperatingSystem.IsLinux()))
+            await executionGate.WaitAsync(cancellationToken);
+            try
             {
-                telemetry = Unavailable("Resource monitoring currently supports Linux machines.");
+                var result = await commandExecutor.ExecuteAsync(machine, cancellationToken);
+                telemetry = Parse(result);
             }
-            else
+            finally
             {
-                await executionGate.WaitAsync(cancellationToken);
-                try
-                {
-                    var result = await commandExecutor.ExecuteAsync(machine, cancellationToken);
-                    telemetry = Parse(result);
-                }
-                finally
-                {
-                    executionGate.Release();
-                }
+                executionGate.Release();
             }
 
             StoreCached(machine.Id, new CacheEntry(
@@ -556,6 +548,54 @@ internal sealed class ResourceTelemetryCommandExecutor(
     private static readonly TimeSpan ExecutionTimeout = TimeSpan.FromSeconds(6);
     private const int MaximumOutputCharacters = 64 * 1024;
 
+    private const string WindowsCollectorScript = """
+        $ErrorActionPreference = 'SilentlyContinue'
+        $cpu = @(Get-CimInstance Win32_Processor)
+        if ($cpu.Count -gt 0) {
+          $name = ($cpu[0].Name -replace '[|\r\n]', ' ').Trim()
+          if ($name) { Write-Output "CQ_CPU_INFO|$name" }
+          $usage = ($cpu | Measure-Object -Property LoadPercentage -Average).Average
+          if ($null -ne $usage) { Write-Output "CQ_CPU|$usage" }
+        }
+        $os = Get-CimInstance Win32_OperatingSystem
+        if ($os) {
+          $total = [int64]$os.TotalVisibleMemorySize * 1024
+          $used = ([int64]$os.TotalVisibleMemorySize - [int64]$os.FreePhysicalMemory) * 1024
+          if ($total -gt 0) { Write-Output "CQ_MEM|$used|$total|$([math]::Round($used * 100.0 / $total, 1))" }
+          $memoryName = "{0:N0} GB installed" -f ($total / 1GB)
+          Write-Output "CQ_MEM_INFO|$memoryName"
+        }
+        $nvidia = Get-Command nvidia-smi -ErrorAction SilentlyContinue
+        if ($nvidia) {
+          & $nvidia.Source --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>$null | ForEach-Object {
+            $fields = $_ -split ',' | ForEach-Object { $_.Trim() }
+            if ($fields.Count -ge 7) { Write-Output ("CQ_NVIDIA_GPU|{0}|{1}|{2}|{3}|{4}|{5}|{6}|" -f $fields[0], ($fields[1] -replace '[|\r\n]', ' '), $fields[2], $fields[3], $fields[4], $fields[5], $fields[6]) }
+          }
+        }
+        """;
+
+    private const string MacCollectorScript = """
+        cpu_name="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
+        [ -n "$cpu_name" ] && printf 'CQ_CPU_INFO|%s\n' "$(printf '%s' "$cpu_name" | tr '|\r\n' '   ')"
+        cpu_count="$(sysctl -n hw.ncpu 2>/dev/null || printf 1)"
+        cpu_usage="$(ps -A -o %cpu 2>/dev/null | awk -v count="$cpu_count" 'NR > 1 { total += $1 } END { if (count > 0) { value=total/count; if (value > 100) value=100; printf "%.1f", value } }')"
+        [ -n "$cpu_usage" ] && printf 'CQ_CPU|%s\n' "$cpu_usage"
+        mem_total="$(sysctl -n hw.memsize 2>/dev/null || true)"
+        page_size="$(pagesize 2>/dev/null || printf 4096)"
+        free_pages="$(vm_stat 2>/dev/null | awk '/Pages free/ { gsub("\\.", "", $3); print $3; exit }')"
+        if [ -n "$mem_total" ] && [ -n "$free_pages" ]; then
+          mem_used=$((mem_total - free_pages * page_size))
+          mem_percent="$(awk -v used="$mem_used" -v total="$mem_total" 'BEGIN { if (total > 0) printf "%.1f", used*100/total }')"
+          printf 'CQ_MEM|%s|%s|%s\n' "$mem_used" "$mem_total" "$mem_percent"
+          printf 'CQ_MEM_INFO|%s GB installed\n' "$((mem_total / 1000000000))"
+        fi
+        if command -v nvidia-smi >/dev/null 2>&1; then
+          nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null | while IFS=',' read -r index name util used total temp power; do
+            printf 'CQ_NVIDIA_GPU|%s|%s|%s|%s|%s|%s|%s|\n' "$index" "$(printf '%s' "$name" | tr '|\r\n' '   ')" "$util" "$used" "$total" "$temp" "$power"
+          done
+        fi
+        """;
+
     // This fixed, read-only Linux collector intentionally uses only /proc, /sys and
     // vendor utilities already present on the target. It never invokes sudo or accepts
     // user-provided shell fragments. Missing sensors simply produce no matching record.
@@ -682,7 +722,7 @@ internal sealed class ResourceTelemetryCommandExecutor(
         try
         {
             startInfo = machine.Kind == MachineKind.Local
-                ? BuildLocalStartInfo()
+                ? BuildLocalStartInfo(machine)
                 : BuildSshStartInfo(machine);
         }
         catch (InvalidOperationException ex)
@@ -780,14 +820,23 @@ internal sealed class ResourceTelemetryCommandExecutor(
         }
 
         startInfo.ArgumentList.Add(destination);
-        startInfo.ArgumentList.Add("LC_ALL=C /bin/sh -c " + QuotePosix(CollectorScript));
+        startInfo.ArgumentList.Add(machine.TargetsWindows()
+            ? "powershell -NoProfile -NonInteractive -EncodedCommand " + EncodePowerShell(WindowsCollectorScript)
+            : "LC_ALL=C /bin/sh -c " + QuotePosix(machine.Platform == MachinePlatform.MacOs ? MacCollectorScript : CollectorScript));
         return startInfo;
     }
 
-    private static ProcessStartInfo BuildLocalStartInfo()
+    private static ProcessStartInfo BuildLocalStartInfo(TargetMachine machine)
     {
+        if (machine.TargetsWindows())
+        {
+            var windowsStartInfo = CreateStartInfo("powershell");
+            AddArguments(windowsStartInfo, "-NoProfile", "-NonInteractive", "-EncodedCommand", EncodePowerShell(WindowsCollectorScript));
+            return windowsStartInfo;
+        }
+
         var startInfo = CreateStartInfo("/bin/sh");
-        AddArguments(startInfo, "-c", CollectorScript);
+        AddArguments(startInfo, "-c", machine.Platform == MachinePlatform.MacOs ? MacCollectorScript : CollectorScript);
         startInfo.Environment["LC_ALL"] = "C";
         return startInfo;
     }
@@ -869,6 +918,9 @@ internal sealed class ResourceTelemetryCommandExecutor(
 
     private static string QuotePosix(string value) =>
         "'" + value.Replace("'", "'\"'\"'", StringComparison.Ordinal) + "'";
+
+    private static string EncodePowerShell(string value) =>
+        Convert.ToBase64String(Encoding.Unicode.GetBytes(value));
 
     private static string ResolveSshKeyPath(string configuredPath)
     {

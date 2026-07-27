@@ -238,6 +238,15 @@ public sealed record ApiConfigDto(bool RequiresToken, IReadOnlyList<ModelOptionD
 
 public sealed record MachineTestDto(bool Success, string Output);
 
+public sealed record MachinePowerModeDto(
+    Guid MachineId,
+    string MachineName,
+    bool Available,
+    string? Mode,
+    string? Error);
+
+public sealed record SetMachinePowerModeRequest(string Mode);
+
 public sealed record GpuResourceTelemetryDto(
     int Index,
     string Name,
@@ -287,6 +296,7 @@ public sealed record AiProviderProfileDto(
     int MaximumConcurrency,
     int? ConfiguredContextWindow,
     string? DefaultModel,
+    Guid? ServerMachineId,
     ProviderHealthStatus LastHealthStatus,
     DateTimeOffset? LastHealthAt,
     string? LastHealthError,
@@ -302,7 +312,8 @@ public sealed record SaveAiProviderProfileRequest(
     bool Enabled,
     int MaximumConcurrency,
     int? ConfiguredContextWindow,
-    string? DefaultModel);
+    string? DefaultModel,
+    Guid? ServerMachineId);
 
 public sealed record AiProviderModelDto(
     string Id,

@@ -60,6 +60,8 @@ public sealed class AiProviderProfile
     public int MaximumConcurrency { get; set; } = 1;
     public int? ConfiguredContextWindow { get; set; }
     public string? DefaultModel { get; set; }
+    public Guid? ServerMachineId { get; set; }
+    public TargetMachine? ServerMachine { get; set; }
     public ProviderHealthStatus LastHealthStatus { get; set; } = ProviderHealthStatus.Unknown;
     public DateTimeOffset? LastHealthAt { get; set; }
     public string? LastHealthError { get; set; }

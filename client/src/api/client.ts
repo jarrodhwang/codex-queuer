@@ -10,6 +10,7 @@ import type {
   GitCommitResult,
   GitStatus,
   Machine,
+  MachinePowerMode,
   MachineTest,
   OpenHandsMachineTest,
   MachineRateLimits,
@@ -125,6 +126,9 @@ export const api = {
     }),
   deleteProject: (id: string) => apiFetch<void>(`/projects/${id}`, { method: 'DELETE' }),
   providerProfiles: () => apiFetch<AiProviderProfile[]>('/provider-profiles'),
+  providerResources: (id: string) => apiFetch<MachineResources>(`/provider-profiles/${id}/resources`),
+  providerPowerMode: (id: string) => apiFetch<MachinePowerMode>(`/provider-profiles/${id}/power-mode`),
+  setProviderPowerMode: (id: string, mode: string) => apiFetch<MachinePowerMode>(`/provider-profiles/${id}/power-mode`, { method: 'POST', body: JSON.stringify({ mode }) }),
   saveProviderProfile: (profile: SaveAiProviderProfileRequest, id?: string) =>
     apiFetch<AiProviderProfile>(id ? `/provider-profiles/${id}` : '/provider-profiles', {
       method: id ? 'PUT' : 'POST',

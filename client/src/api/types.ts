@@ -298,6 +298,7 @@ export type AiProviderProfile = {
   maximumConcurrency: number
   configuredContextWindow?: number | null
   defaultModel?: string | null
+  serverMachineId?: string | null
   lastHealthStatus: ProviderHealthStatus
   lastHealthAt?: string | null
   lastHealthError?: string | null
@@ -315,6 +316,7 @@ export type SaveAiProviderProfileRequest = {
   maximumConcurrency: number
   configuredContextWindow?: number | null
   defaultModel?: string | null
+  serverMachineId?: string | null
 }
 
 export type ProviderModel = {
@@ -340,6 +342,14 @@ export type ProviderModelsResponse = {
 export type MachineTest = {
   success: boolean
   output: string
+}
+
+export type MachinePowerMode = {
+  machineId: string
+  machineName: string
+  available: boolean
+  mode?: string | null
+  error?: string | null
 }
 
 export type OpenHandsMachineTest = {

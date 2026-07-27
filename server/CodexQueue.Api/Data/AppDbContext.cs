@@ -67,8 +67,13 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.DefaultModel).HasMaxLength(256);
             entity.Property(x => x.LastHealthStatus).HasConversion<string>().HasMaxLength(24);
             entity.Property(x => x.LastHealthError).HasMaxLength(2048);
+            entity.HasOne(x => x.ServerMachine)
+                .WithMany()
+                .HasForeignKey(x => x.ServerMachineId)
+                .OnDelete(DeleteBehavior.SetNull);
             entity.HasIndex(x => x.Name).IsUnique();
             entity.HasIndex(x => new { x.Source, x.BaseUrl });
+            entity.HasIndex(x => x.ServerMachineId);
         });
 
         modelBuilder.Entity<CodexRequest>(entity =>

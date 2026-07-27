@@ -303,6 +303,12 @@ public static class ApiEndpoints
             IAiProviderService providers,
             CancellationToken cancellationToken) =>
         {
+            if (input.ServerMachineId is { } serverMachineId
+                && !await db.Machines.AnyAsync(x => x.Id == serverMachineId, cancellationToken))
+            {
+                return Results.BadRequest(new { error = "Selected AI server machine does not exist." });
+            }
+
             var profile = new AiProviderProfile();
             Apply(input, profile);
             var validation = providers.Validate(profile);
@@ -352,6 +358,12 @@ public static class ApiEndpoints
                 {
                     error = "Finish or cancel active requests before changing this provider profile.",
                 });
+            }
+
+            if (input.ServerMachineId is { } serverMachineId
+                && !await db.Machines.AnyAsync(x => x.Id == serverMachineId, cancellationToken))
+            {
+                return Results.BadRequest(new { error = "Selected AI server machine does not exist." });
             }
 
             Apply(input, profile);
@@ -451,6 +463,85 @@ public static class ApiEndpoints
                     x.SupportsTools,
                     x.SupportsReasoning,
                     x.SupportsReasoningEffort)).ToArray()));
+        });
+
+        api.MapGet("/provider-profiles/{id:guid}/resources", async (
+            Guid id,
+            AppDbContext db,
+            IMachineResourceTelemetryService telemetryService,
+            HttpContext httpContext,
+            CancellationToken cancellationToken) =>
+        {
+            var profile = await db.AiProviderProfiles
+                .AsNoTracking()
+                .Include(x => x.ServerMachine)
+                .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+            if (profile is null)
+            {
+                return Results.NotFound();
+            }
+
+            var machine = profile.ServerMachine;
+            if (machine is null)
+            {
+                return Results.BadRequest(new { error = "Select the machine that hosts this AI server before viewing its resources." });
+            }
+
+            httpContext.Response.Headers.CacheControl = "no-store";
+            var telemetry = await telemetryService.CollectAsync(machine, cancellationToken);
+            return Results.Ok(new MachineResourceTelemetryDto(
+                machine.Id,
+                machine.Name,
+                telemetry.Available,
+                telemetry.Error,
+                telemetry.CpuUsagePercent,
+                telemetry.MemoryUsagePercent,
+                telemetry.MemoryUsedBytes,
+                telemetry.MemoryTotalBytes,
+                telemetry.CpuTemperatureCelsius,
+                telemetry.SystemTemperatureCelsius,
+                telemetry.SystemPowerWatts,
+                telemetry.SystemPowerSource,
+                telemetry.Gpus.Select(gpu => new GpuResourceTelemetryDto(
+                    gpu.Index,
+                    gpu.Name,
+                    gpu.UtilizationPercent,
+                    gpu.MemoryUsagePercent,
+                    gpu.MemoryUsedBytes,
+                    gpu.MemoryTotalBytes,
+                    gpu.TemperatureCelsius,
+                    gpu.PowerWatts)).ToArray(),
+                telemetry.CollectedAt,
+                telemetry.CpuName,
+                telemetry.MemoryName));
+        });
+
+        api.MapGet("/provider-profiles/{id:guid}/power-mode", async (
+            Guid id,
+            AppDbContext db,
+            ITargetCommandRunner runner,
+            CancellationToken cancellationToken) =>
+        {
+            var machine = await GetProviderMachineAsync(id, db, cancellationToken);
+            if (machine is null) return Results.BadRequest(new { error = "Select the machine that hosts this AI server first." });
+            var result = await runner.RunShellAsync(machine, "", PowerModeReadCommand(machine), _ => Task.CompletedTask, cancellationToken);
+            return Results.Ok(new MachinePowerModeDto(machine.Id, machine.Name, result.Success, result.Success ? ParsePowerMode(machine, result.Output) : null, result.Success ? null : Truncate(result.Output, 2_000)));
+        });
+
+        api.MapPost("/provider-profiles/{id:guid}/power-mode", async (
+            Guid id,
+            SetMachinePowerModeRequest input,
+            AppDbContext db,
+            ITargetCommandRunner runner,
+            CancellationToken cancellationToken) =>
+        {
+            var machine = await GetProviderMachineAsync(id, db, cancellationToken);
+            if (machine is null) return Results.BadRequest(new { error = "Select the machine that hosts this AI server first." });
+            var mode = input.Mode?.Trim().ToLowerInvariant();
+            if (mode is not ("power-saver" or "balanced" or "performance")) return Results.BadRequest(new { error = "Power mode must be power-saver, balanced, or performance." });
+            if (machine.Platform == MachinePlatform.MacOs) return Results.BadRequest(new { error = "Power mode control is not available for macOS machines." });
+            var result = await runner.RunShellAsync(machine, "", PowerModeSetCommand(machine, mode), _ => Task.CompletedTask, cancellationToken);
+            return Results.Ok(new MachinePowerModeDto(machine.Id, machine.Name, result.Success, result.Success ? mode : null, result.Success ? null : Truncate(result.Output, 2_000)));
         });
 
         api.MapGet("/machines/{id:guid}/usage", async (Guid id, AppDbContext db, ITargetCommandRunner runner, CancellationToken cancellationToken) =>
@@ -1777,6 +1868,43 @@ public static class ApiEndpoints
             : input.WorkingRoot.Trim();
     }
 
+    private static async Task<TargetMachine?> GetProviderMachineAsync(
+        Guid profileId,
+        AppDbContext db,
+        CancellationToken cancellationToken) =>
+        await db.AiProviderProfiles
+            .AsNoTracking()
+            .Where(x => x.Id == profileId)
+            .Select(x => x.ServerMachine)
+            .FirstOrDefaultAsync(cancellationToken);
+
+    private static string PowerModeReadCommand(TargetMachine machine) => machine.TargetsWindows()
+        ? "powercfg /getactivescheme"
+        : "command -v powerprofilesctl >/dev/null 2>&1 || { echo 'powerprofilesctl is not installed.' >&2; exit 127; }; powerprofilesctl get";
+
+    private static string PowerModeSetCommand(TargetMachine machine, string mode) => machine.TargetsWindows()
+        ? "powercfg /setactive " + (mode switch
+            {
+                "power-saver" => "SCHEME_MIN",
+                "balanced" => "SCHEME_BALANCED",
+                _ => "SCHEME_MAX",
+            })
+        : "sudo -n powerprofilesctl set " + mode;
+
+    private static string? ParsePowerMode(TargetMachine machine, string output)
+    {
+        var value = output.Trim().ToLowerInvariant();
+        if (machine.TargetsWindows())
+        {
+            if (value.Contains("scheme_min", StringComparison.Ordinal)) return "power-saver";
+            if (value.Contains("scheme_max", StringComparison.Ordinal)) return "performance";
+            if (value.Contains("scheme_balanced", StringComparison.Ordinal)) return "balanced";
+            return null;
+        }
+
+        return value is "power-saver" or "balanced" or "performance" ? value : null;
+    }
+
     private static void Apply(SaveAiProviderProfileRequest input, AiProviderProfile profile)
     {
         profile.Name = (input.Name ?? "").Trim();
@@ -1788,6 +1916,7 @@ public static class ApiEndpoints
         profile.MaximumConcurrency = input.MaximumConcurrency;
         profile.ConfiguredContextWindow = input.ConfiguredContextWindow;
         profile.DefaultModel = NormalizeOptional(input.DefaultModel);
+        profile.ServerMachineId = input.ServerMachineId;
     }
 
     private static void ApplyNormalizedProviderValues(

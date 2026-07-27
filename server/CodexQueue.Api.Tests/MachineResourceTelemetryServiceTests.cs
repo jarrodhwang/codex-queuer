@@ -86,7 +86,7 @@ public sealed class MachineResourceTelemetryServiceTests
     }
 
     [Fact]
-    public async Task CollectAsync_DoesNotExecuteCommandsForKnownUnsupportedPlatform()
+    public async Task CollectAsync_ExecutesCommandsForWindowsMachines()
     {
         var executor = new RecordingExecutor();
         var service = new MachineResourceTelemetryService(executor);
@@ -98,9 +98,8 @@ public sealed class MachineResourceTelemetryServiceTests
 
         var telemetry = await service.CollectAsync(machine, CancellationToken.None);
 
-        Assert.False(telemetry.Available);
-        Assert.Contains("Linux", telemetry.Error);
-        Assert.Equal(0, executor.CallCount);
+        Assert.True(telemetry.Available);
+        Assert.Equal(1, executor.CallCount);
     }
 
     [Fact]

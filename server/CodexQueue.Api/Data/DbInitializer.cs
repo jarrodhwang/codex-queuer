@@ -14,6 +14,7 @@ public static class DbInitializer
         var configuration = scope.ServiceProvider.GetService<IConfiguration>();
         await db.Database.EnsureCreatedAsync(cancellationToken);
         await EnsureAiProviderProfilesTableAsync(db, cancellationToken);
+        await EnsureColumnAsync(db, "AiProviderProfiles", "ServerMachineId", "ALTER TABLE \"AiProviderProfiles\" ADD COLUMN \"ServerMachineId\" TEXT NULL REFERENCES \"Machines\" (\"Id\") ON DELETE SET NULL", cancellationToken);
         await EnsureAiProviderProfileIndexesAsync(db, cancellationToken);
         await EnsureQueueTabsTableAsync(db, cancellationToken);
         await EnsureColumnAsync(db, "QueueTabs", "DeletedAt", "ALTER TABLE \"QueueTabs\" ADD COLUMN \"DeletedAt\" TEXT NULL", cancellationToken);
@@ -338,6 +339,7 @@ public static class DbInitializer
                 "MaximumConcurrency" INTEGER NOT NULL DEFAULT 1,
                 "ConfiguredContextWindow" INTEGER NULL,
                 "DefaultModel" TEXT NULL,
+                "ServerMachineId" TEXT NULL REFERENCES "Machines" ("Id") ON DELETE SET NULL,
                 "LastHealthStatus" TEXT NOT NULL DEFAULT 'Unknown',
                 "LastHealthAt" TEXT NULL,
                 "LastHealthError" TEXT NULL,
@@ -355,6 +357,9 @@ public static class DbInitializer
             cancellationToken);
         await db.Database.ExecuteSqlRawAsync(
             "CREATE INDEX IF NOT EXISTS \"IX_AiProviderProfiles_Source_BaseUrl\" ON \"AiProviderProfiles\" (\"Source\", \"BaseUrl\")",
+            cancellationToken);
+        await db.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS \"IX_AiProviderProfiles_ServerMachineId\" ON \"AiProviderProfiles\" (\"ServerMachineId\")",
             cancellationToken);
     }
 
