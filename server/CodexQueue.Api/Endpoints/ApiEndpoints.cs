@@ -1363,9 +1363,6 @@ public static class ApiEndpoints
                 input.Model,
                 input.ModelSpeed,
                 input.PermissionMode,
-                input.GenerateCommit,
-                input.SeparateCommitSession,
-                input.OpenHandsAlwaysApproveConfirmed,
                 project.Machine,
                 project.Path,
                 db,
@@ -1425,11 +1422,9 @@ public static class ApiEndpoints
                 ModelSpeed = input.ExecutionRunner == ExecutionRunner.CodexCli
                     ? NormalizeSpeed(input.ModelSpeed)
                     : runnerValidation.LocalCodexContextWindow?.ToString(),
-                GenerateCommit = input.ExecutionRunner == ExecutionRunner.CodexCli
-                    && input.PermissionMode != PermissionMode.ReadOnly
+                GenerateCommit = input.PermissionMode != PermissionMode.ReadOnly
                     && input.GenerateCommit,
-                SeparateCommitSession = input.ExecutionRunner == ExecutionRunner.CodexCli
-                    && input.PermissionMode != PermissionMode.ReadOnly
+                SeparateCommitSession = input.PermissionMode != PermissionMode.ReadOnly
                     && input.GenerateCommit
                     && input.SeparateCommitSession,
                 PermissionMode = input.PermissionMode,
@@ -1526,9 +1521,6 @@ public static class ApiEndpoints
                 input.Model,
                 input.ModelSpeed,
                 input.PermissionMode,
-                input.GenerateCommit,
-                input.SeparateCommitSession,
-                input.OpenHandsAlwaysApproveConfirmed,
                 request.Machine,
                 request.Project?.Path,
                 db,
@@ -1582,11 +1574,9 @@ public static class ApiEndpoints
             request.ModelSpeed = executionRunner == ExecutionRunner.CodexCli
                 ? NormalizeSpeed(input.ModelSpeed)
                 : runnerValidation.LocalCodexContextWindow?.ToString();
-            request.GenerateCommit = executionRunner == ExecutionRunner.CodexCli
-                && input.PermissionMode != PermissionMode.ReadOnly
+            request.GenerateCommit = input.PermissionMode != PermissionMode.ReadOnly
                 && input.GenerateCommit;
-            request.SeparateCommitSession = executionRunner == ExecutionRunner.CodexCli
-                && input.PermissionMode != PermissionMode.ReadOnly
+            request.SeparateCommitSession = input.PermissionMode != PermissionMode.ReadOnly
                 && input.GenerateCommit
                 && input.SeparateCommitSession;
             request.PermissionMode = input.PermissionMode;
@@ -1956,9 +1946,6 @@ public static class ApiEndpoints
         string model,
         string? localContextWindow,
         PermissionMode permissionMode,
-        bool generateCommit,
-        bool separateCommitSession,
-        bool alwaysApproveConfirmed,
         TargetMachine? machine,
         string? projectPath,
         AppDbContext db,
@@ -2000,30 +1987,6 @@ public static class ApiEndpoints
                 null,
                 normalizedModel,
                 "Local Codex requires a project-scoped path and cannot run against a filesystem root.");
-        }
-
-        if (permissionMode != PermissionMode.FullAccess)
-        {
-            return new RunnerSelectionValidation(
-                null,
-                normalizedModel,
-                "The current Local UI uses Full access. Select it and explicitly confirm unrestricted execution.");
-        }
-
-        if (!alwaysApproveConfirmed)
-        {
-            return new RunnerSelectionValidation(
-                null,
-                normalizedModel,
-                "Explicitly confirm that Local Codex may run with the selected machine account's Full access permissions.");
-        }
-
-        if (generateCommit || separateCommitSession)
-        {
-            return new RunnerSelectionValidation(
-                null,
-                normalizedModel,
-                "Automatic request commits are not available for Local Codex in this release. Leave both commit options disabled.");
         }
 
         if (!providerProfileId.HasValue)

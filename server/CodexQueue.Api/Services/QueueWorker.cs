@@ -719,29 +719,27 @@ public sealed class QueueWorker(
             }
             attachmentsCleaned = true;
 
-            var codexResult = request.ExecutionRunner == ExecutionRunner.CodexCli
-                ? new CommandResult(
-                    result.ExitCode,
-                    result.Output,
-                    result.CommandPreview,
-                    result.CodexSessionId)
-                : null;
-            if (codexResult is not null && TryParseUsageLimit(codexResult, out var usageLimit))
+            var commandResult = new CommandResult(
+                result.ExitCode,
+                result.Output,
+                result.CommandPreview,
+                result.CodexSessionId ?? result.LocalCodexSessionId);
+            if (request.ExecutionRunner == ExecutionRunner.CodexCli
+                && TryParseUsageLimit(commandResult, out var usageLimit))
             {
-                await MarkUsageLimitedAsync(request, run, kind, codexResult, usageLimit, cancellationToken);
+                await MarkUsageLimitedAsync(request, run, kind, commandResult, usageLimit, cancellationToken);
                 return false;
             }
 
-            if (codexResult is not null
-                && codexResult.Success
+            if (commandResult.Success
                 && request.GenerateCommit
                 && !request.SeparateCommitSession)
             {
-                codexResult = await ValidateCodexCommitAsync(
+                commandResult = await ValidateCodexCommitAsync(
                     run,
                     machine,
                     projectPath,
-                    codexResult,
+                    commandResult,
                     beforeCommitHead,
                     // Inline commit is part of this request's contract. A clean
                     // working tree alone is not enough: Git HEAD must advance so
@@ -750,10 +748,9 @@ public sealed class QueueWorker(
                     cancellationToken);
                 result = result with
                 {
-                    ExitCode = codexResult.ExitCode,
-                    Output = codexResult.Output,
-                    CommandPreview = codexResult.CommandPreview,
-                    CodexSessionId = codexResult.CodexSessionId,
+                    ExitCode = commandResult.ExitCode,
+                    Output = commandResult.Output,
+                    CommandPreview = commandResult.CommandPreview,
                 };
             }
 
@@ -799,18 +796,23 @@ public sealed class QueueWorker(
 
         await AppendOutputAsync(run.Id, "Starting Codex commit session..." + Environment.NewLine, CancellationToken.None);
         var prompt = BuildProjectScopedPrompt(projectPath, BuildSeparateCommitPrompt());
-        var result = await runner.RunCodexAsync(
-            machine,
-            projectPath,
-            run.Model,
-            run.ModelEffort,
-            run.ModelSpeed,
-            null,
-            null,
-            prompt,
-            request.PermissionMode,
+        var selectedRunner = agentRunnerResolver.Resolve(request.ExecutionRunner);
+        var agentResult = await selectedRunner.RunAsync(
+            new QueueAgentRunContext(
+                request,
+                run,
+                machine,
+                projectPath,
+                prompt,
+                ImagePaths: null,
+                StartNewSession: true),
             chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
             cancellationToken);
+        var result = new CommandResult(
+            agentResult.ExitCode,
+            agentResult.Output,
+            agentResult.CommandPreview,
+            agentResult.CodexSessionId ?? agentResult.LocalCodexSessionId);
 
         return await ValidateCodexCommitAsync(
             run,

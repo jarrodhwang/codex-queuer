@@ -106,6 +106,34 @@ public sealed class TargetCommandRunnerTests
         }
     }
 
+    [Theory]
+    [InlineData(PermissionMode.ReadOnly, "never", "read-only")]
+    [InlineData(PermissionMode.AskForApproval, "untrusted", "workspace-write")]
+    [InlineData(PermissionMode.ApproveForMe, "never", "workspace-write")]
+    [InlineData(PermissionMode.FullAccess, "never", "danger-full-access")]
+    public void BuildCodexArguments_LocalRunUsesStandardCodexPermissionMapping(
+        PermissionMode permissionMode,
+        string approvalPolicy,
+        string sandboxMode)
+    {
+        var arguments = TargetCommandRunner.BuildCodexArguments(
+            "/workspace/project",
+            "local-model",
+            modelEffort: null,
+            modelSpeed: null,
+            codexSessionId: null,
+            imagePaths: null,
+            permissionMode,
+            disableWindowsSandbox: false,
+            new LocalCodexProviderOptions(
+                LocalAiServerType.Ollama,
+                "http://127.0.0.1:11434/v1",
+                65_536));
+
+        AssertConfig(arguments, $"approval_policy=\"{approvalPolicy}\"");
+        AssertOptionValue(arguments, "-s", sandboxMode);
+    }
+
     [Fact]
     public void ResolveTargetLocalAiBaseUrl_RewritesDockerHostOnlyForMatchingSshTarget()
     {

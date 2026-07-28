@@ -10,7 +10,8 @@ public sealed record QueueAgentRunContext(
     TargetMachine Machine,
     string ProjectPath,
     string Prompt,
-    IReadOnlyList<string>? ImagePaths);
+    IReadOnlyList<string>? ImagePaths,
+    bool StartNewSession = false);
 
 public sealed record QueueAgentRunResult(
     int ExitCode,
@@ -67,7 +68,7 @@ public sealed class CodexQueueAgentRunner(ITargetCommandRunner targetRunner)
             context.Run.Model,
             context.Run.ModelEffort,
             context.Run.ModelSpeed,
-            context.Request.QueueTab?.CodexSessionId,
+            context.StartNewSession ? null : context.Request.QueueTab?.CodexSessionId,
             context.ImagePaths,
             context.Prompt,
             context.Request.PermissionMode,
@@ -165,7 +166,7 @@ public sealed class LocalCodexQueueAgentRunner(
             profile.LocalAiServerType,
             validation.NormalizedBaseUrl,
             runtimeModel);
-        var queueTab = context.Request.QueueTab;
+        var queueTab = context.StartNewSession ? null : context.Request.QueueTab;
         var resumableSessionId =
             string.Equals(
                 queueTab?.LocalCodexSessionRouteKey,

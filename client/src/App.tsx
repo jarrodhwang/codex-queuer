@@ -3398,7 +3398,6 @@ function QueueComposer({
   const [machineResourceError, setMachineResourceError] = useState('')
   const [machineResourceRefreshVersion, setMachineResourceRefreshVersion] = useState(0)
   const [approvalDialogOpen, setApprovalDialogOpen] = useState(false)
-  const [localCodexApprovalDialogOpen, setLocalCodexApprovalDialogOpen] = useState(false)
   const [composerValidationError, setComposerValidationError] = useState('')
   const [prompt, setPrompt] = useState('')
   const [attachments, setAttachments] = useState<LocalQueueAttachment[]>([])
@@ -3867,9 +3866,6 @@ function QueueComposer({
                   : localModelWarning
                     ? localModelWarning
                     : localCodexBlockingMessage
-                      || (permissionMode !== 'FullAccess'
-                        ? 'Local Codex requires Full access with explicit confirmation for this release.'
-                        : '')
   const selectedRequestModel = isLocalRunner ? localModel : requestModel.model
   const localApiPending = loadingLocalModels
   const localCodexPending = checkingLocalCodex
@@ -4009,7 +4005,10 @@ function QueueComposer({
     selectedLocalProfileId !== defaults.localModel.providerProfileId ||
     localModel !== defaults.localModel.model ||
     localReasoningEffort !== defaults.localModel.effort ||
-    localContextSize !== defaults.localModel.speed
+    localContextSize !== defaults.localModel.speed ||
+    generateCommit !== defaults.generateCommit ||
+    separateCommitSession !== defaults.separateCommitSession ||
+    permissionMode !== defaults.permissionMode
   const defaultsChanged = isLocalRunner ? localDefaultsChanged : codexDefaultsChanged
 
   const selectRunnerChoice = (nextChoice: RunnerChoice) => {
@@ -4020,8 +4019,9 @@ function QueueComposer({
     if (nextChoice === 'Local') {
       setAttachments([])
       setAttachmentError('')
-      setGenerateCommit(false)
-      setSeparateCommitSession(false)
+      setGenerateCommit(defaults.generateCommit)
+      setSeparateCommitSession(defaults.separateCommitSession)
+      setPermissionMode(defaults.permissionMode)
       return
     }
     if (nextChoice === 'Codex') {
@@ -4046,7 +4046,7 @@ function QueueComposer({
     setComposerValidationError('')
   }
 
-  const queueRequest = async (localCodexFullAccessConfirmed = false) => {
+  const queueRequest = async () => {
     if (!editingRequest) {
       requestCompletionNotificationPermission()
     }
@@ -4071,12 +4071,12 @@ function QueueComposer({
           ? requestModel.effort
           : localReasoningEffortForRequest,
         modelSpeed: isCodexRunner ? requestModel.speed : localContextSize,
-        generateCommit: isCodexRunner && generateCommit,
-        separateCommitSession: isCodexRunner && generateCommit && separateCommitSession,
+        generateCommit: (isCodexRunner || isLocalRunner) && generateCommit,
+        separateCommitSession: (isCodexRunner || isLocalRunner) && generateCommit && separateCommitSession,
         permissionMode,
         executionRunner: isLocalRunner ? 'OpenHandsCli' : 'CodexCli',
         providerProfileId: isLocalRunner ? selectedLocalProfile?.id ?? null : null,
-        openHandsAlwaysApproveConfirmed: isLocalRunner && localCodexFullAccessConfirmed,
+        openHandsAlwaysApproveConfirmed: false,
         commitModel: isCodexRunner ? commitModel.model : null,
         commitModelEffort: isCodexRunner ? commitModel.effort : null,
         commitModelSpeed: isCodexRunner ? commitModel.speed : null,
@@ -4118,8 +4118,8 @@ function QueueComposer({
           modelSpeed: isCodexRunner ? requestModel.speed : localContextSize,
           queueOrder: nextQueueOrder,
           status: 'Queued',
-          generateCommit: isCodexRunner && generateCommit,
-          separateCommitSession: isCodexRunner && generateCommit && separateCommitSession,
+          generateCommit: (isCodexRunner || isLocalRunner) && generateCommit,
+          separateCommitSession: (isCodexRunner || isLocalRunner) && generateCommit && separateCommitSession,
           permissionMode,
           executionRunner: isLocalRunner ? 'OpenHandsCli' : 'CodexCli',
           providerProfileId: isLocalRunner ? selectedLocalProfile?.id ?? null : null,
@@ -4172,12 +4172,6 @@ function QueueComposer({
         setComposerValidationError(localBlockingMessage)
         return
       }
-      if (permissionMode === 'FullAccess') {
-        void queueRequest(true)
-      } else {
-        setLocalCodexApprovalDialogOpen(true)
-      }
-      return
     }
     if (permissionMode === 'AskForApproval') {
       setApprovalDialogOpen(true)
@@ -4259,6 +4253,9 @@ function QueueComposer({
               effort: selectedLocalModelSupportsReasoningEffort === false ? '' : localReasoningEffort,
               speed: localContextSize,
             },
+            generateCommit: permissionMode !== 'ReadOnly' && generateCommit,
+            separateCommitSession: permissionMode !== 'ReadOnly' && generateCommit && separateCommitSession,
+            permissionMode,
           }
         : {
             ...defaults,
@@ -4611,7 +4608,7 @@ function QueueComposer({
         </div>
         <div className="composer-actions-row">
           <div className="commit-options">
-            {isCodexRunner ? (
+            {(isCodexRunner || isLocalRunner) ? (
               <div className="commit-toggle-group" aria-label="Commit options">
                 <label className={`commit-toggle ${generateCommit ? 'active' : ''} ${permissionMode === 'ReadOnly' ? 'disabled' : ''}`}>
                   <input
@@ -4658,35 +4655,6 @@ function QueueComposer({
                   ]}
                 />
               </div>
-            ) : isLocalRunner ? (
-              <div className="local-codex-compact-options" aria-label="Local Codex safety options">
-                <GlassButton
-                  className={`local-codex-permission-button ${permissionMode === 'FullAccess' ? 'active' : ''}`}
-                  variant={permissionMode === 'FullAccess' ? 'primary' : 'secondary'}
-                  size="icon"
-                  type="button"
-                  aria-pressed={permissionMode === 'FullAccess'}
-                  aria-label="Use Local Codex full access"
-                  title={`Use Local Codex full access. Codex CLI runs on ${selectedProject.machineName} with the selected sandbox and approval configuration. Queueing still requires confirmation.`}
-                  onClick={() => {
-                    setPermissionMode('FullAccess')
-                    setComposerValidationError('')
-                  }}
-                >
-                  <ShieldAlert size={16} />
-                </GlassButton>
-                <span title="Automatic commit generation is unavailable for Local Codex in this release.">
-                  <GlassButton
-                    variant="secondary"
-                    size="icon"
-                    type="button"
-                    disabled
-                    aria-label="Automatic commit generation unavailable for Local Codex"
-                  >
-                    <GitCommit size={16} />
-                  </GlassButton>
-                </span>
-              </div>
             ) : null}
           </div>
           <div className="button-row">
@@ -4730,24 +4698,6 @@ function QueueComposer({
           onConfirm={async () => {
             setApprovalDialogOpen(false)
             await queueRequest()
-          }}
-        />
-      )}
-      {localCodexApprovalDialogOpen && (
-        <ConfirmDialog
-          title="Allow Local Codex full access?"
-          description={(
-            <>
-              Codex CLI will run with <strong>Full access</strong> on <strong>{selectedProject.machineName}</strong>.
-              It can read, modify, and run commands in the selected project using that machine account’s permissions.
-              Queueing this Local request still requires explicit confirmation.
-            </>
-          )}
-          confirmLabel="Allow and queue"
-          onCancel={() => setLocalCodexApprovalDialogOpen(false)}
-          onConfirm={async () => {
-            setLocalCodexApprovalDialogOpen(false)
-            await queueRequest(true)
           }}
         />
       )}
