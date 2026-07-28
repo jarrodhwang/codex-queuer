@@ -152,6 +152,7 @@ public sealed class QueueWorkerLocalCodexAttachmentTests
                         persisted.QueueTab?.LocalCodexSessionRouteKey);
                     Assert.Null(persistedRun.CodexSessionId);
                     Assert.Null(persisted.QueueTab?.CodexSessionId);
+                    Assert.Contains("Local Codex task completed.", persistedRun.Output);
                 }
                 else
                 {

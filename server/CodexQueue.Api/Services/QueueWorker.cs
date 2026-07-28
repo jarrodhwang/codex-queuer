@@ -1570,6 +1570,11 @@ public sealed class QueueWorker(
             return;
         }
         run.CommandPreview = result.CommandPreview;
+        // Streaming stdout and stderr can arrive concurrently. AppendOutputAsync is
+        // intentionally best-effort for live updates, so reconcile the complete
+        // process capture here before marking the run finished. This guarantees the
+        // final assistant event is retained even when two live-output writes raced.
+        run.Output = MergeCompletedOutput(run.Output, result.Output);
         var executionRunner = kind == RunKind.Commit
             ? run.ExecutionRunner
             : request.ExecutionRunner;
@@ -2354,6 +2359,19 @@ public sealed class QueueWorker(
 
     private static string TrimOutput(string value) =>
         value.Length <= MaxStoredOutput ? value : value[^MaxStoredOutput..];
+
+    private static string MergeCompletedOutput(string streamedOutput, string completedOutput)
+    {
+        if (string.IsNullOrWhiteSpace(completedOutput)
+            || streamedOutput.Contains(completedOutput, StringComparison.Ordinal))
+        {
+            return streamedOutput;
+        }
+
+        return string.IsNullOrWhiteSpace(streamedOutput)
+            ? TrimOutput(completedOutput)
+            : TrimOutput(streamedOutput + Environment.NewLine + completedOutput);
+    }
 
     private static string StripShellCommandPreview(string output)
     {

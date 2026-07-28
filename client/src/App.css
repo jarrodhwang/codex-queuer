@@ -3386,6 +3386,7 @@
 
 .status-badge {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 7px;
   height: 24px;
@@ -3395,6 +3396,7 @@
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.62);
   font-size: 12px;
   font-weight: 800;
+  white-space: nowrap;
 }
 
 .status-badge-spinner {
@@ -3795,6 +3797,11 @@
   padding-left: 2px;
 }
 
+.completion-markdown ol > li::marker {
+  color: var(--accent-cool-strong);
+  font-weight: 900;
+}
+
 .completion-markdown code {
   border: 1px solid rgba(15, 23, 42, 0.1);
   border-radius: 5px;
@@ -3811,19 +3818,43 @@
   text-underline-offset: 2px;
 }
 
+.completion-code-shell {
+  overflow: hidden;
+  border: 1px solid rgba(30, 41, 59, 0.92);
+  border-radius: 10px;
+  background: #172033;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.14);
+}
+
+.completion-code-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.24);
+  background: rgba(15, 23, 42, 0.48);
+  color: #a5f3fc;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .completion-code-block {
   overflow: auto;
-  border: 1px solid rgba(15, 23, 42, 0.12);
-  border-radius: 8px;
-  background: #0f172a;
-  padding: 9px;
+  margin: 0;
+  background: transparent;
+  padding: 12px 14px;
 }
 
 .completion-code-block code {
   border: 0;
   background: transparent;
-  color: #dbeafe;
+  color: #f1f5f9;
   padding: 0;
+  font-size: 13px;
+  line-height: 1.6;
   white-space: pre;
 }
 
@@ -3988,7 +4019,12 @@
 
 .body-text-markdown .completion-code-block,
 .body-event-markdown .completion-code-block {
-  background: rgba(15, 23, 42, 0.92);
+  background: transparent;
+}
+
+.body-text-markdown .completion-code-block code,
+.body-event-markdown .completion-code-block code {
+  color: #f1f5f9;
 }
 
 .body-text-markdown .completion-markdown a,
@@ -4819,8 +4855,10 @@
 }
 
 .modal--large > .modal-body {
+  flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .modal-body,
@@ -5630,11 +5668,9 @@
 .work-report-procedure-scroll {
   display: grid;
   gap: 0.8rem;
-  max-height: min(48vh, 34rem);
-  overflow-y: auto;
-  overscroll-behavior: contain;
+  min-height: 0;
+  overflow: visible;
   padding: 0.15rem 0.35rem 0.15rem 0.15rem;
-  scrollbar-gutter: stable;
 }
 
 .work-report-procedure-scroll:focus-visible {
@@ -5801,8 +5837,12 @@
 .work-report-stage {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
+  align-items: start;
   gap: 0.65rem;
+}
+
+.work-report-stage .status-badge {
+  justify-self: end;
 }
 
 .work-report-stage strong,

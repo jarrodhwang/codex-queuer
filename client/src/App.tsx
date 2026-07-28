@@ -2317,7 +2317,6 @@ function MachineModal({
   const [editingId, setEditingId] = useState<string | undefined>()
   const [machineToDelete, setMachineToDelete] = useState<Machine | null>(null)
   const [testResults, setTestResults] = useState<Record<string, { testing: boolean; success?: boolean; output: string; checkedAt?: string }>>({})
-  const [localCodexTestResults, setLocalCodexTestResults] = useState<Record<string, { testing: boolean; result?: LocalCodexMachineTest; error?: string; checkedAt?: string }>>({})
 
   const selectedMachine = machines.find((machine) => machine.id === editingId)
 
@@ -2390,36 +2389,9 @@ function MachineModal({
     }
   }, [onError])
 
-  const testLocalCodex = useCallback(async (id: string) => {
-    setLocalCodexTestResults((current) => ({
-      ...current,
-      [id]: { testing: true, result: current[id]?.result },
-    }))
-    try {
-      const result = await api.testLocalCodex(id)
-      setLocalCodexTestResults((current) => ({
-        ...current,
-        [id]: { testing: false, result, checkedAt: new Date().toISOString() },
-      }))
-    } catch (cause) {
-      setLocalCodexTestResults((current) => ({
-        ...current,
-        [id]: {
-          testing: false,
-          error: cause instanceof Error ? cause.message : 'Local Codex CLI check failed.',
-          checkedAt: new Date().toISOString(),
-        },
-      }))
-    }
-  }, [])
-
-  const testRunners = useCallback(async (id: string) => {
-    await Promise.all([test(id), testLocalCodex(id)])
-  }, [test, testLocalCodex])
-
   const testAll = useCallback(async () => {
-    await Promise.all(machines.map((machine) => testRunners(machine.id)))
-  }, [machines, testRunners])
+    await Promise.all(machines.map((machine) => test(machine.id)))
+  }, [machines, test])
 
   useEffect(() => {
     void testAll()
@@ -2460,7 +2432,6 @@ function MachineModal({
           <div className="machine-list">
             {machines.map((machine) => {
               const result = testResults[machine.id]
-              const localCodexResult = localCodexTestResults[machine.id]
               return (
                 <button key={machine.id} type="button" className={`machine-card ${machine.id === editingId ? 'active' : ''}`} onClick={() => edit(machine)}>
                   <div className="machine-card-main">
@@ -2478,10 +2449,6 @@ function MachineModal({
                     <span className="machine-runner-check" title={result?.output || 'Codex CLI not checked'}>
                       Codex
                       <span className={`connection-dot ${result?.testing ? 'pending' : result?.success === true ? 'ok' : result?.success === false ? 'bad' : ''}`} />
-                    </span>
-                    <span className="machine-runner-check" title={localCodexResult?.error || localCodexResult?.result?.message || 'Local Codex CLI not checked'}>
-                      Local Codex
-                      <span className={`connection-dot ${localCodexResult?.testing ? 'pending' : localCodexResult?.result?.available ? 'ok' : localCodexResult?.result || localCodexResult?.error ? 'bad' : ''}`} />
                     </span>
                   </div>
                 </button>
@@ -2503,10 +2470,10 @@ function MachineModal({
                   variant="secondary"
                   size="sm"
                   type="button"
-                  onClick={() => testRunners(editingId)}
-                  disabled={testResults[editingId]?.testing || localCodexTestResults[editingId]?.testing}
+                  onClick={() => test(editingId)}
+                  disabled={testResults[editingId]?.testing}
                 >
-                  <Check size={13} /> {testResults[editingId]?.testing || localCodexTestResults[editingId]?.testing ? 'Checking' : 'Check'}
+                  <Check size={13} /> {testResults[editingId]?.testing ? 'Checking' : 'Check'}
                 </GlassButton>
               )}
               {editingId && (
@@ -2579,25 +2546,6 @@ function MachineModal({
                 {testResults[editingId].checkedAt && <span className="meta">{formatDate(testResults[editingId].checkedAt)}</span>}
               </div>
               <pre className="log-block">{testResults[editingId].output || 'Waiting for output...'}</pre>
-            </div>
-          )}
-          {editingId && localCodexTestResults[editingId] && (
-            <div className={`diagnostics-panel ${localCodexTestResults[editingId].result?.available ? 'diagnostics-panel--ok' : localCodexTestResults[editingId].testing ? '' : 'diagnostics-panel--bad'}`}>
-              <div className="row-between">
-                <strong>
-                  {localCodexTestResults[editingId].testing
-                    ? 'Checking Local Codex CLI'
-                    : localCodexTestResults[editingId].result?.available
-                      ? `Codex CLI ${localCodexTestResults[editingId].result?.version || 'available'}`
-                      : 'Local Codex unavailable'}
-                </strong>
-                {localCodexTestResults[editingId].checkedAt && <span className="meta">{formatDate(localCodexTestResults[editingId].checkedAt)}</span>}
-              </div>
-              <div className="meta">
-                {localCodexTestResults[editingId].error
-                  || localCodexTestResults[editingId].result?.message
-                  || 'Waiting for Local Codex CLI output…'}
-              </div>
             </div>
           )}
         </form>
@@ -8129,7 +8077,7 @@ type MarkdownBlock =
   | { kind: 'heading', level: 1 | 2 | 3, text: string }
   | { kind: 'paragraph', text: string }
   | { kind: 'list', ordered: boolean, items: string[] }
-  | { kind: 'code', code: string }
+  | { kind: 'code', code: string, language?: string }
 
 function CompletionMarkdown({ content }: { content: string }) {
   const blocks = useMemo(() => parseCompletionMarkdown(content), [content])
@@ -8159,9 +8107,15 @@ function renderMarkdownBlock(block: MarkdownBlock, index: number) {
     }
     case 'code':
       return (
-        <pre key={index} className="completion-code-block">
-          <code>{block.code}</code>
-        </pre>
+        <section key={index} className="completion-code-shell" aria-label={`${block.language || 'Code'} example`}>
+          <div className="completion-code-header">
+            <Code2 size={13} aria-hidden="true" />
+            <span>{block.language || 'Code'}</span>
+          </div>
+          <pre className="completion-code-block">
+            <code>{block.code}</code>
+          </pre>
+        </section>
       )
     case 'paragraph':
       return <p key={index}>{renderMarkdownInline(block.text)}</p>
@@ -8183,6 +8137,7 @@ function parseCompletionMarkdown(content: string): MarkdownBlock[] {
     }
 
     if (trimmed.startsWith('```')) {
+      const language = trimmed.slice(3).trim()
       const codeLines: string[] = []
       index += 1
       while (index < lines.length && !lines[index].trim().startsWith('```')) {
@@ -8190,7 +8145,7 @@ function parseCompletionMarkdown(content: string): MarkdownBlock[] {
         index += 1
       }
       if (index < lines.length) index += 1
-      blocks.push({ kind: 'code', code: codeLines.join('\n') })
+      blocks.push({ kind: 'code', code: codeLines.join('\n'), language: language || undefined })
       continue
     }
 
