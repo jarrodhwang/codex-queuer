@@ -7,12 +7,16 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CodexQueue.Api.Tests;
 
-public sealed class QueueWorkerOpenHandsAttachmentTests
+public sealed class QueueWorkerLocalCodexAttachmentTests
 {
+    private const string SavedSessionId = "0123456789abcdef0123456789abcdef";
+    private const string SavedRouteKey =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     [Theory]
     [InlineData(false, QueueStatus.Succeeded)]
     [InlineData(true, QueueStatus.Failed)]
-    public async Task OpenHandsAttachmentHandling_DoesNotFollowProjectControlDirectorySymlink(
+    public async Task LocalCodexAttachmentHandling_DoesNotFollowProjectControlDirectorySymlink(
         bool hasLegacyAttachments,
         QueueStatus expectedStatus)
     {
@@ -23,7 +27,7 @@ public sealed class QueueWorkerOpenHandsAttachmentTests
 
         var testRoot = Path.Combine(
             AppContext.BaseDirectory,
-            "openhands-worker-attachment-tests",
+            "local-codex-worker-attachment-tests",
             Guid.NewGuid().ToString("N"));
         var projectRoot = Path.Combine(testRoot, "project");
         var outsideRoot = Path.Combine(testRoot, "outside");
@@ -52,14 +56,14 @@ public sealed class QueueWorkerOpenHandsAttachmentTests
                 await db.Database.EnsureCreatedAsync();
                 var machine = new TargetMachine
                 {
-                    Name = "OpenHands test machine",
+                    Name = "Local Codex test machine",
                     Kind = MachineKind.Local,
                     Platform = MachinePlatform.Linux,
                     WorkingRoot = testRoot,
                 };
                 var project = new Project
                 {
-                    Name = "OpenHands test project",
+                    Name = "Local Codex test project",
                     Path = projectRoot,
                     Machine = machine,
                 };
@@ -71,17 +75,23 @@ public sealed class QueueWorkerOpenHandsAttachmentTests
                     MaximumConcurrency = 1,
                     Enabled = true,
                 };
+                var queueTab = new QueueTab
+                {
+                    Project = project,
+                    Name = "Local Codex session test",
+                };
                 var request = new CodexRequest
                 {
                     Id = requestId,
                     Project = project,
                     Machine = machine,
+                    QueueTab = queueTab,
                     ProviderProfile = profile,
                     ExecutionRunner = ExecutionRunner.OpenHandsCli,
                     ExecutionProjectPath = projectRoot,
                     ExecutionMachineUpdatedAt = machine.UpdatedAt,
                     Prompt = "do the task",
-                    Model = "openai/test-model",
+                    Model = "test-model",
                     PermissionMode = PermissionMode.FullAccess,
                     OpenHandsAlwaysApproveConfirmed = true,
                     AttachmentsJson = hasLegacyAttachments ? "[]" : null,
@@ -105,7 +115,7 @@ public sealed class QueueWorkerOpenHandsAttachmentTests
             var worker = new QueueWorker(
                 services.GetRequiredService<IServiceScopeFactory>(),
                 new TargetCommandRunner(NullLogger<TargetCommandRunner>.Instance),
-                new SuccessfulOpenHandsResolver(),
+                new SuccessfulLocalCodexResolver(),
                 new ProviderConcurrencyGate(),
                 NullLogger<QueueWorker>.Instance);
             try
@@ -124,6 +134,30 @@ public sealed class QueueWorkerOpenHandsAttachmentTests
                 }, TimeSpan.FromSeconds(5));
 
                 Assert.True(File.Exists(markerPath));
+
+                await using var verificationScope = services.CreateAsyncScope();
+                var verificationDb =
+                    verificationScope.ServiceProvider.GetRequiredService<AppDbContext>();
+                var persisted = await verificationDb.Requests
+                    .Include(item => item.QueueTab)
+                    .Include(item => item.Runs)
+                    .SingleAsync(item => item.Id == requestId);
+                var persistedRun = Assert.Single(persisted.Runs);
+                if (expectedStatus == QueueStatus.Succeeded)
+                {
+                    Assert.Equal(SavedSessionId, persistedRun.LocalCodexSessionId);
+                    Assert.Equal(SavedSessionId, persisted.QueueTab?.LocalCodexSessionId);
+                    Assert.Equal(
+                        SavedRouteKey,
+                        persisted.QueueTab?.LocalCodexSessionRouteKey);
+                    Assert.Null(persistedRun.CodexSessionId);
+                    Assert.Null(persisted.QueueTab?.CodexSessionId);
+                }
+                else
+                {
+                    Assert.Null(persistedRun.LocalCodexSessionId);
+                    Assert.Null(persisted.QueueTab?.LocalCodexSessionId);
+                }
             }
             finally
             {
@@ -160,9 +194,9 @@ public sealed class QueueWorkerOpenHandsAttachmentTests
         }
     }
 
-    private sealed class SuccessfulOpenHandsResolver : IQueueAgentRunnerResolver
+    private sealed class SuccessfulLocalCodexResolver : IQueueAgentRunnerResolver
     {
-        private readonly IQueueAgentRunner _runner = new SuccessfulOpenHandsRunner();
+        private readonly IQueueAgentRunner _runner = new SuccessfulLocalCodexRunner();
 
         public IQueueAgentRunner Resolve(ExecutionRunner executionRunner)
         {
@@ -171,7 +205,7 @@ public sealed class QueueWorkerOpenHandsAttachmentTests
         }
     }
 
-    private sealed class SuccessfulOpenHandsRunner : IQueueAgentRunner
+    private sealed class SuccessfulLocalCodexRunner : IQueueAgentRunner
     {
         public ExecutionRunner ExecutionRunner => ExecutionRunner.OpenHandsCli;
 
@@ -181,9 +215,9 @@ public sealed class QueueWorkerOpenHandsAttachmentTests
             CancellationToken cancellationToken) =>
             Task.FromResult(new QueueAgentRunResult(
                 0,
-                "OpenHands task completed.",
-                "openhands <safe-preview>",
-                OpenHandsConversationId: "0123456789abcdef0123456789abcdef",
-                RawDiagnosticOutput: "OpenHands task completed."));
+                "Local Codex task completed.",
+                "codex exec <safe-preview>",
+                LocalCodexSessionId: SavedSessionId,
+                LocalCodexSessionRouteKey: SavedRouteKey));
     }
 }

@@ -1,9 +1,29 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using CodexQueue.Api.Domain;
 
 namespace CodexQueue.Api.Services;
+
+public sealed record LocalCodexMachineCheck(
+    bool Available,
+    string? Version,
+    string Message,
+    bool TargetLocalAiChecked = false,
+    bool? TargetLocalAiReachable = null,
+    bool? TargetSelectedModelAvailable = null,
+    string? TargetLocalAiMessage = null);
+
+internal sealed record LocalCodexProviderOptions(
+    LocalAiServerType ServerType,
+    string BaseUrl,
+    int ContextWindow);
+
+internal sealed record LocalAiRouteCheck(
+    bool Reachable,
+    bool? SelectedModelAvailable,
+    string Message);
 
 public interface ITargetCommandRunner
 {
@@ -23,6 +43,26 @@ public interface ITargetCommandRunner
         PermissionMode permissionMode,
         Func<string, Task> onOutput,
         CancellationToken cancellationToken);
+
+    Task<CommandResult> RunLocalCodexAsync(
+        TargetMachine machine,
+        string projectPath,
+        LocalAiServerType serverType,
+        string baseUrl,
+        string model,
+        int contextWindow,
+        string? modelEffort,
+        string? codexSessionId,
+        string prompt,
+        PermissionMode permissionMode,
+        Func<string, Task> onOutput,
+        CancellationToken cancellationToken);
+
+    Task<LocalCodexMachineCheck> TestLocalCodexAsync(
+        TargetMachine machine,
+        CancellationToken cancellationToken,
+        string? localAiBaseUrl = null,
+        string? selectedModel = null);
 
     Task WriteAttachmentAsync(
         TargetMachine machine,
@@ -57,6 +97,68 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
     public const string UnixRemotePathSetup = "export PATH=\"$HOME/.local/bin:$HOME/bin:$HOME/.npm-global/bin:$HOME/.volta/bin:$HOME/.asdf/shims:$HOME/.cargo/bin:$HOME/.local/share/pnpm:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH\"; if [ -n \"${ZSH_VERSION-}\" ]; then setopt nonomatch; fi; for nodeBin in \"$HOME\"/.nvm/versions/node/*/bin; do [ -d \"$nodeBin\" ] && PATH=\"$nodeBin:$PATH\"; done; export PATH;";
     private static readonly TimeSpan CodexFirstOutputTimeout = TimeSpan.FromSeconds(75);
     private static readonly TimeSpan RateLimitsTimeout = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan LocalAiProbeTimeout = TimeSpan.FromSeconds(15);
+    private const int MaximumLocalAiProbeBytes = 1024 * 1024;
+    private static readonly string[] AllowedLocalCodexEnvironmentVariables =
+    [
+        "APPDATA",
+        "ASDF_DATA_DIR",
+        "CARGO_HOME",
+        "CODEX_HOME",
+        "COMSPEC",
+        "CUDA_HOME",
+        "DOTNET_ROOT",
+        "DOTNET_ROOT_X64",
+        "GOPATH",
+        "GOROOT",
+        "GRADLE_HOME",
+        "HOME",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "JAVA_HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LOCALAPPDATA",
+        "LOGNAME",
+        "M2_HOME",
+        "NPM_CONFIG_PREFIX",
+        "NVM_BIN",
+        "NVM_DIR",
+        "PATH",
+        "PATHEXT",
+        "PNPM_HOME",
+        "ProgramData",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "PSModulePath",
+        "PYENV_ROOT",
+        "REQUESTS_CA_BUNDLE",
+        "ROCM_PATH",
+        "SHELL",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "SystemDrive",
+        "SystemRoot",
+        "TEMP",
+        "TERM",
+        "TMP",
+        "TMPDIR",
+        "TZ",
+        "USER",
+        "USERNAME",
+        "USERPROFILE",
+        "VIRTUAL_ENV",
+        "VOLTA_HOME",
+        "WINDIR",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+    ];
+    private static readonly Regex CodexVersionPattern = new(
+        @"\bcodex(?:-cli)?\s+(?<version>[0-9]+(?:\.[0-9]+){1,3}(?:[-+][0-9A-Za-z.-]+)?)\b",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
     // Attachment transfer commands intentionally produce no output, so the normal
     // first-output watchdog cannot protect them. Bound the entire operation instead
     // so an unavailable SSH target cannot hold a queue lane indefinitely.
@@ -118,6 +220,110 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         PermissionMode permissionMode,
         Func<string, Task> onOutput,
         CancellationToken cancellationToken)
+        => RunCodexCoreAsync(
+            machine,
+            projectPath,
+            model,
+            modelEffort,
+            modelSpeed,
+            codexSessionId,
+            imagePaths,
+            prompt,
+            permissionMode,
+            onOutput,
+            localProvider: null,
+            cancellationToken);
+
+    public async Task<CommandResult> RunLocalCodexAsync(
+        TargetMachine machine,
+        string projectPath,
+        LocalAiServerType serverType,
+        string baseUrl,
+        string model,
+        int contextWindow,
+        string? modelEffort,
+        string? codexSessionId,
+        string prompt,
+        PermissionMode permissionMode,
+        Func<string, Task> onOutput,
+        CancellationToken cancellationToken)
+    {
+        if (!Enum.IsDefined(serverType))
+        {
+            throw new ArgumentOutOfRangeException(nameof(serverType), "Local AI server type is invalid.");
+        }
+
+        if (contextWindow <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(contextWindow),
+                "Local model context window must be greater than zero.");
+        }
+
+        if (!AiProviderService.TryNormalizeBaseUrl(
+                AiProviderSource.Local,
+                baseUrl,
+                out var normalizedBaseUrl,
+                out var baseUrlError))
+        {
+            throw new ArgumentException(baseUrlError, nameof(baseUrl));
+        }
+
+        var targetBaseUrl = ResolveTargetLocalAiBaseUrl(machine, normalizedBaseUrl);
+        var localModel = AiProviderService.QualifyModel(AiProviderSource.Local, model);
+        var routeCheck = await ProbeLocalAiFromTargetAsync(
+            machine,
+            targetBaseUrl,
+            localModel,
+            cancellationToken);
+        if (!routeCheck.Reachable)
+        {
+            throw new InvalidOperationException(
+                "Local Codex was not started because the selected machine cannot reach the Local AI server. "
+                + routeCheck.Message);
+        }
+
+        if (routeCheck.SelectedModelAvailable == false)
+        {
+            throw new InvalidOperationException(
+                "Local Codex was not started because the selected model is not installed on the Local AI server as seen from the selected machine.");
+        }
+
+        if (routeCheck.SelectedModelAvailable is null)
+        {
+            throw new InvalidOperationException(
+                "Local Codex was not started because the selected machine could not verify the selected model. "
+                + routeCheck.Message);
+        }
+
+        return await RunCodexCoreAsync(
+            machine,
+            projectPath,
+            localModel,
+            modelEffort,
+            modelSpeed: null,
+            codexSessionId,
+            imagePaths: null,
+            prompt,
+            permissionMode,
+            onOutput,
+            new LocalCodexProviderOptions(serverType, targetBaseUrl, contextWindow),
+            cancellationToken);
+    }
+
+    private Task<CommandResult> RunCodexCoreAsync(
+        TargetMachine machine,
+        string projectPath,
+        string model,
+        string? modelEffort,
+        string? modelSpeed,
+        string? codexSessionId,
+        IReadOnlyList<string>? imagePaths,
+        string prompt,
+        PermissionMode permissionMode,
+        Func<string, Task> onOutput,
+        LocalCodexProviderOptions? localProvider,
+        CancellationToken cancellationToken)
     {
         if (machine.Kind == MachineKind.Local)
         {
@@ -129,7 +335,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 codexSessionId,
                 imagePaths,
                 permissionMode,
-                disableWindowsSandbox: false);
+                disableWindowsSandbox: false,
+                localProvider);
             if (machine.TargetsWindows())
             {
                 var command = BuildPowerShellCodexCommandSetup() + "; & $codexCommand " + string.Join(" ", arguments.Select(QuotePowerShellValue));
@@ -137,27 +344,36 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                     "powershell",
                     new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command },
                     projectPath,
-                    BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId),
+                    BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, localProvider),
                     onOutput,
                     cancellationToken,
                     firstProcessOutputTimeout: CodexFirstOutputTimeout,
-                    standardInput: prompt);
+                    standardInput: prompt,
+                    environment: localProvider is null
+                        ? null
+                        : BuildSanitizedLocalCodexEnvironment());
             }
 
             return RunProcessAsync(
                 "codex",
                 arguments,
                 projectPath,
-                BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId),
+                BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, localProvider),
                 onOutput,
                 cancellationToken,
                 firstProcessOutputTimeout: CodexFirstOutputTimeout,
-                standardInput: prompt);
+                standardInput: prompt,
+                environment: localProvider is null
+                    ? null
+                    : BuildSanitizedLocalCodexEnvironment());
         }
 
         if (machine.TargetsWindows())
         {
             var windowsCommand = BuildPowerShellSetLocationCommand(projectPath) + "; "
+                + (localProvider is null
+                    ? ""
+                    : BuildPowerShellLocalCodexEnvironmentSanitizer() + "; ")
                 + BuildPowerShellCodexCommandSetup() + "; & $codexCommand "
                 + string.Join(" ", BuildCodexArguments(
                     projectPath,
@@ -167,24 +383,33 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                     codexSessionId,
                     imagePaths,
                     permissionMode,
-                    disableWindowsSandbox: true).Select(QuotePowerShellValue));
+                    disableWindowsSandbox: true,
+                    localProvider).Select(QuotePowerShellValue));
 
             return RunSshAsync(
                 machine,
                 BuildPowerShellRemoteCommand(windowsCommand),
-                "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId),
+                "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, localProvider),
                 onOutput,
                 cancellationToken,
                 firstProcessOutputTimeout: CodexFirstOutputTimeout,
                 standardInput: prompt);
         }
 
-        var remoteCommand = string.Join(" ", new[]
-        {
+        var remoteCommandParts = new List<string>();
+        remoteCommandParts.AddRange([
             UnixRemotePathSetup,
             "cd",
             Quote(projectPath),
             "&&",
+        ]);
+        if (localProvider is not null)
+        {
+            remoteCommandParts.Add("{");
+            remoteCommandParts.Add(BuildUnixLocalCodexEnvironmentSanitizer());
+        }
+
+        remoteCommandParts.AddRange([
             "codex",
             string.Join(" ", BuildCodexArguments(
                 projectPath,
@@ -194,17 +419,322 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 codexSessionId,
                 imagePaths,
                 permissionMode,
-                disableWindowsSandbox: false).Select(Quote))
-        });
+                disableWindowsSandbox: false,
+                localProvider).Select(Quote))
+        ]);
+        if (localProvider is not null)
+        {
+            remoteCommandParts.Add("; }");
+        }
+
+        var remoteCommand = string.Join(" ", remoteCommandParts);
 
         return RunSshAsync(
             machine,
             remoteCommand,
-            "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId),
+            "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, localProvider),
             onOutput,
             cancellationToken,
             firstProcessOutputTimeout: CodexFirstOutputTimeout,
             standardInput: prompt);
+    }
+
+    public async Task<LocalCodexMachineCheck> TestLocalCodexAsync(
+        TargetMachine machine,
+        CancellationToken cancellationToken,
+        string? localAiBaseUrl = null,
+        string? selectedModel = null)
+    {
+        CommandResult cliCheck;
+        try
+        {
+            cliCheck = await TestMachineAsync(
+                machine,
+                static _ => Task.CompletedTask,
+                cancellationToken);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException
+                                   or System.ComponentModel.Win32Exception
+                                   or IOException
+                                   or TimeoutException)
+        {
+            logger.LogWarning(ex, "Local Codex readiness check failed for machine {MachineId}", machine.Id);
+            return new LocalCodexMachineCheck(
+                false,
+                null,
+                "Codex CLI could not be checked on the selected machine.");
+        }
+
+        var versionMatch = CodexVersionPattern.Match(cliCheck.Output);
+        var version = versionMatch.Success ? versionMatch.Groups["version"].Value : null;
+        var available = cliCheck.Success;
+        var message = available
+            ? "Codex CLI is available on the selected machine."
+            : "Codex CLI is missing or unavailable on the selected machine.";
+
+        if (string.IsNullOrWhiteSpace(localAiBaseUrl))
+        {
+            return new LocalCodexMachineCheck(available, version, message);
+        }
+
+        LocalAiRouteCheck routeCheck;
+        try
+        {
+            routeCheck = await ProbeLocalAiFromTargetAsync(
+                machine,
+                ResolveTargetLocalAiBaseUrl(machine, localAiBaseUrl),
+                selectedModel,
+                cancellationToken);
+        }
+        catch (ArgumentException ex)
+        {
+            routeCheck = new LocalAiRouteCheck(false, null, ex.Message);
+        }
+
+        return new LocalCodexMachineCheck(
+            available,
+            version,
+            message,
+            TargetLocalAiChecked: true,
+            TargetLocalAiReachable: routeCheck.Reachable,
+            TargetSelectedModelAvailable: routeCheck.SelectedModelAvailable,
+            TargetLocalAiMessage: routeCheck.Message);
+    }
+
+    internal async Task<LocalAiRouteCheck> ProbeLocalAiFromTargetAsync(
+        TargetMachine machine,
+        string baseUrl,
+        string? selectedModel,
+        CancellationToken cancellationToken)
+    {
+        if (!AiProviderService.TryNormalizeBaseUrl(
+                AiProviderSource.Local,
+                baseUrl,
+                out var normalizedBaseUrl,
+                out var baseUrlError))
+        {
+            throw new ArgumentException(baseUrlError, nameof(baseUrl));
+        }
+
+        var modelsEndpoint = normalizedBaseUrl.TrimEnd('/') + "/models";
+        CommandResult capture;
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(LocalAiProbeTimeout);
+            if (machine.TargetsWindows())
+            {
+                var command = BuildPowerShellLocalAiProbeCommand(modelsEndpoint);
+                capture = machine.Kind == MachineKind.Local
+                    ? await RunProcessAsync(
+                        "powershell",
+                        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+                        null,
+                        "check Local AI /v1/models",
+                        static _ => Task.CompletedTask,
+                        timeout.Token,
+                        executionTimeout: LocalAiProbeTimeout)
+                    : await RunSshAsync(
+                        machine,
+                        BuildPowerShellRemoteCommand(command),
+                        "ssh " + machine.Host + " check Local AI /v1/models",
+                        static _ => Task.CompletedTask,
+                        timeout.Token,
+                        executionTimeout: LocalAiProbeTimeout);
+            }
+            else
+            {
+                var command = BuildUnixLocalAiProbeCommand(modelsEndpoint);
+                capture = machine.Kind == MachineKind.Local
+                    ? await RunProcessAsync(
+                        "/bin/sh",
+                        ["-c", command],
+                        null,
+                        "check Local AI /v1/models",
+                        static _ => Task.CompletedTask,
+                        timeout.Token,
+                        executionTimeout: LocalAiProbeTimeout)
+                    : await RunSshAsync(
+                        machine,
+                        command,
+                        "ssh " + machine.Host + " check Local AI /v1/models",
+                        static _ => Task.CompletedTask,
+                        timeout.Token,
+                        executionTimeout: LocalAiProbeTimeout);
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return new LocalAiRouteCheck(
+                false,
+                null,
+                "The Local AI server check timed out on the selected machine.");
+        }
+        catch (Exception ex) when (ex is InvalidOperationException
+                                   or System.ComponentModel.Win32Exception
+                                   or IOException
+                                   or TimeoutException)
+        {
+            logger.LogWarning(ex, "Target-side Local AI check failed for machine {MachineId}", machine.Id);
+            return new LocalAiRouteCheck(
+                false,
+                null,
+                "Codex Queue could not run the Local AI server check on the selected machine.");
+        }
+
+        if (!capture.Success)
+        {
+            var diagnostic = SafeProbeDiagnostic(capture.Output);
+            return new LocalAiRouteCheck(
+                false,
+                null,
+                "The selected machine could not reach the Local AI server /v1/models endpoint."
+                + (string.IsNullOrWhiteSpace(diagnostic) ? "" : " " + diagnostic));
+        }
+
+        return ParseLocalAiProbeResponse(capture.Output, selectedModel);
+    }
+
+    internal static string ResolveTargetLocalAiBaseUrl(TargetMachine machine, string baseUrl)
+    {
+        ArgumentNullException.ThrowIfNull(machine);
+
+        if (machine.Kind != MachineKind.Ssh
+            || !string.Equals(
+                machine.Host?.Trim(),
+                "host.docker.internal",
+                StringComparison.OrdinalIgnoreCase)
+            || !Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri)
+            || !string.Equals(
+                uri.Host,
+                "host.docker.internal",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return baseUrl;
+        }
+
+        return new UriBuilder(uri)
+        {
+            Host = "127.0.0.1",
+        }.Uri.AbsoluteUri.TrimEnd('/');
+    }
+
+    internal static string BuildUnixLocalAiProbeCommand(string modelsEndpoint) =>
+        UnixRemotePathSetup
+        + " umask 077; ulimit -f 2048 >/dev/null 2>&1 || true"
+        + "; probe_url=" + Quote(modelsEndpoint)
+        + "; probe_file=$(mktemp \"${TMPDIR:-/tmp}/codex-queue-local-ai.XXXXXX\")"
+        + " || { printf '%s\\n' 'Could not create a temporary Local AI probe file.' >&2; exit 74; }"
+        + "; cleanup_local_ai_probe() { status=$?; trap - EXIT HUP INT TERM"
+        + "; rm -f -- \"$probe_file\"; exit \"$status\"; }"
+        + "; trap cleanup_local_ai_probe EXIT HUP INT TERM"
+        + "; fetch_status=0"
+        + "; if command -v curl >/dev/null 2>&1; then"
+        + " curl --fail --silent --show-error --connect-timeout 4 --max-time 8"
+        + " --max-filesize " + MaximumLocalAiProbeBytes
+        + " --proto '=http,https' --proto-redir '=http,https'"
+        + " \"$probe_url\" > \"$probe_file\" || fetch_status=$?"
+        + "; elif command -v wget >/dev/null 2>&1; then"
+        + " wget -q -T 8 -t 1 -O \"$probe_file\" \"$probe_url\" || fetch_status=$?"
+        + "; else printf '%s\\n' 'curl or wget is required for the Local AI server check.' >&2; exit 127"
+        + "; fi"
+        + "; if [ \"$fetch_status\" -ne 0 ]; then"
+        + " printf '%s\\n' 'Target Local AI request failed.' >&2; exit \"$fetch_status\"; fi"
+        + "; probe_size=$(wc -c < \"$probe_file\" | tr -d '[:space:]')"
+        + "; case \"$probe_size\" in *[!0-9]*|'')"
+        + " printf '%s\\n' 'Could not determine Local AI response size.' >&2; exit 65;; esac"
+        + "; if [ \"$probe_size\" -gt " + MaximumLocalAiProbeBytes + " ]; then"
+        + " printf '%s\\n' 'Local AI model catalog exceeded the 1 MiB response limit.' >&2; exit 65; fi"
+        + "; cat \"$probe_file\"";
+
+    internal static string BuildPowerShellLocalAiProbeCommand(string modelsEndpoint) =>
+        "$response = Invoke-WebRequest -UseBasicParsing -Method Get -Uri "
+        + QuotePowerShellValue(modelsEndpoint)
+        + " -TimeoutSec 10 -ErrorAction Stop"
+        + "; $content = [string]$response.Content"
+        + "; if ([Text.Encoding]::UTF8.GetByteCount($content) -gt "
+        + MaximumLocalAiProbeBytes
+        + ") { throw 'Local AI model catalog exceeded the 1 MiB response limit.' }"
+        + "; [Console]::Out.Write($content)";
+
+    internal static LocalAiRouteCheck ParseLocalAiProbeResponse(
+        string output,
+        string? selectedModel)
+    {
+        var jsonStart = output.IndexOf('{');
+        var jsonEnd = output.LastIndexOf('}');
+        if (jsonStart < 0 || jsonEnd < jsonStart)
+        {
+            return new LocalAiRouteCheck(
+                true,
+                null,
+                "The selected machine reached the Local AI server, but /v1/models returned an unreadable model catalog.");
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(output[jsonStart..(jsonEnd + 1)]);
+            if (!document.RootElement.TryGetProperty("data", out var data)
+                || data.ValueKind != JsonValueKind.Array)
+            {
+                return new LocalAiRouteCheck(
+                    true,
+                    null,
+                    "The selected machine reached the Local AI server, but /v1/models returned an unreadable model catalog.");
+            }
+
+            var models = data.EnumerateArray()
+                .Where(item => item.ValueKind == JsonValueKind.Object
+                               && item.TryGetProperty("id", out var id)
+                               && id.ValueKind == JsonValueKind.String)
+                .Select(item => item.GetProperty("id").GetString())
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Select(id => id!.Trim())
+                .Take(1_001)
+                .ToArray();
+            if (models.Length > 1_000)
+            {
+                return new LocalAiRouteCheck(
+                    true,
+                    null,
+                    "The selected machine reached the Local AI server, but its model catalog exceeded the 1,000-model limit.");
+            }
+
+            if (string.IsNullOrWhiteSpace(selectedModel))
+            {
+                return new LocalAiRouteCheck(
+                    true,
+                    null,
+                    "The selected machine reached the Local AI server and read its /v1/models catalog. "
+                    + "Responses generation is checked when a task starts.");
+            }
+
+            var available = models.Any(model =>
+                string.Equals(model, selectedModel.Trim(), StringComparison.Ordinal));
+            return new LocalAiRouteCheck(
+                true,
+                available,
+                available
+                    ? "The selected machine can reach /v1/models and the selected model is available. "
+                      + "Responses generation is checked when a task starts."
+                    : "The selected machine can reach /v1/models, but the selected model is not installed.");
+        }
+        catch (JsonException)
+        {
+            return new LocalAiRouteCheck(
+                true,
+                null,
+                "The selected machine reached the Local AI server, but /v1/models did not return valid JSON.");
+        }
+    }
+
+    private static string SafeProbeDiagnostic(string value)
+    {
+        var diagnostic = StripCommandPreview(value)
+            .Replace('\r', ' ')
+            .Replace('\n', ' ')
+            .Trim();
+        return diagnostic.Length <= 500 ? diagnostic : diagnostic[..500];
     }
 
     public async Task WriteAttachmentAsync(
@@ -458,7 +988,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         TimeSpan? firstProcessOutputTimeout = null,
         string? standardInput = null,
         Func<string, bool>? completionOutputPredicate = null,
-        TimeSpan? executionTimeout = null)
+        TimeSpan? executionTimeout = null,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -477,6 +1008,15 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         foreach (var argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);
+        }
+
+        if (environment is not null)
+        {
+            startInfo.Environment.Clear();
+            foreach (var pair in environment)
+            {
+                startInfo.Environment[pair.Key] = pair.Value;
+            }
         }
 
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
@@ -587,17 +1127,17 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 }
                 else
                 {
-                var timeoutTask = Task.Delay(timeout, cancellationToken);
-                var firstSignal = await Task.WhenAny(firstProcessOutput.Task, waitForExit, timeoutTask);
-                if (firstSignal == timeoutTask)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    var message = "Process produced no useful stdout/stderr for " + Math.Round(timeout.TotalSeconds) + " seconds after launch. Check target machine SSH, Codex auth, model availability, project path, and whether Codex is waiting for stdin." + Environment.NewLine;
-                    output.Append(message);
-                    await onOutput(message);
-                    TryKill(process);
-                    throw new TimeoutException(message.Trim());
-                }
+                    var timeoutTask = Task.Delay(timeout, cancellationToken);
+                    var firstSignal = await Task.WhenAny(firstProcessOutput.Task, waitForExit, timeoutTask);
+                    if (firstSignal == timeoutTask)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var message = "Process produced no useful stdout/stderr for " + Math.Round(timeout.TotalSeconds) + " seconds after launch. Check target machine SSH, Codex auth, model availability, project path, and whether Codex is waiting for stdin." + Environment.NewLine;
+                        output.Append(message);
+                        await onOutput(message);
+                        TryKill(process);
+                        throw new TimeoutException(message.Trim());
+                    }
                 }
             }
 
@@ -624,6 +1164,56 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         var outputText = output.ToString();
         return new CommandResult(process.ExitCode, outputText, preview, ExtractCodexSessionId(outputText));
     }
+
+    internal static IReadOnlyDictionary<string, string> BuildSanitizedLocalCodexEnvironment()
+    {
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var name in AllowedLocalCodexEnvironmentVariables)
+        {
+            var value = Environment.GetEnvironmentVariable(name);
+            if (!string.IsNullOrEmpty(value))
+            {
+                environment[name] = value;
+            }
+        }
+
+        return environment;
+    }
+
+    internal static string BuildUnixLocalCodexEnvironmentSanitizer()
+    {
+        var allowedNames = AllowedLocalCodexEnvironmentVariables
+            .Where(IsPosixEnvironmentVariableName)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(name => name, StringComparer.Ordinal);
+        // exec replaces the SSH login shell, so the Codex process cannot inspect
+        // a still-running parent shell that retained excluded environment values.
+        return "set -- env -i; for environment_name in "
+            + string.Join(" ", allowedNames)
+            + "; do eval \"environment_value=\\${$environment_name-}\""
+            + "; if [ -n \"$environment_value\" ]; then"
+            + " set -- \"$@\" \"$environment_name=$environment_value\"; fi"
+            + "; done; exec \"$@\"";
+    }
+
+    internal static string BuildPowerShellLocalCodexEnvironmentSanitizer()
+    {
+        var allowedNames = AllowedLocalCodexEnvironmentVariables
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .Select(QuotePowerShellValue);
+        return "$allowedLocalCodexEnvironment = @("
+            + string.Join(",", allowedNames)
+            + "); Get-ChildItem Env: | Where-Object { $_.Name -notin $allowedLocalCodexEnvironment } "
+            + "| Remove-Item -ErrorAction SilentlyContinue";
+    }
+
+    private static bool IsPosixEnvironmentVariableName(string name) =>
+        name.Length > 0
+        && (name[0] == '_' || char.IsAsciiLetter(name[0]))
+        && name.Skip(1).All(character =>
+            character == '_'
+            || char.IsAsciiLetterOrDigit(character));
 
     private static bool HasUsefulProcessOutput(string chunk)
     {
@@ -714,13 +1304,36 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         return "powershell -NoLogo -NoProfile -NonInteractive -OutputFormat Text -ExecutionPolicy Bypass -EncodedCommand " + encodedCommand;
     }
 
-    private static IEnumerable<string> BuildModelConfigArguments(string? modelEffort, string? modelSpeed)
+    private static IEnumerable<string> BuildModelConfigArguments(
+        string? modelEffort,
+        string? modelSpeed,
+        LocalCodexProviderOptions? localProvider)
     {
         var arguments = new List<string>();
+        if (localProvider is not null)
+        {
+            arguments.Add("-c");
+            arguments.Add("model_provider=\"codex_queue_local\"");
+            arguments.Add("-c");
+            arguments.Add(
+                "model_providers.codex_queue_local.name="
+                + ToTomlString(LocalServerDisplayName(localProvider.ServerType)));
+            arguments.Add("-c");
+            arguments.Add(
+                "model_providers.codex_queue_local.base_url="
+                + ToTomlString(localProvider.BaseUrl));
+            arguments.Add("-c");
+            arguments.Add("model_providers.codex_queue_local.wire_api=\"responses\"");
+            arguments.Add("-c");
+            arguments.Add("model_providers.codex_queue_local.requires_openai_auth=false");
+            arguments.Add("-c");
+            arguments.Add("model_context_window=" + localProvider.ContextWindow);
+        }
+
         if (!string.IsNullOrWhiteSpace(modelEffort))
         {
             arguments.Add("-c");
-            arguments.Add("model_reasoning_effort=\"" + modelEffort + "\"");
+            arguments.Add("model_reasoning_effort=" + ToTomlString(modelEffort));
         }
 
         if (string.Equals(modelSpeed, "priority", StringComparison.OrdinalIgnoreCase))
@@ -732,7 +1345,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         return arguments;
     }
 
-    private static IReadOnlyList<string> BuildCodexArguments(
+    internal static IReadOnlyList<string> BuildCodexArguments(
         string projectPath,
         string model,
         string? modelEffort,
@@ -740,7 +1353,8 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         string? codexSessionId,
         IReadOnlyList<string>? imagePaths,
         PermissionMode permissionMode,
-        bool disableWindowsSandbox)
+        bool disableWindowsSandbox,
+        LocalCodexProviderOptions? localProvider = null)
     {
         var arguments = new List<string> { "exec" };
 
@@ -756,7 +1370,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             arguments.Add("never");
         }
 
-        arguments.AddRange(BuildModelConfigArguments(modelEffort, modelSpeed));
+        arguments.AddRange(BuildModelConfigArguments(modelEffort, modelSpeed, localProvider));
         arguments.Add("-m");
         arguments.Add(model);
         arguments.Add("--skip-git-repo-check");
@@ -822,9 +1436,31 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         return null;
     }
 
-    private static string BuildCodexPreview(string model, string? modelEffort, string? modelSpeed, string? codexSessionId)
+    private static string BuildCodexPreview(
+        string model,
+        string? modelEffort,
+        string? modelSpeed,
+        string? codexSessionId,
+        LocalCodexProviderOptions? localProvider)
     {
-        var parts = new List<string> { string.IsNullOrWhiteSpace(codexSessionId) ? "codex exec -m " + model : "codex exec resume -m " + model };
+        var parts = new List<string>
+        {
+            string.IsNullOrWhiteSpace(codexSessionId)
+                ? "codex exec -m " + model
+                : "codex exec resume -m " + model
+        };
+        if (localProvider is not null)
+        {
+            parts.Add(
+                "["
+                + LocalServerDisplayName(localProvider.ServerType)
+                + " @ "
+                + localProvider.BaseUrl
+                + ", context "
+                + localProvider.ContextWindow
+                + "]");
+        }
+
         if (!string.IsNullOrWhiteSpace(modelEffort))
         {
             parts.Add("-c model_reasoning_effort=\"" + modelEffort + "\"");
@@ -842,4 +1478,15 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
         return string.Join(" ", parts);
     }
+
+    private static string ToTomlString(string value) => JsonSerializer.Serialize(value);
+
+    private static string LocalServerDisplayName(LocalAiServerType serverType) =>
+        serverType switch
+        {
+            LocalAiServerType.Ollama => "Ollama",
+            LocalAiServerType.LmStudio => "LM Studio",
+            LocalAiServerType.LlamaCpp => "llama.cpp",
+            _ => throw new ArgumentOutOfRangeException(nameof(serverType)),
+        };
 }

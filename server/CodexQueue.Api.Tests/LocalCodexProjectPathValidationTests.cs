@@ -3,7 +3,7 @@ using CodexQueue.Api.Endpoints;
 
 namespace CodexQueue.Api.Tests;
 
-public sealed class OpenHandsProjectPathValidationTests
+public sealed class LocalCodexProjectPathValidationTests
 {
     [Theory]
     [InlineData("/")]
@@ -21,7 +21,7 @@ public sealed class OpenHandsProjectPathValidationTests
                 : MachinePlatform.Linux,
         };
 
-        Assert.False(ApiEndpoints.IsOpenHandsProjectPathScoped(machine, path));
+        Assert.False(ApiEndpoints.IsLocalCodexProjectPathScoped(machine, path));
     }
 
     [Theory]
@@ -39,7 +39,7 @@ public sealed class OpenHandsProjectPathValidationTests
             Platform = MachinePlatform.Linux,
         };
 
-        Assert.False(ApiEndpoints.IsOpenHandsProjectPathScoped(machine, path));
+        Assert.False(ApiEndpoints.IsLocalCodexProjectPathScoped(machine, path));
     }
 
     [Theory]
@@ -55,6 +55,6 @@ public sealed class OpenHandsProjectPathValidationTests
             Platform = MachinePlatform.Linux,
         };
 
-        Assert.True(ApiEndpoints.IsOpenHandsProjectPathScoped(machine, path));
+        Assert.True(ApiEndpoints.IsLocalCodexProjectPathScoped(machine, path));
     }
 }

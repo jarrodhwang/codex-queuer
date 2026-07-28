@@ -3,6 +3,7 @@ export type MachinePlatform = 'Auto' | 'Linux' | 'MacOs' | 'Windows'
 export type ExecutionRunner = 'CodexCli' | 'OpenHandsCli'
 export type AiProviderSource = 'OpenAi' | 'Anthropic' | 'Local'
 export type ModelDiscoveryMode = 'Auto' | 'Ollama' | 'OpenAi'
+export type LocalAiServerType = 'Ollama' | 'LmStudio' | 'LlamaCpp'
 export type ProviderHealthStatus = 'Unknown' | 'Healthy' | 'Offline'
 export type QueueStatus =
   | 'Queued'
@@ -93,6 +94,7 @@ export type QueueTab = {
   projectId: string
   name: string
   openHandsConversationId?: string | null
+  localCodexSessionId?: string | null
   createdAt: string
   updatedAt: string
 }
@@ -133,6 +135,7 @@ export type CodexRun = {
   providerProfileName?: string | null
   providerSource?: AiProviderSource | null
   openHandsConversationId?: string | null
+  localCodexSessionId?: string | null
   model: string
   modelEffort?: string | null
   modelSpeed?: string | null
@@ -209,6 +212,7 @@ export type Session = {
   providerProfileName?: string | null
   providerSource?: AiProviderSource | null
   openHandsConversationId?: string | null
+  localCodexSessionId?: string | null
 }
 
 export type FileTreeEntry = {
@@ -291,6 +295,7 @@ export type AiProviderProfile = {
   id: string
   name: string
   source: AiProviderSource
+  localAiServerType: LocalAiServerType
   baseUrl: string
   modelDiscoveryMode: ModelDiscoveryMode
   apiKeyEnvironmentVariable?: string | null
@@ -309,6 +314,7 @@ export type AiProviderProfile = {
 export type SaveAiProviderProfileRequest = {
   name: string
   source: AiProviderSource
+  localAiServerType: LocalAiServerType
   baseUrl: string
   modelDiscoveryMode: ModelDiscoveryMode
   apiKeyEnvironmentVariable?: string | null
@@ -352,7 +358,7 @@ export type MachinePowerMode = {
   error?: string | null
 }
 
-export type OpenHandsMachineTest = {
+export type LocalCodexMachineTest = {
   available: boolean
   version?: string | null
   requiresWsl: boolean

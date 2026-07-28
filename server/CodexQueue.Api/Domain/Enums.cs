@@ -42,6 +42,8 @@ public enum PermissionMode
 public enum ExecutionRunner
 {
     CodexCli = 0,
+    // Persisted/API name retained so existing Local requests remain readable.
+    // New executions route this value through LocalCodexQueueAgentRunner.
     OpenHandsCli = 1
 }
 
@@ -57,6 +59,13 @@ public enum ModelDiscoveryMode
     Auto,
     Ollama,
     OpenAi
+}
+
+public enum LocalAiServerType
+{
+    Ollama,
+    LmStudio,
+    LlamaCpp
 }
 
 public enum ProviderHealthStatus

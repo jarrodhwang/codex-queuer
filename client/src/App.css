@@ -1802,13 +1802,13 @@
   background: #ef4444;
 }
 
-.openhands-compact-options {
+.local-codex-compact-options {
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
-.openhands-permission-button.active {
+.local-codex-permission-button.active {
   border-color: rgba(245, 158, 11, 0.42);
   background: linear-gradient(145deg, rgba(255, 255, 255, 0.74), rgba(251, 191, 36, 0.8));
   color: #92400e;
@@ -2315,7 +2315,7 @@
 }
 
 /* Context size is a capacity choice, so its selected state becomes more vivid
-   as the requested Ollama num_ctx increases. */
+   as Codex's requested accounting window increases. */
 .model-options-row--local .segmented-field:last-child .segmented-radio label.segmented-radio-option--32768.active {
   border-color: rgba(202, 138, 4, 0.28);
   background: linear-gradient(145deg, rgba(254, 249, 195, 0.92), rgba(253, 230, 138, 0.42));
@@ -2347,34 +2347,6 @@
   border-color: rgba(245, 158, 11, 0.58);
   background: linear-gradient(145deg, rgba(254, 243, 199, 0.98), rgba(245, 158, 11, 0.68));
   color: #78350f;
-}
-
-.model-options-row--local .segmented-field:last-child .segmented-radio label.segmented-radio-option--524288.active {
-  border-color: rgba(234, 88, 12, 0.62);
-  background: linear-gradient(145deg, rgba(254, 243, 199, 0.98), rgba(251, 146, 60, 0.74));
-  color: #7c2d12;
-  box-shadow: inset 0 1px 0 var(--glass-edge), 0 5px 15px rgba(234, 88, 12, 0.28);
-}
-
-.context-size-more-button.segmented-radio-option--524288.active,
-.context-size-menu button.segmented-radio-option--524288.active {
-  border-color: rgba(234, 88, 12, 0.62);
-  background: linear-gradient(145deg, rgba(254, 243, 199, 0.98), rgba(251, 146, 60, 0.74));
-  color: #7c2d12;
-}
-
-.model-options-row--local .segmented-field:last-child .segmented-radio label.segmented-radio-option--1048576.active {
-  border-color: rgba(234, 88, 12, 0.76);
-  background: linear-gradient(145deg, rgba(254, 249, 195, 1), rgba(251, 191, 36, 0.98));
-  color: #6b2109;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82), 0 5px 17px rgba(234, 88, 12, 0.36);
-}
-
-.context-size-more-button.segmented-radio-option--1048576.active,
-.context-size-menu button.segmented-radio-option--1048576.active {
-  border-color: rgba(234, 88, 12, 0.76);
-  background: linear-gradient(145deg, rgba(254, 249, 195, 1), rgba(251, 191, 36, 0.98));
-  color: #6b2109;
 }
 
 .segmented-field {
@@ -3131,7 +3103,7 @@
   color: #0369a1;
 }
 
-.runner-chip--openhands {
+.runner-chip--local-codex {
   background: rgba(237, 233, 254, 0.8);
   color: #6d28d9;
 }
@@ -7046,7 +7018,7 @@
     0 8px 20px rgba(0, 0, 0, 0.3);
 }
 
-:root[data-theme='dark'] .openhands-permission-button.active {
+:root[data-theme='dark'] .local-codex-permission-button.active {
   border-color: rgba(251, 191, 36, 0.58);
   background: linear-gradient(145deg, rgba(146, 64, 14, 0.72), rgba(120, 53, 15, 0.82));
   color: #fef3c7;

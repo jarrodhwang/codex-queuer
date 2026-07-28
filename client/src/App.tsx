@@ -64,10 +64,11 @@ import type {
   MachineResources,
   MachinePlatform,
   MachinePowerMode,
+  LocalAiServerType,
   ModelDiscoveryMode,
   RateLimit,
   ModelOption,
-  OpenHandsMachineTest,
+  LocalCodexMachineTest,
   Project,
   PermissionMode,
   ProviderModelsResponse,
@@ -156,6 +157,7 @@ const emptyMachine: SaveMachineRequest = {
 const emptyLocalProviderProfile: SaveAiProviderProfileRequest = {
   name: '',
   source: 'Local',
+  localAiServerType: 'Ollama',
   baseUrl: 'http://host.docker.internal:11434/v1',
   modelDiscoveryMode: 'Ollama',
   enabled: true,
@@ -165,9 +167,28 @@ const emptyLocalProviderProfile: SaveAiProviderProfileRequest = {
   serverMachineId: null,
 }
 
+const localAiServerDefaults: Record<LocalAiServerType, { label: string; baseUrl: string }> = {
+  Ollama: { label: 'Ollama', baseUrl: 'http://host.docker.internal:11434/v1' },
+  LmStudio: { label: 'LM Studio', baseUrl: 'http://host.docker.internal:1234/v1' },
+  LlamaCpp: { label: 'llama.cpp', baseUrl: 'http://host.docker.internal:8080/v1' },
+}
+const defaultLocalAiBaseUrls = new Set(Object.values(localAiServerDefaults).map(({ baseUrl }) => baseUrl))
+
+function localAiDiscoveryMode(serverType: LocalAiServerType): ModelDiscoveryMode {
+  return serverType === 'Ollama' ? 'Ollama' : 'OpenAi'
+}
+
+function localAiServerTypeForProfile(profile: AiProviderProfile): LocalAiServerType {
+  if (profile.localAiServerType) return profile.localAiServerType
+  if (/[:/]1234(?:\/|$)/.test(profile.baseUrl)) return 'LmStudio'
+  if (/[:/]8080(?:\/|$)/.test(profile.baseUrl)) return 'LlamaCpp'
+  return profile.modelDiscoveryMode === 'Ollama' ? 'Ollama' : 'LmStudio'
+}
+
 const themeStorageKey = 'codex-queue-theme'
-const minimumOpenHandsContextSize = 32_768
-const defaultOpenHandsContextSize = '65536'
+const minimumLocalCodexContextSize = 32_768
+const maximumLocalCodexContextSize = 262_144
+const defaultLocalCodexContextSize = '65536'
 const localContextSizeOptions = [
   { label: '4K', value: '4096' },
   { label: '8K', value: '8192' },
@@ -176,19 +197,17 @@ const localContextSizeOptions = [
   { label: '64K', value: '65536' },
   { label: '128K', value: '131072' },
   { label: '256K', value: '262144' },
-  { label: '512K', value: '524288' },
-  { label: '1M', value: '1048576' },
 ] as const
-const supportedLocalContextSizes = [4_096, 8_192, 16_384, 32_768, 65_536, 131_072, 262_144, 524_288, 1_048_576]
+const supportedLocalContextSizes = [4_096, 8_192, 16_384, 32_768, 65_536, 131_072, 262_144]
 const localModelDiscoveryCache = new Map<string, ProviderModelsResponse>()
 
-type CachedOpenHandsReadiness = {
-  status: OpenHandsMachineTest | null
+type CachedLocalCodexReadiness = {
+  status: LocalCodexMachineTest | null
   error: string
   checkedAt: number
 }
 
-const openHandsReadinessCache = new Map<string, CachedOpenHandsReadiness>()
+const localCodexReadinessCache = new Map<string, CachedLocalCodexReadiness>()
 
 function getInitialTheme(): ColorTheme {
   try {
@@ -287,7 +306,7 @@ function projectModelDefaults(project: Project, models: ModelOption[]): ProjectM
     commitModel: modelValueFromDefaults(project.defaultCommitModel, project.defaultCommitModelEffort, project.defaultCommitModelSpeed, commitFallback),
     localModel: {
       providerProfileId: project.defaultLocalProviderProfileId ?? '',
-      model: qualifyLocalModelId(project.defaultLocalModel ?? ''),
+      model: normalizeLocalModelId(project.defaultLocalModel ?? ''),
       effort: project.defaultLocalModelEffort?.trim() ?? '',
       speed: normalizeLocalContextSize(project.defaultLocalModelSpeed),
     },
@@ -300,7 +319,7 @@ function projectModelDefaults(project: Project, models: ModelOption[]): ProjectM
 function normalizeLocalContextSize(value?: string | null) {
   return value && supportedLocalContextSizes.includes(Number(value))
     ? value
-    : defaultOpenHandsContextSize
+    : defaultLocalCodexContextSize
 }
 
 function formatContextSize(contextSize: number) {
@@ -329,17 +348,32 @@ function runnerChoiceForRequest(request: CodexRequest): RunnerChoice {
   return 'Local'
 }
 
-function qualifyLocalModelId(model: string) {
-  const trimmed = model.trim()
-  return !trimmed
-    ? trimmed
-    : /^openai\//i.test(trimmed)
-      ? `openai/${trimmed.slice('openai/'.length)}`
-      : `openai/${trimmed}`
+function normalizeLocalModelId(model: string) {
+  return model.trim()
+}
+
+function resolveDiscoveredLocalModelId(
+  model: string,
+  discoveredModels: ProviderModelsResponse['models'],
+) {
+  const normalized = normalizeLocalModelId(model)
+  if (!normalized) return normalized
+
+  const exact = discoveredModels.find((candidate) => candidate.id === normalized)
+  if (exact) return exact.id
+
+  const legacyPrefix = 'openai/'
+  if (normalized.toLowerCase().startsWith(legacyPrefix)) {
+    const legacyRawId = normalized.slice(legacyPrefix.length)
+    const legacyMatch = discoveredModels.find((candidate) => candidate.id === legacyRawId)
+    if (legacyMatch) return legacyMatch.id
+  }
+
+  return normalized
 }
 
 function localModelDisplayName(model: string) {
-  return model.replace(/^openai\//i, '')
+  return model.trim()
 }
 
 async function readQueueAttachment(file: File): Promise<LocalQueueAttachment> {
@@ -1954,16 +1988,18 @@ function LocalAiServerModal({
 
   const reset = () => {
     setEditingId(undefined)
-    setDraft(emptyLocalProviderProfile)
+    setDraft({ ...emptyLocalProviderProfile })
     setTestMessage('')
   }
   const edit = (profile: AiProviderProfile) => {
+    const serverType = localAiServerTypeForProfile(profile)
     setEditingId(profile.id)
     setDraft({
       name: profile.name,
       source: 'Local',
+      localAiServerType: serverType,
       baseUrl: profile.baseUrl,
-      modelDiscoveryMode: profile.modelDiscoveryMode,
+      modelDiscoveryMode: localAiDiscoveryMode(serverType),
       apiKeyEnvironmentVariable: profile.apiKeyEnvironmentVariable ?? '',
       enabled: profile.enabled,
       maximumConcurrency: profile.maximumConcurrency,
@@ -1976,12 +2012,23 @@ function LocalAiServerModal({
   const update = <K extends keyof SaveAiProviderProfileRequest>(key: K, value: SaveAiProviderProfileRequest[K]) => {
     setDraft((current) => ({ ...current, [key]: value }))
   }
+  const selectServerType = (serverType: LocalAiServerType) => {
+    setDraft((current) => ({
+      ...current,
+      localAiServerType: serverType,
+      baseUrl: !current.baseUrl.trim() || defaultLocalAiBaseUrls.has(current.baseUrl.trim())
+        ? localAiServerDefaults[serverType].baseUrl
+        : current.baseUrl,
+      modelDiscoveryMode: localAiDiscoveryMode(serverType),
+    }))
+  }
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     try {
       const saved = await api.saveProviderProfile({
         ...draft,
         source: 'Local',
+        modelDiscoveryMode: localAiDiscoveryMode(draft.localAiServerType),
         apiKeyEnvironmentVariable: draft.apiKeyEnvironmentVariable?.trim() || null,
         defaultModel: draft.defaultModel?.trim() || null,
       }, editingId)
@@ -2075,16 +2122,16 @@ function LocalAiServerModal({
           <div className="machine-editor-head">
             <div>
               <div className="machine-manager-title">{editingId ? 'Edit model server' : 'Add model server'}</div>
-              <div className="meta">Use an Ollama-compatible server reachable from the selected machine.</div>
+              <div className="meta">Use an Ollama, LM Studio, or llama.cpp server reachable from the selected machine.</div>
             </div>
             {editingId && <GlassButton variant="danger" size="sm" type="button" onClick={() => setDeleting(localProfiles.find((profile) => profile.id === editingId) ?? null)}><Trash2 size={13} /> Delete</GlassButton>}
           </div>
           <div className="settings-section">
             <div className="settings-section-title">Model server</div>
-            <FieldLabel label="Name"><GlassInput value={draft.name} required onChange={(event) => update('name', event.target.value)} placeholder="Local Ollama" /></FieldLabel>
-            <FieldLabel label="Base URL"><GlassInput value={draft.baseUrl} required onChange={(event) => update('baseUrl', event.target.value)} placeholder="http://host.docker.internal:11434/v1" /></FieldLabel>
+            <FieldLabel label="Name"><GlassInput value={draft.name} required onChange={(event) => update('name', event.target.value)} placeholder={`Local ${localAiServerDefaults[draft.localAiServerType].label}`} /></FieldLabel>
+            <FieldLabel label="Base URL"><GlassInput value={draft.baseUrl} required onChange={(event) => update('baseUrl', event.target.value)} placeholder={localAiServerDefaults[draft.localAiServerType].baseUrl} /></FieldLabel>
             <div className="form-grid two">
-              <FieldLabel label="Discovery"><GlassSelect value={draft.modelDiscoveryMode} onChange={(event) => update('modelDiscoveryMode', event.target.value as ModelDiscoveryMode)}><option value="Ollama">Ollama</option><option value="Auto">Auto</option><option value="OpenAi">OpenAI-compatible</option></GlassSelect></FieldLabel>
+              <FieldLabel label="Server type"><GlassSelect value={draft.localAiServerType} onChange={(event) => selectServerType(event.target.value as LocalAiServerType)}><option value="Ollama">Ollama</option><option value="LmStudio">LM Studio</option><option value="LlamaCpp">llama.cpp</option></GlassSelect></FieldLabel>
               <FieldLabel label="Maximum context"><GlassInput value={draft.configuredContextWindow ?? ''} type="number" min={32768} onChange={(event) => update('configuredContextWindow', Number(event.target.value))} /></FieldLabel>
             </div>
             <div className="form-grid two">
@@ -2122,7 +2169,7 @@ function MachineModal({
   const [editingId, setEditingId] = useState<string | undefined>()
   const [machineToDelete, setMachineToDelete] = useState<Machine | null>(null)
   const [testResults, setTestResults] = useState<Record<string, { testing: boolean; success?: boolean; output: string; checkedAt?: string }>>({})
-  const [openHandsTestResults, setOpenHandsTestResults] = useState<Record<string, { testing: boolean; result?: OpenHandsMachineTest; error?: string; checkedAt?: string }>>({})
+  const [localCodexTestResults, setLocalCodexTestResults] = useState<Record<string, { testing: boolean; result?: LocalCodexMachineTest; error?: string; checkedAt?: string }>>({})
 
   const selectedMachine = machines.find((machine) => machine.id === editingId)
 
@@ -2195,23 +2242,23 @@ function MachineModal({
     }
   }, [onError])
 
-  const testOpenHands = useCallback(async (id: string) => {
-    setOpenHandsTestResults((current) => ({
+  const testLocalCodex = useCallback(async (id: string) => {
+    setLocalCodexTestResults((current) => ({
       ...current,
       [id]: { testing: true, result: current[id]?.result },
     }))
     try {
-      const result = await api.testOpenHands(id)
-      setOpenHandsTestResults((current) => ({
+      const result = await api.testLocalCodex(id)
+      setLocalCodexTestResults((current) => ({
         ...current,
         [id]: { testing: false, result, checkedAt: new Date().toISOString() },
       }))
     } catch (cause) {
-      setOpenHandsTestResults((current) => ({
+      setLocalCodexTestResults((current) => ({
         ...current,
         [id]: {
           testing: false,
-          error: cause instanceof Error ? cause.message : 'OpenHands CLI check failed.',
+          error: cause instanceof Error ? cause.message : 'Local Codex CLI check failed.',
           checkedAt: new Date().toISOString(),
         },
       }))
@@ -2219,8 +2266,8 @@ function MachineModal({
   }, [])
 
   const testRunners = useCallback(async (id: string) => {
-    await Promise.all([test(id), testOpenHands(id)])
-  }, [test, testOpenHands])
+    await Promise.all([test(id), testLocalCodex(id)])
+  }, [test, testLocalCodex])
 
   const testAll = useCallback(async () => {
     await Promise.all(machines.map((machine) => testRunners(machine.id)))
@@ -2265,7 +2312,7 @@ function MachineModal({
           <div className="machine-list">
             {machines.map((machine) => {
               const result = testResults[machine.id]
-              const openHandsResult = openHandsTestResults[machine.id]
+              const localCodexResult = localCodexTestResults[machine.id]
               return (
                 <button key={machine.id} type="button" className={`machine-card ${machine.id === editingId ? 'active' : ''}`} onClick={() => edit(machine)}>
                   <div className="machine-card-main">
@@ -2284,9 +2331,9 @@ function MachineModal({
                       Codex
                       <span className={`connection-dot ${result?.testing ? 'pending' : result?.success === true ? 'ok' : result?.success === false ? 'bad' : ''}`} />
                     </span>
-                    <span className="machine-runner-check" title={openHandsResult?.error || openHandsResult?.result?.message || 'OpenHands CLI not checked'}>
-                      OpenHands
-                      <span className={`connection-dot ${openHandsResult?.testing ? 'pending' : openHandsResult?.result?.available && !openHandsResult.result.requiresWsl ? 'ok' : openHandsResult?.result || openHandsResult?.error ? 'bad' : ''}`} />
+                    <span className="machine-runner-check" title={localCodexResult?.error || localCodexResult?.result?.message || 'Local Codex CLI not checked'}>
+                      Local Codex
+                      <span className={`connection-dot ${localCodexResult?.testing ? 'pending' : localCodexResult?.result?.available ? 'ok' : localCodexResult?.result || localCodexResult?.error ? 'bad' : ''}`} />
                     </span>
                   </div>
                 </button>
@@ -2309,9 +2356,9 @@ function MachineModal({
                   size="sm"
                   type="button"
                   onClick={() => testRunners(editingId)}
-                  disabled={testResults[editingId]?.testing || openHandsTestResults[editingId]?.testing}
+                  disabled={testResults[editingId]?.testing || localCodexTestResults[editingId]?.testing}
                 >
-                  <Check size={13} /> {testResults[editingId]?.testing || openHandsTestResults[editingId]?.testing ? 'Checking' : 'Check'}
+                  <Check size={13} /> {testResults[editingId]?.testing || localCodexTestResults[editingId]?.testing ? 'Checking' : 'Check'}
                 </GlassButton>
               )}
               {editingId && (
@@ -2386,22 +2433,22 @@ function MachineModal({
               <pre className="log-block">{testResults[editingId].output || 'Waiting for output...'}</pre>
             </div>
           )}
-          {editingId && openHandsTestResults[editingId] && (
-            <div className={`diagnostics-panel ${openHandsTestResults[editingId].result?.available && !openHandsTestResults[editingId].result?.requiresWsl ? 'diagnostics-panel--ok' : openHandsTestResults[editingId].testing ? '' : 'diagnostics-panel--bad'}`}>
+          {editingId && localCodexTestResults[editingId] && (
+            <div className={`diagnostics-panel ${localCodexTestResults[editingId].result?.available ? 'diagnostics-panel--ok' : localCodexTestResults[editingId].testing ? '' : 'diagnostics-panel--bad'}`}>
               <div className="row-between">
                 <strong>
-                  {openHandsTestResults[editingId].testing
-                    ? 'Checking OpenHands CLI'
-                    : openHandsTestResults[editingId].result?.available && !openHandsTestResults[editingId].result?.requiresWsl
-                      ? `OpenHands ${openHandsTestResults[editingId].result?.version || 'available'}`
-                      : 'OpenHands unavailable'}
+                  {localCodexTestResults[editingId].testing
+                    ? 'Checking Local Codex CLI'
+                    : localCodexTestResults[editingId].result?.available
+                      ? `Codex CLI ${localCodexTestResults[editingId].result?.version || 'available'}`
+                      : 'Local Codex unavailable'}
                 </strong>
-                {openHandsTestResults[editingId].checkedAt && <span className="meta">{formatDate(openHandsTestResults[editingId].checkedAt)}</span>}
+                {localCodexTestResults[editingId].checkedAt && <span className="meta">{formatDate(localCodexTestResults[editingId].checkedAt)}</span>}
               </div>
               <div className="meta">
-                {openHandsTestResults[editingId].error
-                  || openHandsTestResults[editingId].result?.message
-                  || 'Waiting for OpenHands CLI output…'}
+                {localCodexTestResults[editingId].error
+                  || localCodexTestResults[editingId].result?.message
+                  || 'Waiting for Local Codex CLI output…'}
               </div>
             </div>
           )}
@@ -3162,7 +3209,7 @@ function ProjectDetailsModal({
         <div className="project-detail-summary">
           <div>
             <div className="selected-folder-label">Default coding runner</div>
-            <div className="meta truncate">{project.defaultExecutionRunner === 'OpenHandsCli' ? 'Local / OpenHands' : 'Codex'}</div>
+            <div className="meta truncate">{project.defaultExecutionRunner === 'OpenHandsCli' ? 'Local / Codex' : 'Codex'}</div>
           </div>
           <div>
             <div className="selected-folder-label">Saved local model</div>
@@ -3272,15 +3319,15 @@ function QueueComposer({
   const [switchingLocalServer, setSwitchingLocalServer] = useState(false)
   const [powerMenuOpen, setPowerMenuOpen] = useState(false)
   const [localModelError, setLocalModelError] = useState('')
-  const [openHandsMachineStatus, setOpenHandsMachineStatus] = useState<OpenHandsMachineTest | null>(null)
-  const [checkingOpenHands, setCheckingOpenHands] = useState(false)
-  const [openHandsMachineError, setOpenHandsMachineError] = useState('')
+  const [localCodexMachineStatus, setLocalCodexMachineStatus] = useState<LocalCodexMachineTest | null>(null)
+  const [checkingLocalCodex, setCheckingLocalCodex] = useState(false)
+  const [localCodexMachineError, setLocalCodexMachineError] = useState('')
   const [machineResources, setMachineResources] = useState<MachineResources | null>(null)
   const [loadingMachineResources, setLoadingMachineResources] = useState(false)
   const [machineResourceError, setMachineResourceError] = useState('')
   const [machineResourceRefreshVersion, setMachineResourceRefreshVersion] = useState(0)
   const [approvalDialogOpen, setApprovalDialogOpen] = useState(false)
-  const [openHandsApprovalDialogOpen, setOpenHandsApprovalDialogOpen] = useState(false)
+  const [localCodexApprovalDialogOpen, setLocalCodexApprovalDialogOpen] = useState(false)
   const [composerValidationError, setComposerValidationError] = useState('')
   const [prompt, setPrompt] = useState('')
   const [attachments, setAttachments] = useState<LocalQueueAttachment[]>([])
@@ -3291,7 +3338,7 @@ function QueueComposer({
   const fileInputRef = useRef<HTMLInputElement>(null)
   const localModelLoadSequenceRef = useRef(0)
   const localServerSwitchSequenceRef = useRef(0)
-  const openHandsCheckSequenceRef = useRef(0)
+  const localCodexCheckSequenceRef = useRef(0)
   const previousProjectIdRef = useRef(selectedProject.id)
   const previousEditingRequestIdRef = useRef<string | null>(null)
   const draftRevisionRef = useRef(0)
@@ -3310,7 +3357,7 @@ function QueueComposer({
   const localModelOptions = useMemo(
     () => (localModelStatus?.models ?? []).map((model) => ({
       ...model,
-      id: qualifyLocalModelId(model.id),
+      id: normalizeLocalModelId(model.id),
     })),
     [localModelStatus],
   )
@@ -3358,10 +3405,13 @@ function QueueComposer({
       localModelDiscoveryCache.set(profileId, result)
       setLocalModelStatus(result)
       const firstModel = result.models[0]?.id ?? ''
-      const fallbackModel = qualifyLocalModelId(profileDefaultModel || firstModel)
+      const fallbackModel = resolveDiscoveredLocalModelId(
+        profileDefaultModel || firstModel,
+        result.models,
+      )
       setLocalModel((current) => (
         current
-          ? qualifyLocalModelId(current)
+          ? resolveDiscoveredLocalModelId(current, result.models)
           : fallbackModel
       ))
       return result
@@ -3376,36 +3426,36 @@ function QueueComposer({
     }
   }, [])
 
-  const checkOpenHands = useCallback(async (profileId: string, model: string) => {
+  const checkLocalCodex = useCallback(async (profileId: string, model: string) => {
     if (!model) return
-    const requestSequence = ++openHandsCheckSequenceRef.current
-    const cacheKey = `${selectedProject.machineId}|${profileId}|${qualifyLocalModelId(model)}`
-    const previousCachedStatus = openHandsReadinessCache.get(cacheKey)?.status ?? null
-    setCheckingOpenHands(true)
-    setOpenHandsMachineError('')
+    const requestSequence = ++localCodexCheckSequenceRef.current
+    const cacheKey = `${selectedProject.machineId}|${profileId}|${normalizeLocalModelId(model)}`
+    const previousCachedStatus = localCodexReadinessCache.get(cacheKey)?.status ?? null
+    setCheckingLocalCodex(true)
+    setLocalCodexMachineError('')
     try {
-      const result = await api.testOpenHands(selectedProject.machineId, profileId, model)
-      openHandsReadinessCache.set(cacheKey, {
+      const result = await api.testLocalCodex(selectedProject.machineId, profileId, model)
+      localCodexReadinessCache.set(cacheKey, {
         status: result,
         error: '',
         checkedAt: Date.now(),
       })
-      if (requestSequence === openHandsCheckSequenceRef.current) {
-        setOpenHandsMachineStatus(result)
+      if (requestSequence === localCodexCheckSequenceRef.current) {
+        setLocalCodexMachineStatus(result)
       }
     } catch (cause) {
-      const error = cause instanceof Error ? cause.message : 'Could not check OpenHands on this machine.'
-      openHandsReadinessCache.set(cacheKey, {
+      const error = cause instanceof Error ? cause.message : 'Could not check Local Codex on this machine.'
+      localCodexReadinessCache.set(cacheKey, {
         status: previousCachedStatus,
         error,
         checkedAt: Date.now(),
       })
-      if (requestSequence === openHandsCheckSequenceRef.current) {
-        setOpenHandsMachineError(error)
+      if (requestSequence === localCodexCheckSequenceRef.current) {
+        setLocalCodexMachineError(error)
       }
     } finally {
-      if (requestSequence === openHandsCheckSequenceRef.current) {
-        setCheckingOpenHands(false)
+      if (requestSequence === localCodexCheckSequenceRef.current) {
+        setCheckingLocalCodex(false)
       }
     }
   }, [selectedProject.machineId])
@@ -3432,7 +3482,7 @@ function QueueComposer({
         ? localModelDiscoveryCache.get(editingRequest.providerProfileId) ?? null
         : null)
       setLocalModelError('')
-      setLocalModel(nextRunnerChoice === 'Local' ? qualifyLocalModelId(editingRequest.model) : '')
+      setLocalModel(nextRunnerChoice === 'Local' ? normalizeLocalModelId(editingRequest.model) : '')
       setLocalReasoningEffort(nextRunnerChoice === 'Local' ? editingRequest.modelEffort || '' : '')
       setLocalContextSize(nextRunnerChoice === 'Local' ? normalizeLocalContextSize(editingRequest.modelSpeed) : defaults.localModel.speed)
       setCommitModel({
@@ -3471,8 +3521,8 @@ function QueueComposer({
       ? localModelDiscoveryCache.get(defaults.localModel.providerProfileId) ?? null
       : null)
     setLocalModelError('')
-    setOpenHandsMachineStatus(null)
-    setOpenHandsMachineError('')
+    setLocalCodexMachineStatus(null)
+    setLocalCodexMachineError('')
     setCommitModel(defaults.commitModel)
     setGenerateCommit(defaults.generateCommit)
     setSeparateCommitSession(defaults.separateCommitSession)
@@ -3527,6 +3577,10 @@ function QueueComposer({
     if (cached) {
       setLocalModelStatus(cached)
       setLocalModelError('')
+      setLocalModel((current) => resolveDiscoveredLocalModelId(
+        current || selectedLocalProfileDefaultModel || cached.models[0]?.id || '',
+        cached.models,
+      ))
       return
     }
 
@@ -3534,22 +3588,22 @@ function QueueComposer({
   }, [loadLocalModels, runnerChoice, selectedLocalProfileDefaultModel, selectedLocalProfileId])
 
   useEffect(() => {
-    openHandsCheckSequenceRef.current += 1
+    localCodexCheckSequenceRef.current += 1
     const invalidatePendingCheck = () => {
-      openHandsCheckSequenceRef.current += 1
+      localCodexCheckSequenceRef.current += 1
     }
     if (runnerChoice !== 'Local' || !selectedLocalProfileId || !localModel) {
-      setCheckingOpenHands(false)
-      setOpenHandsMachineStatus(null)
-      setOpenHandsMachineError('')
+      setCheckingLocalCodex(false)
+      setLocalCodexMachineStatus(null)
+      setLocalCodexMachineError('')
       return invalidatePendingCheck
     }
 
-    const cacheKey = `${selectedProject.machineId}|${selectedLocalProfileId}|${qualifyLocalModelId(localModel)}`
-    const cached = openHandsReadinessCache.get(cacheKey)
-    setCheckingOpenHands(false)
-    setOpenHandsMachineStatus(cached?.status ?? null)
-    setOpenHandsMachineError(cached?.error ?? '')
+    const cacheKey = `${selectedProject.machineId}|${selectedLocalProfileId}|${normalizeLocalModelId(localModel)}`
+    const cached = localCodexReadinessCache.get(cacheKey)
+    setCheckingLocalCodex(false)
+    setLocalCodexMachineStatus(cached?.status ?? null)
+    setLocalCodexMachineError(cached?.error ?? '')
     return invalidatePendingCheck
   }, [localModel, runnerChoice, selectedLocalProfileId, selectedProject.machineId])
 
@@ -3659,10 +3713,11 @@ function QueueComposer({
     selectedLocalModelId,
     selectedLocalModelSupportsReasoningEffort,
   ])
-  const targetLocalAiReachable = openHandsMachineStatus?.targetLocalAiReachable === true
-  const targetLocalModelAvailable = openHandsMachineStatus?.targetSelectedModelAvailable === true
+  const targetLocalAiReachable = localCodexMachineStatus?.targetLocalAiReachable === true
+  const targetLocalModelAvailable = localCodexMachineStatus?.targetSelectedModelAvailable === true
   const configuredContextWindow = localModelStatus?.configuredContextWindow ?? selectedLocalProfile?.configuredContextWindow
   const localContextLimit = Math.min(
+    maximumLocalCodexContextSize,
     configuredContextWindow ?? Number.POSITIVE_INFINITY,
     selectedLocalModelMetadata?.maximumContextWindow ?? Number.POSITIVE_INFINITY,
   )
@@ -3670,9 +3725,9 @@ function QueueComposer({
     const contextSize = Number(option.value)
     return {
       ...option,
-      disabled: contextSize < minimumOpenHandsContextSize || contextSize > localContextLimit,
-      title: contextSize < minimumOpenHandsContextSize
-        ? `OpenHands requires at least ${(minimumOpenHandsContextSize / 1024).toFixed(0)}K tokens.`
+      disabled: contextSize < minimumLocalCodexContextSize || contextSize > localContextLimit,
+      title: contextSize < minimumLocalCodexContextSize
+        ? `Local Codex requires at least ${(minimumLocalCodexContextSize / 1024).toFixed(0)}K tokens for this queue setup.`
         : contextSize > localContextLimit
           ? `This model or server supports up to ${localContextLimit.toLocaleString()} tokens.`
           : option.value === '32768'
@@ -3684,45 +3739,40 @@ function QueueComposer({
   const localContextMaximumLabel = Number.isFinite(localContextLimit)
     ? formatContextSize(localContextLimit)
     : 'not discovered yet'
-  const localContextInfo = `Sets Ollama's num_ctx for this queue request. OpenHands requires at least ${formatContextSize(minimumOpenHandsContextSize)}. Maximum available now: ${localContextMaximumLabel}${configuredContextWindow ? ` (server ${formatContextSize(configuredContextWindow)})` : ''}${selectedLocalModelMetadata?.maximumContextWindow ? `; model ${formatContextSize(selectedLocalModelMetadata.maximumContextWindow)}` : ''}.`
-  const localToolWarning = selectedLocalModelMetadata?.supportsTools === false
-    ? `${selectedLocalModelMetadata.name} does not advertise tool support, which OpenHands requires to work with project files.`
-    : ''
-  const localContextWarning = selectedLocalContextSize < minimumOpenHandsContextSize
-    ? `Select 32K or higher. OpenHands requires at least ${minimumOpenHandsContextSize.toLocaleString()} tokens.`
+  const localContextInfo = `Sets Codex CLI's model_context_window accounting for this queue request. Configure the Local AI backend with an equal or larger context allocation. This setup requires at least ${formatContextSize(minimumLocalCodexContextSize)} and conservatively caps Local requests at ${formatContextSize(maximumLocalCodexContextSize)} for current Codex fallback model metadata. Maximum available now: ${localContextMaximumLabel}${configuredContextWindow ? ` (server ${formatContextSize(configuredContextWindow)})` : ''}${selectedLocalModelMetadata?.maximumContextWindow ? `; model ${formatContextSize(selectedLocalModelMetadata.maximumContextWindow)}` : ''}.`
+  const localContextWarning = selectedLocalContextSize < minimumLocalCodexContextSize
+    ? `Select 32K or higher for Local Codex context accounting.`
     : selectedLocalContextSize > localContextLimit
       ? `The selected context is larger than this model or Local AI server supports.`
       : localModelStatus?.contextWarning
     || ((selectedLocalModelMetadata?.maximumContextWindow
-      && selectedLocalModelMetadata.maximumContextWindow < minimumOpenHandsContextSize)
-      ? `${selectedLocalModelMetadata.name} supports at most ${selectedLocalModelMetadata.maximumContextWindow.toLocaleString()} tokens, below this OpenHands setup's ${minimumOpenHandsContextSize.toLocaleString()}-token requirement.`
+      && selectedLocalModelMetadata.maximumContextWindow < minimumLocalCodexContextSize)
+      ? `${selectedLocalModelMetadata.name} supports at most ${selectedLocalModelMetadata.maximumContextWindow.toLocaleString()} tokens, below this Local Codex setup's ${minimumLocalCodexContextSize.toLocaleString()}-token requirement.`
       : '')
-    || ((configuredContextWindow && configuredContextWindow < minimumOpenHandsContextSize)
-      ? `Configured context is ${configuredContextWindow.toLocaleString()} tokens. Set it to at least ${minimumOpenHandsContextSize.toLocaleString()} before running OpenHands.`
+    || ((configuredContextWindow && configuredContextWindow < minimumLocalCodexContextSize)
+      ? `Configured context is ${configuredContextWindow.toLocaleString()} tokens. Set it to at least ${minimumLocalCodexContextSize.toLocaleString()} before running Local Codex.`
       : '')
-  const localModelWarning = localToolWarning || localContextWarning
+  const localModelWarning = localContextWarning
   const selectedLocalServerUnavailable = Boolean(
     selectedLocalProfile
     && !loadingLocalModels
     && (localModelStatus?.status === 'Offline' || Boolean(localModelError && !localModelStatus?.healthy)),
   )
-  const openHandsBlockingMessage = checkingOpenHands
-    ? 'Checking OpenHands CLI and the Local AI route from the selected machine…'
-    : openHandsMachineError
-      ? openHandsMachineError
-      : !openHandsMachineStatus
+  const localCodexBlockingMessage = checkingLocalCodex
+    ? 'Checking Local Codex CLI and the Local AI route from the selected machine…'
+    : localCodexMachineError
+      ? localCodexMachineError
+      : !localCodexMachineStatus
         ? ''
-        : openHandsMachineStatus.requiresWsl
-          ? 'Native Windows OpenHands CLI is not supported. Configure this machine through WSL before using Local.'
-          : !openHandsMachineStatus.available
-            ? openHandsMachineStatus.message || 'OpenHands is not installed on this machine.'
-            : !openHandsMachineStatus.targetLocalAiChecked
-              ? 'Local AI reachability has not been checked from the selected machine.'
-              : !targetLocalAiReachable
-                ? openHandsMachineStatus.targetLocalAiMessage || 'The selected machine cannot reach the Local AI server.'
-                : openHandsMachineStatus.targetSelectedModelAvailable === false
-                  ? 'The selected model is not installed on the Local AI server as seen from the selected machine.'
-                  : ''
+        : !localCodexMachineStatus.available
+          ? localCodexMachineStatus.message || 'Codex CLI is not available on this machine.'
+          : !localCodexMachineStatus.targetLocalAiChecked
+            ? 'Local AI reachability has not been checked from the selected machine.'
+            : !targetLocalAiReachable
+              ? localCodexMachineStatus.targetLocalAiMessage || 'The selected machine cannot reach the Local AI server.'
+              : localCodexMachineStatus.targetSelectedModelAvailable === false
+                ? 'The selected model is not installed on the Local AI server as seen from the selected machine.'
+                : ''
   const localBlockingMessage = !isLocalRunner
     ? ''
     : !selectedLocalProfileId
@@ -3741,52 +3791,55 @@ function QueueComposer({
                   ? 'The selected model is not installed on the Local AI server.'
                   : localModelWarning
                     ? localModelWarning
-                    : openHandsBlockingMessage
+                    : localCodexBlockingMessage
                       || (permissionMode !== 'FullAccess'
-                        ? 'Headless OpenHands requires Full access with explicit confirmation for this release.'
+                        ? 'Local Codex requires Full access with explicit confirmation for this release.'
                         : '')
   const selectedRequestModel = isLocalRunner ? localModel : requestModel.model
   const localApiPending = loadingLocalModels
-  const openHandsPending = checkingOpenHands
+  const localCodexPending = checkingLocalCodex
   const refreshLocalEnvironment = useCallback(async () => {
     if (!selectedLocalProfileId) return
 
     if (localModel) {
       await Promise.all([
         loadLocalModels(selectedLocalProfileId, true, selectedLocalProfileDefaultModel),
-        checkOpenHands(selectedLocalProfileId, localModel),
+        checkLocalCodex(selectedLocalProfileId, localModel),
       ])
       return
     }
 
     const result = await loadLocalModels(selectedLocalProfileId, true, selectedLocalProfileDefaultModel)
-    const discoveredModel = qualifyLocalModelId(selectedLocalProfileDefaultModel || result?.models[0]?.id || '')
+    const discoveredModel = resolveDiscoveredLocalModelId(
+      selectedLocalProfileDefaultModel || result?.models[0]?.id || '',
+      result?.models ?? [],
+    )
     if (discoveredModel) {
-      await checkOpenHands(selectedLocalProfileId, discoveredModel)
+      await checkLocalCodex(selectedLocalProfileId, discoveredModel)
     }
-  }, [checkOpenHands, loadLocalModels, localModel, selectedLocalProfileDefaultModel, selectedLocalProfileId])
+  }, [checkLocalCodex, loadLocalModels, localModel, selectedLocalProfileDefaultModel, selectedLocalProfileId])
   const localHealthItems = [
     {
-      key: 'openhands',
-      label: `OpenHands on ${selectedProject.machineName}`,
+      key: 'local-codex',
+      label: `Local Codex on ${selectedProject.machineName}`,
       detail: !localModel
-        ? 'Choose a model to check OpenHands.'
-        : checkingOpenHands
-          ? 'Checking OpenHands CLI.'
-          : openHandsMachineError
-            || openHandsMachineStatus?.message
-            || (openHandsMachineStatus?.available
-              ? openHandsMachineStatus.version || 'Available.'
+        ? 'Choose a model to check Local Codex.'
+        : checkingLocalCodex
+          ? 'Checking Local Codex CLI.'
+          : localCodexMachineError
+            || localCodexMachineStatus?.message
+            || (localCodexMachineStatus?.available
+              ? localCodexMachineStatus.version || 'Available.'
               : 'Not checked. Use refresh when you need a new readiness check.'),
       state: !localModel
         ? 'idle'
-        : openHandsPending
+        : localCodexPending
           ? 'pending'
-          : openHandsMachineError
+          : localCodexMachineError
             ? 'bad'
-          : !openHandsMachineStatus && !openHandsMachineError
+          : !localCodexMachineStatus && !localCodexMachineError
             ? 'idle'
-            : openHandsMachineStatus?.available && !openHandsMachineStatus.requiresWsl
+            : localCodexMachineStatus?.available
             ? 'ok'
             : 'bad',
       icon: <TerminalIcon size={15} />,
@@ -3816,20 +3869,20 @@ function QueueComposer({
       label: `Local AI route from ${selectedProject.machineName}`,
       detail: !localModel
         ? 'Choose a model to check the target route.'
-        : checkingOpenHands
+        : checkingLocalCodex
           ? 'Checking target-side Local AI reachability.'
-          : openHandsMachineError
-            || openHandsMachineStatus?.targetLocalAiMessage
-            || (openHandsMachineStatus
+          : localCodexMachineError
+            || localCodexMachineStatus?.targetLocalAiMessage
+            || (localCodexMachineStatus
               ? targetLocalAiReachable ? 'Reachable.' : 'Unreachable.'
               : 'Not checked. Use refresh to test this route.'),
       state: !localModel
         ? 'idle'
-        : openHandsPending
+        : localCodexPending
           ? 'pending'
-          : openHandsMachineError
+          : localCodexMachineError
             ? 'bad'
-          : !openHandsMachineStatus && !openHandsMachineError
+          : !localCodexMachineStatus && !localCodexMachineError
             ? 'idle'
           : targetLocalAiReachable
             ? 'ok'
@@ -3843,10 +3896,10 @@ function QueueComposer({
         ? 'Choose an installed model.'
         : localApiPending
           ? 'Refreshing installed models.'
-          : openHandsMachineStatus?.targetSelectedModelAvailable === false
+          : localCodexMachineStatus?.targetSelectedModelAvailable === false
             ? `${localModelDisplayName(localModel)} is not available from ${selectedProject.machineName}.`
             : localModelInstalled
-              ? openHandsMachineStatus && targetLocalModelAvailable
+              ? localCodexMachineStatus && targetLocalModelAvailable
                 ? `${localModelDisplayName(localModel)} is installed and visible from ${selectedProject.machineName}.`
                 : `${localModelDisplayName(localModel)} is installed. Target visibility has not been checked.`
               : 'The selected model has not been discovered yet.',
@@ -3854,7 +3907,7 @@ function QueueComposer({
         ? 'idle'
         : localApiPending
           ? 'pending'
-          : openHandsMachineStatus?.targetSelectedModelAvailable === false
+          : localCodexMachineStatus?.targetSelectedModelAvailable === false
             ? 'bad'
           : localModelStatus?.healthy && localModelInstalled
             ? 'ok'
@@ -3918,7 +3971,7 @@ function QueueComposer({
     setComposerValidationError('')
   }
 
-  const queueRequest = async (openHandsAlwaysApproveConfirmed = false) => {
+  const queueRequest = async (localCodexFullAccessConfirmed = false) => {
     if (!editingRequest) {
       requestCompletionNotificationPermission()
     }
@@ -3948,7 +4001,7 @@ function QueueComposer({
         permissionMode,
         executionRunner: isLocalRunner ? 'OpenHandsCli' : 'CodexCli',
         providerProfileId: isLocalRunner ? selectedLocalProfile?.id ?? null : null,
-        openHandsAlwaysApproveConfirmed: isLocalRunner && openHandsAlwaysApproveConfirmed,
+        openHandsAlwaysApproveConfirmed: isLocalRunner && localCodexFullAccessConfirmed,
         commitModel: isCodexRunner ? commitModel.model : null,
         commitModelEffort: isCodexRunner ? commitModel.effort : null,
         commitModelSpeed: isCodexRunner ? commitModel.speed : null,
@@ -4036,7 +4089,7 @@ function QueueComposer({
     event.preventDefault()
     setComposerValidationError('')
     if (runnerChoice === 'Claude') {
-      setComposerValidationError('Claude through OpenHands is visible for compatibility but is not enabled in this Local-only release.')
+      setComposerValidationError('Claude mode is visible for compatibility but is not enabled in this Local-only release.')
       return
     }
     if (isLocalRunner) {
@@ -4047,7 +4100,7 @@ function QueueComposer({
       if (permissionMode === 'FullAccess') {
         void queueRequest(true)
       } else {
-        setOpenHandsApprovalDialogOpen(true)
+        setLocalCodexApprovalDialogOpen(true)
       }
       return
     }
@@ -4061,7 +4114,7 @@ function QueueComposer({
   const addFiles = async (files: FileList | File[]) => {
     if (isQueueing || isLocalRunner) {
       if (isLocalRunner) {
-        setAttachmentError('Attachments are unavailable for OpenHands in this release.')
+        setAttachmentError('Attachments are unavailable for Local Codex in this release.')
       }
       return
     }
@@ -4088,7 +4141,7 @@ function QueueComposer({
     setDraggingFiles(false)
     if (isQueueing || isLocalRunner) {
       if (isLocalRunner && event.dataTransfer.files.length > 0) {
-        setAttachmentError('Attachments are unavailable for OpenHands in this release.')
+        setAttachmentError('Attachments are unavailable for Local Codex in this release.')
       }
       return
     }
@@ -4100,7 +4153,7 @@ function QueueComposer({
   const pasteFiles = (event: ClipboardEvent<HTMLDivElement>) => {
     if (isQueueing || isLocalRunner) {
       if (isLocalRunner && event.clipboardData.files.length > 0) {
-        setAttachmentError('Attachments are unavailable for OpenHands in this release.')
+        setAttachmentError('Attachments are unavailable for Local Codex in this release.')
       }
       return
     }
@@ -4213,7 +4266,7 @@ function QueueComposer({
               onChange={(event) => setPrompt(event.target.value)}
               required
               placeholder={isLocalRunner
-                ? 'Describe the change OpenHands should make in the selected project.'
+                ? 'Describe the change Local Codex should make in the selected project.'
                 : 'Describe the change Codex should make in the selected project.'}
             />
             <div className="attachment-row">
@@ -4241,7 +4294,7 @@ function QueueComposer({
               </GlassButton>
               <span className="meta">
                 {isLocalRunner
-                  ? 'Attachments are disabled for OpenHands until project-scoped transfer paths can be validated safely.'
+                  ? 'Attachments are disabled for Local Codex in this release.'
                   : 'Drag, attach, or paste files/images. Images pass to Codex CLI; text/code/CSV include previews.'}
               </span>
             </div>
@@ -4287,7 +4340,7 @@ function QueueComposer({
                           setLocalModelStatus(null)
                           setLocalModelError('')
                           setLocalProfileId(nextProfileId)
-                          setLocalModel(qualifyLocalModelId(nextProfile?.defaultModel ?? ''))
+                          setLocalModel(normalizeLocalModelId(nextProfile?.defaultModel ?? ''))
                           setLocalReasoningEffort('')
                           setComposerValidationError('')
                           setPowerMenuOpen(false)
@@ -4299,7 +4352,7 @@ function QueueComposer({
                             })
                         }}
                       />
-                      <div className="local-picker-actions" role="status" aria-live="polite" aria-label="OpenHands readiness">
+                      <div className="local-picker-actions" role="status" aria-live="polite" aria-label="Local Codex readiness">
                         <GlassButton
                           variant="secondary"
                           size="icon"
@@ -4330,14 +4383,14 @@ function QueueComposer({
                           size="icon"
                           type="button"
                           disabled={loadingMachineResources}
-                          title={selectedLocalProfile ? 'Refresh models, OpenHands readiness, target route, and resources' : 'Refresh system resources'}
+                          title={selectedLocalProfile ? 'Refresh models, Local Codex readiness, target route, and resources' : 'Refresh system resources'}
                           aria-label={selectedLocalProfile ? 'Refresh Local model readiness and resources' : 'Refresh system resources'}
                           onClick={() => {
                             setMachineResourceRefreshVersion((current) => current + 1)
-                            if (selectedLocalProfile && !loadingLocalModels && !checkingOpenHands) void refreshLocalEnvironment()
+                            if (selectedLocalProfile && !loadingLocalModels && !checkingLocalCodex) void refreshLocalEnvironment()
                           }}
                         >
-                          <RefreshCcw size={15} className={loadingLocalModels || checkingOpenHands || loadingMachineResources ? 'action-spinner' : ''} />
+                          <RefreshCcw size={15} className={loadingLocalModels || checkingLocalCodex || loadingMachineResources ? 'action-spinner' : ''} />
                         </GlassButton>
                         {powerMenuOpen && selectedLocalProfile && (
                           <PowerModePopover profileId={selectedLocalProfile.id} onClose={() => setPowerMenuOpen(false)} />
@@ -4348,7 +4401,7 @@ function QueueComposer({
                       <span className="model-picker-title">Model</span>
                       <GlassDropdownSelect
                         className="local-model-select"
-                        label="OpenHands model"
+                        label="Local Codex model"
                         value={localModel}
                         options={localModelDropdownOptions}
                         disabled={!selectedLocalProfile || localModelOptions.length === 0}
@@ -4364,7 +4417,7 @@ function QueueComposer({
                       {selectedLocalModelMetadata?.supportsReasoningEffort && (
                         <SegmentedRadio
                           label="Effort"
-                          name="OpenHands-reasoning-effort"
+                          name="Local-Codex-reasoning-effort"
                           value={localReasoningEffort || 'low'}
                           options={[
                             { label: 'Low', value: 'low' },
@@ -4377,7 +4430,7 @@ function QueueComposer({
                         <ContextSizePicker
                           label="Context size"
                           helpText={localContextInfo}
-                          name="OpenHands-context-size"
+                          name="Local-Codex-context-size"
                         value={localContextSize}
                         options={localContextPresetOptions}
                         onChange={setLocalContextSize}
@@ -4450,19 +4503,19 @@ function QueueComposer({
                 {localModelError && localModelStatus && (
                   <div className="local-runner-warning"><Server size={15} /> <span>Refresh failed; showing the last discovered model list.</span></div>
                 )}
-                {localBlockingMessage && localBlockingMessage !== localModelWarning && !localApiPending && !openHandsPending && (
+                {localBlockingMessage && localBlockingMessage !== localModelWarning && !localApiPending && !localCodexPending && (
                   <div className="local-runner-error" role="alert">{localBlockingMessage}</div>
                 )}
               </div>
             ) : (
-              <div className="local-runner-error">Claude through OpenHands is not enabled in this Local-only release.</div>
+              <div className="local-runner-error">Claude mode is not enabled in this Local-only release.</div>
             )}
           </div>
           <div className="runner-icon-switch" role="group" aria-label="Coding agent runner">
             {([
               { value: 'Codex', label: 'Codex / ChatGPT', icon: <Code2 size={17} />, disabled: false },
               { value: 'Claude', label: 'Claude (not enabled)', icon: <Network size={17} />, disabled: true },
-              { value: 'Local', label: 'Local / OpenHands', icon: <TerminalIcon size={17} />, disabled: false },
+              { value: 'Local', label: 'Local / Codex', icon: <TerminalIcon size={17} />, disabled: false },
             ] as const).map((option) => (
               <GlassButton
                 key={option.value}
@@ -4531,15 +4584,15 @@ function QueueComposer({
                 />
               </div>
             ) : isLocalRunner ? (
-              <div className="openhands-compact-options" aria-label="OpenHands safety options">
+              <div className="local-codex-compact-options" aria-label="Local Codex safety options">
                 <GlassButton
-                  className={`openhands-permission-button ${permissionMode === 'FullAccess' ? 'active' : ''}`}
+                  className={`local-codex-permission-button ${permissionMode === 'FullAccess' ? 'active' : ''}`}
                   variant={permissionMode === 'FullAccess' ? 'primary' : 'secondary'}
                   size="icon"
                   type="button"
                   aria-pressed={permissionMode === 'FullAccess'}
-                  aria-label="Use OpenHands full access"
-                  title={`Use OpenHands full access. Headless OpenHands cannot request action-level approval and runs with ${selectedProject.machineName}'s machine-account permissions. Queueing still requires confirmation.`}
+                  aria-label="Use Local Codex full access"
+                  title={`Use Local Codex full access. Codex CLI runs on ${selectedProject.machineName} with the selected sandbox and approval configuration. Queueing still requires confirmation.`}
                   onClick={() => {
                     setPermissionMode('FullAccess')
                     setComposerValidationError('')
@@ -4547,13 +4600,13 @@ function QueueComposer({
                 >
                   <ShieldAlert size={16} />
                 </GlassButton>
-                <span title="Automatic commit generation is unavailable for OpenHands in this release.">
+                <span title="Automatic commit generation is unavailable for Local Codex in this release.">
                   <GlassButton
                     variant="secondary"
                     size="icon"
                     type="button"
                     disabled
-                    aria-label="Automatic commit generation unavailable for OpenHands"
+                    aria-label="Automatic commit generation unavailable for Local Codex"
                   >
                     <GitCommit size={16} />
                   </GlassButton>
@@ -4605,20 +4658,20 @@ function QueueComposer({
           }}
         />
       )}
-      {openHandsApprovalDialogOpen && (
+      {localCodexApprovalDialogOpen && (
         <ConfirmDialog
-          title="Allow OpenHands full access?"
+          title="Allow Local Codex full access?"
           description={(
             <>
-              OpenHands will run <strong>headlessly with --always-approve</strong> on <strong>{selectedProject.machineName}</strong>.
+              Codex CLI will run with <strong>Full access</strong> on <strong>{selectedProject.machineName}</strong>.
               It can read, modify, and run commands in the selected project using that machine account’s permissions.
-              This is not equivalent to a Codex sandbox or action-level approval flow.
+              Queueing this Local request still requires explicit confirmation.
             </>
           )}
           confirmLabel="Allow and queue"
-          onCancel={() => setOpenHandsApprovalDialogOpen(false)}
+          onCancel={() => setLocalCodexApprovalDialogOpen(false)}
           onConfirm={async () => {
-            setOpenHandsApprovalDialogOpen(false)
+            setLocalCodexApprovalDialogOpen(false)
             await queueRequest(true)
           }}
         />
@@ -6283,11 +6336,15 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
                 <StatusBadge status={run.status} busy={run.status === 'Running'} />
               </div>
               {run.commandPreview && <div className="command-preview">$ {run.commandPreview}</div>}
-              {run.openHandsConversationId && (
-                <div className="conversation-chip" title={run.openHandsConversationId}>
-                  OpenHands conversation {shortId(run.openHandsConversationId)}
+              {run.localCodexSessionId ? (
+                <div className="conversation-chip" title={run.localCodexSessionId}>
+                  Local Codex session {shortId(run.localCodexSessionId)}
                 </div>
-              )}
+              ) : run.openHandsConversationId ? (
+                <div className="conversation-chip" title={run.openHandsConversationId}>
+                  Legacy local session {shortId(run.openHandsConversationId)}
+                </div>
+              ) : null}
               {run.status === 'UsageLimited' && (
                 <UsageLimitBanner
                   reason={run.retryReason}
@@ -6305,7 +6362,7 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
               {run.error && <div className="error-text">{run.error}</div>}
               <DetailedCodexAnswers
                 output={run.output}
-                agentName={(run.executionRunner ?? requestExecutionRunner(request)) === 'OpenHandsCli' ? 'OpenHands' : 'Codex'}
+                agentName={(run.executionRunner ?? requestExecutionRunner(request)) === 'OpenHandsCli' ? 'Local Codex' : 'Codex'}
               />
               <div className="run-output-head">
                 <span>Run log</span>
@@ -6379,7 +6436,7 @@ function reportMessagesForRequest(request: CodexRequest): WorkReportMessage[] {
 }
 
 function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; now: number; onClose: () => void }) {
-  const agentName = requestExecutionRunner(request) === 'OpenHandsCli' ? 'OpenHands' : 'Codex'
+  const agentName = requestExecutionRunner(request) === 'OpenHandsCli' ? 'Local Codex' : 'Codex'
   const messages = useMemo(() => reportMessagesForRequest(request), [request])
   const finalMessage = request.status === 'Succeeded' ? completionMessageForRequest(request) : null
   const finalResponseUnavailable = request.status === 'Succeeded' && !finalMessage
@@ -6463,7 +6520,7 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
               )}
               {requestExecutionRunner(request) === 'OpenHandsCli' && (
                 <div className="work-report-empty work-report-empty--compact" role="note">
-                  OpenHands messages and tool actions are not treated as proof of an edit. The current Git workspace state is shown at right.
+                  Local Codex messages and tool actions are not treated as proof of an edit. The current Git workspace state is shown at right.
                 </div>
               )}
             </section>
@@ -7883,7 +7940,7 @@ function runnerDisplayName(executionRunner?: ExecutionRunner, providerSource?: A
     return 'Codex CLI'
   }
 
-  return providerSource === 'Local' ? 'OpenHands CLI · Local' : 'OpenHands CLI'
+  return providerSource === 'Local' ? 'Codex CLI · Local' : 'Codex CLI'
 }
 
 function providerSourceLabel(source?: AiProviderSource | null) {
@@ -7918,8 +7975,8 @@ function RequestExecutionChips({
   return (
     <div className="request-execution-chip-row" aria-label="Selected execution and model">
       {!isLocalRunner && (
-        <span className={`model-chip runner-chip runner-chip--${runner === 'OpenHandsCli' ? 'openhands' : 'codex'}`}>
-          {runner === 'OpenHandsCli' ? 'OpenHands CLI' : 'Codex CLI'}
+        <span className={`model-chip runner-chip runner-chip--${runner === 'OpenHandsCli' ? 'local-codex' : 'codex'}`}>
+          Codex CLI
         </span>
       )}
       {sourceLabel && <span className="model-chip runner-chip runner-chip--source">{sourceLabel}</span>}

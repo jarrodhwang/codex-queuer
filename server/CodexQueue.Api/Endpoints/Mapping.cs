@@ -52,7 +52,8 @@ public static class Mapping
             tab.Name,
             tab.CreatedAt,
             tab.UpdatedAt,
-            tab.OpenHandsConversationId);
+            tab.OpenHandsConversationId,
+            tab.LocalCodexSessionId);
 
     public static CodexRequestDto ToDto(this CodexRequest request, bool includeRunOutput = true) =>
         new(
@@ -120,13 +121,15 @@ public static class Mapping
             run.ProviderProfileId,
             run.ProviderProfileName,
             run.ProviderSource,
-            run.OpenHandsConversationId);
+            run.OpenHandsConversationId,
+            run.LocalCodexSessionId);
 
     public static AiProviderProfileDto ToDto(this AiProviderProfile profile) =>
         new(
             profile.Id,
             profile.Name,
             profile.Source,
+            profile.LocalAiServerType,
             profile.BaseUrl,
             profile.ModelDiscoveryMode,
             profile.ApiKeyEnvironmentVariable,

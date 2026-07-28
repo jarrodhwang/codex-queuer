@@ -115,11 +115,13 @@ public sealed class AiProviderServiceTests
         var service = CreateService(_ => JsonResponse("""{"models":[]}"""));
         var profile = LocalProfile();
         profile.Source = (AiProviderSource)999;
+        profile.LocalAiServerType = (LocalAiServerType)999;
         profile.ModelDiscoveryMode = (ModelDiscoveryMode)999;
 
         var result = service.Validate(profile);
 
         Assert.Contains("Provider source is invalid.", result.Errors);
+        Assert.Contains("Local AI server type is invalid.", result.Errors);
         Assert.Contains("Model discovery mode is invalid.", result.Errors);
     }
 
@@ -148,11 +150,11 @@ public sealed class AiProviderServiceTests
     }
 
     [Theory]
-    [InlineData(AiProviderSource.Local, "qwen2.5-coder:32b", "openai/qwen2.5-coder:32b")]
+    [InlineData(AiProviderSource.Local, "qwen2.5-coder:32b", "qwen2.5-coder:32b")]
     [InlineData(AiProviderSource.OpenAi, "gpt-5", "openai/gpt-5")]
     [InlineData(AiProviderSource.Anthropic, "claude-sonnet-4", "anthropic/claude-sonnet-4")]
-    [InlineData(AiProviderSource.Local, "OPENAI/qwen", "openai/qwen")]
-    public void QualifyModel_AddsTheProviderPrefixExactlyOnce(
+    [InlineData(AiProviderSource.Local, "OPENAI/qwen", "OPENAI/qwen")]
+    public void QualifyModel_PreservesLocalIdsAndQualifiesCloudIds(
         AiProviderSource source,
         string model,
         string expected)
@@ -194,12 +196,12 @@ public sealed class AiProviderServiceTests
             model =>
             {
                 Assert.Equal("codestral:22b", model.Name);
-                Assert.Equal("openai/codestral:22b", model.Model);
+                Assert.Equal("codestral:22b", model.Model);
             },
             model =>
             {
                 Assert.Equal("qwen2.5-coder:32b", model.Name);
-                Assert.Equal("openai/qwen2.5-coder:32b", model.Model);
+                Assert.Equal("qwen2.5-coder:32b", model.Model);
                 Assert.Equal(131_072, model.MaximumContextWindow);
                 Assert.True(model.SupportsTools);
                 Assert.True(model.SupportsReasoning);
@@ -212,7 +214,7 @@ public sealed class AiProviderServiceTests
     }
 
     [Fact]
-    public async Task DiscoverModelsAsync_OffersEffortOnlyForGptOssThinkingModels()
+    public async Task DiscoverModelsAsync_InfersGptOssEffortFromStandardOllamaTags()
     {
         var service = CreateService(_ => JsonResponse(
             """
@@ -220,10 +222,8 @@ public sealed class AiProviderServiceTests
               "models": [
                 {
                   "name": "gpt-oss:20b",
-                  "capabilities": ["completion", "tools", "thinking"],
                   "details": {
-                    "family": "gptoss",
-                    "context_length": 131072
+                    "family": "gptoss"
                   }
                 }
               ]
@@ -236,7 +236,8 @@ public sealed class AiProviderServiceTests
 
         var model = Assert.Single(result.Models);
         Assert.Equal("gpt-oss:20b", model.Name);
-        Assert.Equal(131_072, model.MaximumContextWindow);
+        Assert.Null(model.MaximumContextWindow);
+        Assert.False(model.SupportsTools);
         Assert.True(model.SupportsReasoning);
         Assert.True(model.SupportsReasoningEffort);
     }
@@ -263,13 +264,93 @@ public sealed class AiProviderServiceTests
         Assert.Equal(ProviderHealthStatus.Healthy, result.HealthStatus);
         var model = Assert.Single(result.Models);
         Assert.Equal("deepseek-coder-v2:latest", model.Name);
-        Assert.Equal("openai/deepseek-coder-v2:latest", model.Model);
+        Assert.Equal("deepseek-coder-v2:latest", model.Model);
         Assert.Equal(
             [
                 "http://ollama.test:11434/api/tags",
                 "http://ollama.test:11434/v1/models",
             ],
             requests.Select(x => x.Uri).ToArray());
+    }
+
+    [Theory]
+    [InlineData(LocalAiServerType.LmStudio)]
+    [InlineData(LocalAiServerType.LlamaCpp)]
+    public async Task DiscoverModelsAsync_OpenAiCompatibleServerTypesSkipOllamaTags(
+        LocalAiServerType serverType)
+    {
+        var requests = new ConcurrentQueue<RecordedRequest>();
+        var service = CreateService(request =>
+        {
+            requests.Enqueue(Record(request));
+            return JsonResponse("""{"data":[{"id":"local-coder"}]}""");
+        });
+        var profile = LocalProfile(serverType: serverType);
+
+        var result = await service.DiscoverModelsAsync(
+            profile,
+            forceRefresh: true);
+
+        Assert.Equal(ProviderHealthStatus.Healthy, result.HealthStatus);
+        var model = Assert.Single(result.Models);
+        Assert.Equal("local-coder", model.Name);
+        Assert.Equal("local-coder", model.Model);
+        var request = Assert.Single(requests);
+        Assert.Equal("http://ollama.test:11434/v1/models", request.Uri);
+    }
+
+    [Fact]
+    public async Task DiscoverModelsAsync_CacheSeparatesLocalAiServerTypes()
+    {
+        var requests = new ConcurrentQueue<RecordedRequest>();
+        var service = CreateService(request =>
+        {
+            requests.Enqueue(Record(request));
+            return request.RequestUri!.AbsolutePath == "/api/tags"
+                ? JsonResponse("""{"models":[{"name":"ollama-model"}]}""")
+                : JsonResponse("""{"data":[{"id":"lm-studio-model"}]}""");
+        });
+        var profile = LocalProfile();
+
+        var ollama = await service.DiscoverModelsAsync(profile);
+        profile.LocalAiServerType = LocalAiServerType.LmStudio;
+        var lmStudio = await service.DiscoverModelsAsync(profile);
+
+        Assert.Equal("ollama-model", Assert.Single(ollama.Models).Name);
+        Assert.Equal("lm-studio-model", Assert.Single(lmStudio.Models).Name);
+        Assert.False(ollama.FromCache);
+        Assert.False(lmStudio.FromCache);
+        Assert.Equal(
+            [
+                "http://ollama.test:11434/api/tags",
+                "http://ollama.test:11434/v1/models",
+            ],
+            requests.Select(x => x.Uri).ToArray());
+    }
+
+    [Fact]
+    public void FindLocalModel_PrefersExactRawIdentifierOverLegacyPrefixFallback()
+    {
+        var raw = new AiProviderModel("foo", "foo");
+        var exact = new AiProviderModel("openai/foo", "openai/foo");
+
+        var result = AiProviderService.FindLocalModel(
+            [raw, exact],
+            "openai/foo");
+
+        Assert.Same(exact, result);
+    }
+
+    [Fact]
+    public void FindLocalModel_AcceptsLegacySyntheticOpenAiPrefix()
+    {
+        var raw = new AiProviderModel("foo", "foo");
+
+        var result = AiProviderService.FindLocalModel(
+            [raw],
+            "openai/foo");
+
+        Assert.Same(raw, result);
     }
 
     [Fact]
@@ -356,11 +437,13 @@ public sealed class AiProviderServiceTests
         };
 
     private static AiProviderProfile LocalProfile(
-        string baseUrl = "http://ollama.test:11434/v1") =>
+        string baseUrl = "http://ollama.test:11434/v1",
+        LocalAiServerType serverType = LocalAiServerType.Ollama) =>
         new()
         {
             Name = "Local Ollama",
             Source = AiProviderSource.Local,
+            LocalAiServerType = serverType,
             BaseUrl = baseUrl,
             ModelDiscoveryMode = ModelDiscoveryMode.Auto,
             MaximumConcurrency = 1,

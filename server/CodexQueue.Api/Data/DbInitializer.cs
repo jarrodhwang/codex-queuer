@@ -14,11 +14,14 @@ public static class DbInitializer
         var configuration = scope.ServiceProvider.GetService<IConfiguration>();
         await db.Database.EnsureCreatedAsync(cancellationToken);
         await EnsureAiProviderProfilesTableAsync(db, cancellationToken);
+        await EnsureColumnAsync(db, "AiProviderProfiles", "LocalAiServerType", "ALTER TABLE \"AiProviderProfiles\" ADD COLUMN \"LocalAiServerType\" TEXT NOT NULL DEFAULT 'Ollama'", cancellationToken);
         await EnsureColumnAsync(db, "AiProviderProfiles", "ServerMachineId", "ALTER TABLE \"AiProviderProfiles\" ADD COLUMN \"ServerMachineId\" TEXT NULL REFERENCES \"Machines\" (\"Id\") ON DELETE SET NULL", cancellationToken);
         await EnsureAiProviderProfileIndexesAsync(db, cancellationToken);
         await EnsureQueueTabsTableAsync(db, cancellationToken);
         await EnsureColumnAsync(db, "QueueTabs", "DeletedAt", "ALTER TABLE \"QueueTabs\" ADD COLUMN \"DeletedAt\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "QueueTabs", "OpenHandsConversationId", "ALTER TABLE \"QueueTabs\" ADD COLUMN \"OpenHandsConversationId\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "QueueTabs", "LocalCodexSessionId", "ALTER TABLE \"QueueTabs\" ADD COLUMN \"LocalCodexSessionId\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "QueueTabs", "LocalCodexSessionRouteKey", "ALTER TABLE \"QueueTabs\" ADD COLUMN \"LocalCodexSessionRouteKey\" TEXT NULL", cancellationToken);
         await EnsureQueueTabIndexesAsync(db, cancellationToken);
         await EnsureColumnAsync(db, "Machines", "Platform", "ALTER TABLE \"Machines\" ADD COLUMN \"Platform\" TEXT NOT NULL DEFAULT 'Auto'", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "QueueTabId", "ALTER TABLE \"Requests\" ADD COLUMN \"QueueTabId\" TEXT NULL REFERENCES \"QueueTabs\" (\"Id\") ON DELETE SET NULL", cancellationToken);
@@ -68,6 +71,7 @@ public static class DbInitializer
         await EnsureColumnAsync(db, "Runs", "ProviderSource", "ALTER TABLE \"Runs\" ADD COLUMN \"ProviderSource\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "CodexSessionId", "ALTER TABLE \"Runs\" ADD COLUMN \"CodexSessionId\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "OpenHandsConversationId", "ALTER TABLE \"Runs\" ADD COLUMN \"OpenHandsConversationId\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "Runs", "LocalCodexSessionId", "ALTER TABLE \"Runs\" ADD COLUMN \"LocalCodexSessionId\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "RawDiagnosticOutput", "ALTER TABLE \"Runs\" ADD COLUMN \"RawDiagnosticOutput\" TEXT NOT NULL DEFAULT ''", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "RetryAfter", "ALTER TABLE \"Runs\" ADD COLUMN \"RetryAfter\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Runs", "RetryReason", "ALTER TABLE \"Runs\" ADD COLUMN \"RetryReason\" TEXT NULL", cancellationToken);
@@ -129,7 +133,7 @@ public static class DbInitializer
                     || x.Status == QueueStatus.Failed)
                 .ToArrayAsync(cancellationToken);
 
-            var interruptedOpenHandsDetected = interruptedRequests.Any(x =>
+            var interruptedLocalCodexDetected = interruptedRequests.Any(x =>
                 x.ExecutionRunner == ExecutionRunner.OpenHandsCli
                 && x.Status is QueueStatus.Running or QueueStatus.CancelRequested);
             var repairedRequests = false;
@@ -155,8 +159,8 @@ public static class DbInitializer
                     request.QueueWaitReason = null;
                     request.FinishedAt = DateTimeOffset.UtcNow;
                     request.Error =
-                        "OpenHands run was interrupted by an API server restart. "
-                        + "Verify the selected machine has no orphaned OpenHands process before retrying.";
+                        "Local Codex run was interrupted by an API server restart. "
+                        + "Verify the selected machine has no orphaned Codex process before retrying.";
                     foreach (var run in request.Runs.Where(x =>
                                  x.Status is QueueStatus.Running
                                      or QueueStatus.CancelRequested
@@ -210,19 +214,19 @@ public static class DbInitializer
                 repairedRequests = true;
             }
 
-            if (interruptedOpenHandsDetected)
+            if (interruptedLocalCodexDetected)
             {
-                var queuedOpenHandsRequests = await db.Requests
+                var queuedLocalCodexRequests = await db.Requests
                     .Include(x => x.Runs)
                     .Where(x => x.ExecutionRunner == ExecutionRunner.OpenHandsCli
                         && x.Status == QueueStatus.Queued)
                     .ToArrayAsync(cancellationToken);
                 var pausedAt = DateTimeOffset.UtcNow;
                 const string pauseReason =
-                    "OpenHands request was paused after an API server restart because another OpenHands run "
-                    + "may still be active. Verify the selected machines have no orphaned OpenHands process, "
+                    "Local Codex request was paused after an API server restart because another Local Codex run "
+                    + "may still be active. Verify the selected machines have no orphaned Codex process, "
                     + "then resume this request.";
-                foreach (var request in queuedOpenHandsRequests)
+                foreach (var request in queuedLocalCodexRequests)
                 {
                     request.Status = QueueStatus.Failed;
                     request.QueueWaitReason = null;
@@ -240,7 +244,7 @@ public static class DbInitializer
                     }
                 }
 
-                repairedRequests |= queuedOpenHandsRequests.Length > 0;
+                repairedRequests |= queuedLocalCodexRequests.Length > 0;
             }
 
             if (repairedRequests)
@@ -315,6 +319,8 @@ public static class DbInitializer
                 "Name" TEXT COLLATE NOCASE NOT NULL,
                 "CodexSessionId" TEXT NULL,
                 "OpenHandsConversationId" TEXT NULL,
+                "LocalCodexSessionId" TEXT NULL,
+                "LocalCodexSessionRouteKey" TEXT NULL,
                 "CreatedAt" TEXT NOT NULL,
                 "UpdatedAt" TEXT NOT NULL,
                 "DeletedAt" TEXT NULL,
@@ -332,6 +338,7 @@ public static class DbInitializer
                 "Id" TEXT NOT NULL CONSTRAINT "PK_AiProviderProfiles" PRIMARY KEY,
                 "Name" TEXT COLLATE NOCASE NOT NULL,
                 "Source" TEXT NOT NULL,
+                "LocalAiServerType" TEXT NOT NULL DEFAULT 'Ollama',
                 "BaseUrl" TEXT NOT NULL,
                 "ModelDiscoveryMode" TEXT NOT NULL,
                 "ApiKeyEnvironmentVariable" TEXT NULL,
@@ -443,6 +450,7 @@ public static class DbInitializer
         {
             Name = "Local Ollama",
             Source = AiProviderSource.Local,
+            LocalAiServerType = LocalAiServerType.Ollama,
             BaseUrl = normalizedBaseUrl,
             ModelDiscoveryMode = ModelDiscoveryMode.Auto,
             ApiKeyEnvironmentVariable = null,
@@ -604,6 +612,7 @@ public static class DbInitializer
         run.Status = QueueStatus.Queued;
         run.CodexSessionId = null;
         run.OpenHandsConversationId = null;
+        run.LocalCodexSessionId = null;
         run.CommandPreview = null;
         run.Output = "";
         run.RawDiagnosticOutput = "";

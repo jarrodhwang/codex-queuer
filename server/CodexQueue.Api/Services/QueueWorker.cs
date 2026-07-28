@@ -183,12 +183,7 @@ public sealed class QueueWorker(
             return true;
         }
 
-        var clearNoActivityConversation =
-            await ShouldClearNoActivityOpenHandsConversationAsync(
-                db,
-                request,
-                cancellationToken);
-        ResumeRequest(request, clearNoActivityConversation);
+        ResumeRequest(request);
         if (request.Status == QueueStatus.Queued)
         {
             var projectPriorityRequests = await db.Requests
@@ -446,7 +441,7 @@ public sealed class QueueWorker(
                     candidate.StartedAt ??= DateTimeOffset.UtcNow;
                     candidateRun.Status = QueueStatus.Running;
                     candidateRun.StartedAt ??= DateTimeOffset.UtcNow;
-                    var runnerName = candidate.ExecutionRunner == ExecutionRunner.OpenHandsCli ? "OpenHands" : "Codex";
+                    var runnerName = candidate.ExecutionRunner == ExecutionRunner.OpenHandsCli ? "Local Codex" : "Codex";
                     candidateRun.Output = TrimOutput(candidateRun.Output + "Dispatching " + runnerName + " " + candidateRun.Kind.ToString().ToLowerInvariant() + " run on " + (candidate.Machine?.Name ?? candidate.Project?.Machine?.Name ?? "target machine") + "..." + Environment.NewLine);
                     dispatches.Add(new PendingDispatch(queueLane, candidate.Id, candidateRun.Kind, execution));
                 }
@@ -659,10 +654,10 @@ public sealed class QueueWorker(
         var project = request.Project ?? throw new InvalidOperationException("Request project is missing.");
         var machine = request.ExecutionRunner == ExecutionRunner.CodexCli
             ? request.Project?.Machine ?? request.Machine ?? throw new InvalidOperationException("Request machine is missing.")
-            : request.Machine ?? throw new InvalidOperationException("OpenHands request machine snapshot is missing.");
+            : request.Machine ?? throw new InvalidOperationException("Local Codex request machine snapshot is missing.");
         var projectPath = request.ExecutionRunner == ExecutionRunner.CodexCli
             ? project.Path
-            : ValidateOpenHandsExecutionTarget(request, project, machine);
+            : ValidateLocalCodexExecutionTarget(request, project, machine);
         var attachmentsCleaned = false;
         var attachmentMaterializationAttempted = false;
 
@@ -682,15 +677,15 @@ public sealed class QueueWorker(
                 return commitResult.Success;
             }
 
-            var runnerName = request.ExecutionRunner == ExecutionRunner.OpenHandsCli ? "OpenHands" : "Codex";
+            var runnerName = request.ExecutionRunner == ExecutionRunner.OpenHandsCli ? "Local Codex" : "Codex";
             await AppendOutputAsync(run.Id, "Preparing " + runnerName + " request..." + Environment.NewLine, CancellationToken.None);
             var prompt = BuildProjectScopedPrompt(projectPath, BuildRequestPrompt(request));
             if (request.ExecutionRunner == ExecutionRunner.OpenHandsCli
                 && !string.IsNullOrWhiteSpace(request.AttachmentsJson))
             {
                 throw new InvalidOperationException(
-                    "Attachments are not available for OpenHands in this release. "
-                    + "Remove the attachments or create a new OpenHands request.");
+                    "Attachments are not available for Local Codex in this release. "
+                    + "Remove the attachments or create a new Local Codex request.");
             }
 
             attachmentMaterializationAttempted = !string.IsNullOrWhiteSpace(request.AttachmentsJson);
@@ -764,16 +759,6 @@ public sealed class QueueWorker(
 
             await CompleteRunAsync(requestId, run.Id, kind, result, cancellationToken);
             return result.Success;
-        }
-        catch (OpenHandsRunCancelledException ex)
-        {
-            await PersistOpenHandsCancellationDiagnosticsAsync(
-                requestId,
-                run.Id,
-                ex.RawDiagnosticOutput,
-                ex.ConversationId);
-            await MarkCancelledAsync(requestId, run.Id, kind, CancellationToken.None);
-            return false;
         }
         catch (OperationCanceledException)
         {
@@ -955,7 +940,7 @@ public sealed class QueueWorker(
             .ToArrayAsync(cancellationToken);
 
         var activeRequestIds = _activeRequests.Keys.ToHashSet();
-        var changed = FailClosedInterruptedOpenHandsRequests(requests, activeRequestIds);
+        var changed = FailClosedInterruptedLocalCodexRequests(requests, activeRequestIds);
         foreach (var request in requests)
         {
             changed |= ReconcileRequestState(request, activeRequestIds.Contains(request.Id));
@@ -967,7 +952,7 @@ public sealed class QueueWorker(
         }
     }
 
-    public static bool FailClosedInterruptedOpenHandsRequests(
+    public static bool FailClosedInterruptedLocalCodexRequests(
         IReadOnlyCollection<CodexRequest> requests,
         IReadOnlySet<Guid> activeRequestIds)
     {
@@ -986,8 +971,8 @@ public sealed class QueueWorker(
 
         var failedAt = DateTimeOffset.UtcNow;
         const string interruptedReason =
-            "OpenHands run lost its server-side process owner. "
-            + "Verify the selected machine has no orphaned OpenHands process before retrying.";
+            "Local Codex run lost its server-side process owner. "
+            + "Verify the selected machine has no orphaned Codex process before retrying.";
         foreach (var request in interruptedRequests)
         {
             request.Status = QueueStatus.Failed;
@@ -1006,8 +991,8 @@ public sealed class QueueWorker(
         }
 
         const string queuedReason =
-            "OpenHands request was paused because another OpenHands run may still be active without "
-            + "a server-side process owner. Verify the selected machines have no orphaned OpenHands "
+            "Local Codex request was paused because another Local Codex run may still be active without "
+            + "a server-side process owner. Verify the selected machines have no orphaned Codex "
             + "process, then resume this request.";
         foreach (var request in requests.Where(request =>
                      request.ExecutionRunner == ExecutionRunner.OpenHandsCli
@@ -1221,9 +1206,7 @@ public sealed class QueueWorker(
             .ThenByDescending(x => x.Id)
             .FirstOrDefault();
 
-    private static void ResumeRequest(
-        CodexRequest request,
-        bool clearNoActivityOpenHandsConversation)
+    private static void ResumeRequest(CodexRequest request)
     {
         var requestRun = GetLatestRunOfKind(request.Runs, RunKind.Request);
         var commitRun = GetLatestRunOfKind(request.Runs, RunKind.Commit);
@@ -1246,11 +1229,6 @@ public sealed class QueueWorker(
             request.Runs.Add(requestRun);
         }
 
-        if (clearNoActivityOpenHandsConversation && request.QueueTab is not null)
-        {
-            request.QueueTab.OpenHandsConversationId = null;
-            request.QueueTab.UpdatedAt = DateTimeOffset.UtcNow;
-        }
         ClearRequestRetryState(request);
 
         if (requestRun.Status != QueueStatus.Succeeded)
@@ -1292,56 +1270,6 @@ public sealed class QueueWorker(
         request.Error = null;
     }
 
-    private static async Task<bool> ShouldClearNoActivityOpenHandsConversationAsync(
-        AppDbContext db,
-        CodexRequest request,
-        CancellationToken cancellationToken)
-    {
-        var requestRun = GetLatestRunOfKind(request.Runs, RunKind.Request);
-        if (request.ExecutionRunner != ExecutionRunner.OpenHandsCli
-            || requestRun?.Status != QueueStatus.Failed
-            || request.QueueTab?.OpenHandsConversationId is not { } tabConversationId
-            || !string.Equals(
-                requestRun.OpenHandsConversationId,
-                tabConversationId,
-                StringComparison.OrdinalIgnoreCase)
-            || !ContainsOpenHandsErrorCode(
-                requestRun.Output,
-                OpenHandsCommandRunner.NoAgentActivityErrorCode))
-        {
-            return false;
-        }
-
-        var establishedConversationExists =
-            await HasEstablishedOpenHandsConversationAsync(
-                db,
-                request.QueueTabId,
-                tabConversationId,
-                requestRun.Id,
-                cancellationToken);
-        return !establishedConversationExists;
-    }
-
-    private static async Task<bool> HasEstablishedOpenHandsConversationAsync(
-        AppDbContext db,
-        Guid? queueTabId,
-        string conversationId,
-        Guid excludedRunId,
-        CancellationToken cancellationToken)
-    {
-        var priorOutputs = await (
-                from priorRun in db.Runs.AsNoTracking()
-                join priorRequest in db.Requests.AsNoTracking()
-                    on priorRun.RequestId equals priorRequest.Id
-                where priorRun.Id != excludedRunId
-                      && priorRequest.QueueTabId == queueTabId
-                      && priorRun.ExecutionRunner == ExecutionRunner.OpenHandsCli
-                      && priorRun.OpenHandsConversationId == conversationId
-                select priorRun.Output)
-            .ToArrayAsync(cancellationToken);
-        return priorOutputs.Any(ContainsOpenHandsAgentActivity);
-    }
-
     private static CodexRun CreateCommitRun(CodexRequest request) =>
         ApplyCommitModel(request, new CodexRun
         {
@@ -1369,6 +1297,7 @@ public sealed class QueueWorker(
         run.Status = QueueStatus.Queued;
         run.CodexSessionId = null;
         run.OpenHandsConversationId = null;
+        run.LocalCodexSessionId = null;
         run.CommandPreview = null;
         run.Output = "";
         run.RawDiagnosticOutput = "";
@@ -1420,58 +1349,11 @@ public sealed class QueueWorker(
     private static void UpdateRequestSummary(CodexRequest request, string? requestOutput = null)
     {
         var output = requestOutput ?? GetLatestRunOfKind(request.Runs, RunKind.Request)?.Output;
-        var summary = request.ExecutionRunner == ExecutionRunner.OpenHandsCli
-            ? LastOpenHandsMessage(output ?? string.Empty)
-            : LastAssistantMessage(output ?? string.Empty);
+        var summary = LastAssistantMessage(output ?? string.Empty);
         if (!string.IsNullOrWhiteSpace(summary))
         {
             request.Summary = summary;
         }
-    }
-
-    private static string? LastOpenHandsMessage(string output)
-    {
-        string? lastMessage = null;
-        foreach (var line in output.Split(
-                     '\n',
-                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            try
-            {
-                using var document = JsonDocument.Parse(line);
-                var root = document.RootElement;
-                if (!string.Equals(
-                        ReadString(root, "kind"),
-                        "MessageEvent",
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                var role = ReadString(root, "role");
-                var source = ReadString(root, "source");
-                if (!string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase)
-                    && !string.Equals(source, "agent", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                var message = ReadContentText(root)
-                    ?? ReadString(root, "message")
-                    ?? ReadString(root, "text");
-                message = CompletionTextCleaner.Sanitize(message);
-                if (!string.IsNullOrWhiteSpace(message))
-                {
-                    lastMessage = message;
-                }
-            }
-            catch (JsonException)
-            {
-                // OpenHands also emits safe, non-JSON lifecycle lines.
-            }
-        }
-
-        return lastMessage;
     }
 
     private static void ClearRequestRetryState(CodexRequest request)
@@ -1533,48 +1415,22 @@ public sealed class QueueWorker(
         }
         else
         {
-            var conversationId = result.OpenHandsConversationId ?? run.OpenHandsConversationId;
-            run.OpenHandsConversationId = conversationId;
-            run.RawDiagnosticOutput = TrimOutput(result.RawDiagnosticOutput ?? run.RawDiagnosticOutput);
-            var establishedConversationExists =
-                result.DiscardOpenHandsConversation
-                && !string.IsNullOrWhiteSpace(conversationId)
-                && await HasEstablishedOpenHandsConversationAsync(
-                    db,
-                    request.QueueTabId,
-                    conversationId,
-                    run.Id,
-                    cancellationToken);
-            if (kind == RunKind.Request && request.QueueTab is not null)
+            var sessionId = result.LocalCodexSessionId ?? run.LocalCodexSessionId;
+            run.LocalCodexSessionId = sessionId;
+            if (kind == RunKind.Request
+                && request.QueueTab is not null
+                && !string.IsNullOrWhiteSpace(sessionId))
             {
-                if (!result.Success && result.DiscardOpenHandsConversation)
-                {
-                    if (!establishedConversationExists
-                        && (request.QueueTab.OpenHandsConversationId is null
-                        || string.Equals(
-                            request.QueueTab.OpenHandsConversationId,
-                            conversationId,
-                            StringComparison.OrdinalIgnoreCase)))
-                    {
-                        request.QueueTab.OpenHandsConversationId = null;
-                        request.QueueTab.UpdatedAt = DateTimeOffset.UtcNow;
-                    }
-                }
-                else if (!string.IsNullOrWhiteSpace(conversationId))
-                {
-                    request.QueueTab.OpenHandsConversationId = conversationId;
-                    request.QueueTab.UpdatedAt = DateTimeOffset.UtcNow;
-                }
+                request.QueueTab.LocalCodexSessionId = sessionId;
+                request.QueueTab.LocalCodexSessionRouteKey =
+                    result.LocalCodexSessionRouteKey;
+                request.QueueTab.UpdatedAt = DateTimeOffset.UtcNow;
             }
         }
         run.ExitCode = result.ExitCode;
         run.FinishedAt = DateTimeOffset.UtcNow;
         run.Status = result.Success ? QueueStatus.Succeeded : QueueStatus.Failed;
-        run.Error = result.Success
-            ? null
-            : request.ExecutionRunner == ExecutionRunner.OpenHandsCli
-                ? LastOpenHandsError(result.Output)
-                : LastUsefulLine(result.Output);
+        run.Error = result.Success ? null : LastUsefulLine(result.Output);
         request.QueueWaitReason = null;
 
         if (kind == RunKind.Commit)
@@ -1614,146 +1470,6 @@ public sealed class QueueWorker(
         }
 
         await TrySaveChangesAsync(db, "complete run", cancellationToken);
-    }
-
-    private static string? LastOpenHandsError(string output)
-    {
-        string? plainTextFallback = null;
-        foreach (var line in output.Split(
-                     '\n',
-                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Reverse())
-        {
-            try
-            {
-                using var document = JsonDocument.Parse(line);
-                var root = document.RootElement;
-                var kind = ReadString(root, "kind");
-                if (string.IsNullOrWhiteSpace(kind)
-                    || !kind.Contains("Error", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                var message = ReadString(root, "message")
-                    ?? ReadString(root, "detail")
-                    ?? ReadString(root, "error");
-                if (message is null
-                    && root.TryGetProperty("error", out var error)
-                    && error.ValueKind == JsonValueKind.Object)
-                {
-                    message = ReadString(error, "message") ?? ReadString(error, "detail");
-                }
-
-                if (!string.IsNullOrWhiteSpace(message))
-                {
-                    return message.Length <= 2_000 ? message : message[..2_000];
-                }
-            }
-            catch (JsonException)
-            {
-                if (!line.StartsWith("$ ", StringComparison.Ordinal)
-                    && OpenHandsCommandRunner.ExtractConversationId(line) is null
-                    && !CompletionTextCleaner.IsNoiseLine(line))
-                {
-                    plainTextFallback ??= line.Length <= 2_000 ? line : line[..2_000];
-                }
-            }
-        }
-
-        return plainTextFallback ?? "OpenHands reported an execution error.";
-    }
-
-    private static bool ContainsOpenHandsErrorCode(string output, string expectedCode)
-    {
-        foreach (var line in output.Split(
-                     '\n',
-                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            try
-            {
-                using var document = JsonDocument.Parse(line);
-                var root = document.RootElement;
-                if (string.Equals(
-                        ReadString(root, "kind"),
-                        "ConversationErrorEvent",
-                        StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(
-                        ReadString(root, "code"),
-                        expectedCode,
-                        StringComparison.Ordinal))
-                {
-                    return true;
-                }
-            }
-            catch (JsonException)
-            {
-                // Only trusted structured runner events can invalidate a
-                // conversation; never interpret arbitrary tool output as state.
-            }
-        }
-
-        return false;
-    }
-
-    private static bool ContainsOpenHandsAgentActivity(string output)
-    {
-        foreach (var line in output.Split(
-                     '\n',
-                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            try
-            {
-                using var document = JsonDocument.Parse(line);
-                var root = document.RootElement;
-                var kind = ReadString(root, "kind")
-                    ?? ReadString(root, "event_type")
-                    ?? ReadString(root, "type");
-                var source = ReadString(root, "source")
-                    ?? ReadString(root, "sender");
-                if ((kind is "ActionEvent" or "action")
-                    && (string.IsNullOrWhiteSpace(source)
-                        || source.Equals("agent", StringComparison.OrdinalIgnoreCase)
-                        || source.Equals("assistant", StringComparison.OrdinalIgnoreCase)))
-                {
-                    return true;
-                }
-
-                var role = ReadString(root, "role");
-                if ((kind is "MessageEvent" or "message")
-                    && (source?.Equals("agent", StringComparison.OrdinalIgnoreCase) == true
-                        || source?.Equals("assistant", StringComparison.OrdinalIgnoreCase) == true
-                        || role?.Equals("assistant", StringComparison.OrdinalIgnoreCase) == true)
-                    && (HasNonEmptyJsonProperty(root, "message")
-                        || HasNonEmptyJsonProperty(root, "content")))
-                {
-                    return true;
-                }
-            }
-            catch (JsonException)
-            {
-                // Prior activity is established only by safe structured events.
-            }
-        }
-
-        return false;
-    }
-
-    private static bool HasNonEmptyJsonProperty(
-        JsonElement value,
-        string propertyName)
-    {
-        if (!value.TryGetProperty(propertyName, out var property))
-        {
-            return false;
-        }
-
-        return property.ValueKind switch
-        {
-            JsonValueKind.String => !string.IsNullOrWhiteSpace(property.GetString()),
-            JsonValueKind.Array => property.GetArrayLength() > 0,
-            JsonValueKind.Object => property.EnumerateObject().Any(),
-            _ => false,
-        };
     }
 
     private sealed record UsageLimitMetadata(
@@ -2095,35 +1811,6 @@ public sealed class QueueWorker(
         await TrySaveChangesAsync(db, "mark cancelled", cancellationToken);
     }
 
-    private async Task PersistOpenHandsCancellationDiagnosticsAsync(
-        Guid requestId,
-        Guid runId,
-        string rawDiagnosticOutput,
-        string? conversationId)
-    {
-        await using var scope = scopeFactory.CreateAsyncScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        var request = await db.Requests
-            .Include(x => x.QueueTab)
-            .Include(x => x.Runs)
-            .FirstOrDefaultAsync(x => x.Id == requestId);
-        var run = request?.Runs.FirstOrDefault(x => x.Id == runId);
-        if (request is null || run is null)
-        {
-            return;
-        }
-
-        run.RawDiagnosticOutput = TrimOutput(rawDiagnosticOutput);
-        run.OpenHandsConversationId = conversationId ?? run.OpenHandsConversationId;
-        if (request.QueueTab is not null && !string.IsNullOrWhiteSpace(conversationId))
-        {
-            request.QueueTab.OpenHandsConversationId = conversationId;
-            request.QueueTab.UpdatedAt = DateTimeOffset.UtcNow;
-        }
-
-        await TrySaveChangesAsync(db, "persist OpenHands cancellation diagnostics", CancellationToken.None);
-    }
-
     private async Task MarkFailedAsync(Guid requestId, Guid runId, RunKind kind, Exception exception, CancellationToken cancellationToken)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
@@ -2413,7 +2100,7 @@ public sealed class QueueWorker(
         var runnerBoundary = request.ExecutionRunner == ExecutionRunner.OpenHandsCli
             ? """
 
-              OpenHands safety constraints for this headless run:
+              Local Codex safety constraints for this queued run:
               - Work only inside the selected project root, except for normal read-only operating-system files needed by build tools.
               - Do not modify, stage, or commit anything under `.codex-queue`; it contains temporary control-plane task inputs that are removed after this run.
               - Do not create Git commits, push, force-push, rewrite history, or alter remote branches.
@@ -2462,7 +2149,7 @@ public sealed class QueueWorker(
         {userPrompt}
         """;
 
-    private static string ValidateOpenHandsExecutionTarget(
+    private static string ValidateLocalCodexExecutionTarget(
         CodexRequest request,
         Project project,
         TargetMachine machine)
@@ -2470,21 +2157,21 @@ public sealed class QueueWorker(
         if (project.MachineId != request.MachineId || machine.Id != request.MachineId)
         {
             throw new InvalidOperationException(
-                "The selected machine changed after this OpenHands request was queued. The task was not moved; create a new request for the new machine.");
+                "The selected machine changed after this Local Codex request was queued. The task was not moved; create a new request for the new machine.");
         }
 
         if (string.IsNullOrWhiteSpace(request.ExecutionProjectPath)
             || !string.Equals(request.ExecutionProjectPath, project.Path, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
-                "The selected project path changed after this OpenHands request was queued. The task was not moved; create a new request for the new path.");
+                "The selected project path changed after this Local Codex request was queued. The task was not moved; create a new request for the new path.");
         }
 
         if (!request.ExecutionMachineUpdatedAt.HasValue
             || request.ExecutionMachineUpdatedAt.Value != machine.UpdatedAt)
         {
             throw new InvalidOperationException(
-                "The selected machine configuration changed after this OpenHands request was queued. The task was not moved; review the machine and create a new request.");
+                "The selected machine configuration changed after this Local Codex request was queued. The task was not moved; review the machine and create a new request.");
         }
 
         return request.ExecutionProjectPath;

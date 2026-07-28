@@ -61,7 +61,7 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
 {
     public const string LocalPlaceholderApiKey = "local-llm";
     public const string LocalApiKeyPlaceholder = LocalPlaceholderApiKey;
-    // OpenHands needs a large project prompt window. 32K is the supported
+    // Local Codex runs need a large project prompt window. 32K is the supported
     // minimum; 64K remains the preferred default for multi-step work.
     public const int ContextWarningThreshold = 32_768;
     public const int RecommendedContextWindow = 65_536;
@@ -88,6 +88,11 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
         if (!Enum.IsDefined(typeof(AiProviderSource), profile.Source))
         {
             errors.Add("Provider source is invalid.");
+        }
+
+        if (!Enum.IsDefined(typeof(LocalAiServerType), profile.LocalAiServerType))
+        {
+            errors.Add("Local AI server type is invalid.");
         }
 
         if (!Enum.IsDefined(typeof(ModelDiscoveryMode), profile.ModelDiscoveryMode))
@@ -124,7 +129,7 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
                  && !string.IsNullOrWhiteSpace(secretReference))
         {
             errors.Add(
-                "Local/Ollama profiles must not configure an API key environment-variable reference in this release.");
+                "Local AI server profiles must not configure an API key environment-variable reference in this release.");
         }
         else if (profile.Source != AiProviderSource.Local && string.IsNullOrWhiteSpace(secretReference))
         {
@@ -184,7 +189,7 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
             RecommendedContextWindow,
             "The configured context window is below the "
             + ContextWarningThreshold.ToString("N0", CultureInfo.InvariantCulture)
-            + "-token minimum required for reliable OpenHands project prompts.");
+            + "-token minimum required for reliable Local Codex project prompts.");
     }
 
     public void ApplyHealth(AiProviderProfile profile, AiProviderDiscoveryResult result)
@@ -206,7 +211,7 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
         ArgumentNullException.ThrowIfNull(profile);
 
         // The first vertical slice intentionally performs discovery only against
-        // unauthenticated Local/Ollama profiles. Never resolve or transmit an
+        // unauthenticated Local AI server profiles. Never resolve or transmit an
         // environment-referenced cloud credential from this browser-triggerable path.
         if (profile.Source != AiProviderSource.Local)
         {
@@ -291,7 +296,7 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
             }
             else if (!string.Equals(path, "/v1", StringComparison.OrdinalIgnoreCase))
             {
-                error = "A Local Ollama base URL must use the /v1 endpoint.";
+                error = "A Local AI server base URL must use the /v1 endpoint.";
                 return false;
             }
             else
@@ -321,10 +326,42 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
                 nameof(model));
         }
 
+        if (source == AiProviderSource.Local)
+        {
+            return normalized;
+        }
+
         var prefix = source == AiProviderSource.Anthropic ? "anthropic/" : "openai/";
         return normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
             ? prefix + normalized[prefix.Length..]
             : prefix + normalized;
+    }
+
+    public static AiProviderModel? FindLocalModel(
+        IEnumerable<AiProviderModel> models,
+        string selectedModel)
+    {
+        ArgumentNullException.ThrowIfNull(models);
+        ArgumentException.ThrowIfNullOrWhiteSpace(selectedModel);
+        var normalized = selectedModel.Trim();
+
+        var exact = models.FirstOrDefault(model =>
+            string.Equals(model.Model, normalized, StringComparison.Ordinal));
+        if (exact is not null)
+        {
+            return exact;
+        }
+
+        const string legacyPrefix = "openai/";
+        if (!normalized.StartsWith(legacyPrefix, StringComparison.OrdinalIgnoreCase)
+            || normalized.Length == legacyPrefix.Length)
+        {
+            return null;
+        }
+
+        var legacyRawModel = normalized[legacyPrefix.Length..];
+        return models.FirstOrDefault(model =>
+            string.Equals(model.Model, legacyRawModel, StringComparison.Ordinal));
     }
 
     string IAiProviderSecretResolver.ResolveApiKeyForExecution(AiProviderProfile profile) =>
@@ -339,7 +376,7 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
             if (!string.IsNullOrWhiteSpace(reference))
             {
                 throw new InvalidOperationException(
-                    "Authenticated Local/Ollama profiles are not supported in this release.");
+                    "Authenticated Local AI server profiles are not supported in this release.");
             }
 
             return LocalPlaceholderApiKey;
@@ -373,7 +410,8 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
         CancellationToken cancellationToken)
     {
         var attempts = new List<DiscoveryAttempt>();
-        if (profile.ModelDiscoveryMode != ModelDiscoveryMode.OpenAi
+        if (profile.LocalAiServerType == LocalAiServerType.Ollama
+            && profile.ModelDiscoveryMode != ModelDiscoveryMode.OpenAi
             && profile.Source == AiProviderSource.Local)
         {
             attempts.Add(await ReadModelsAsync(
@@ -528,18 +566,20 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
             {
                 var name = ReadString(x, "name") ?? ReadString(x, "model") ?? "";
                 var capabilities = ReadStringArray(x, "capabilities");
-                var supportsReasoning = capabilities.Contains(
-                    "thinking",
-                    StringComparer.OrdinalIgnoreCase);
                 var family = ReadNestedString(x, "details", "family");
+                var supportsReasoningEffort =
+                    string.Equals(family, "gptoss", StringComparison.OrdinalIgnoreCase)
+                    || name.StartsWith("gpt-oss", StringComparison.OrdinalIgnoreCase);
+                var supportsReasoning = supportsReasoningEffort
+                    || capabilities.Contains(
+                        "thinking",
+                        StringComparer.OrdinalIgnoreCase);
                 return new DiscoveredModel(
                     name,
                     ReadPositiveInt32(x, "details", "context_length"),
                     capabilities.Contains("tools", StringComparer.OrdinalIgnoreCase),
                     supportsReasoning,
-                    supportsReasoning
-                    && (string.Equals(family, "gptoss", StringComparison.OrdinalIgnoreCase)
-                        || name.StartsWith("gpt-oss", StringComparison.OrdinalIgnoreCase)));
+                    supportsReasoningEffort);
             })
             .ToArray();
     }
@@ -556,13 +596,24 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
             .Where(x => x.ValueKind == JsonValueKind.Object)
             .Select(x => ReadString(x, "id") ?? ReadString(x, "name"))
             .Where(x => !string.IsNullOrWhiteSpace(x))
-            .Select(x => new DiscoveredModel(x!))
+            .Select(x =>
+            {
+                var name = x!;
+                var supportsReasoningEffort = name.Contains(
+                    "gpt-oss",
+                    StringComparison.OrdinalIgnoreCase);
+                return new DiscoveredModel(
+                    name,
+                    SupportsReasoning: supportsReasoningEffort,
+                    SupportsReasoningEffort: supportsReasoningEffort);
+            })
             .ToArray();
     }
 
     private static string BuildCacheKey(AiProviderProfile profile, string normalizedBaseUrl) =>
         profile.Id
         + "|" + profile.Source
+        + "|" + profile.LocalAiServerType
         + "|" + profile.ModelDiscoveryMode
         + "|" + profile.ApiKeyEnvironmentVariable
         + "|" + normalizedBaseUrl;

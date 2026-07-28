@@ -61,6 +61,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         {
             entity.Property(x => x.Name).HasMaxLength(160).UseCollation("NOCASE").IsRequired();
             entity.Property(x => x.Source).HasConversion<string>().HasMaxLength(24);
+            entity.Property(x => x.LocalAiServerType).HasConversion<string>().HasMaxLength(24);
             entity.Property(x => x.BaseUrl).HasMaxLength(2048).IsRequired();
             entity.Property(x => x.ModelDiscoveryMode).HasConversion<string>().HasMaxLength(24);
             entity.Property(x => x.ApiKeyEnvironmentVariable).HasMaxLength(160);
@@ -126,6 +127,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.Name).HasMaxLength(80).UseCollation("NOCASE").IsRequired();
             entity.Property(x => x.CodexSessionId).HasMaxLength(80);
             entity.Property(x => x.OpenHandsConversationId).HasMaxLength(80);
+            entity.Property(x => x.LocalCodexSessionId).HasMaxLength(80);
+            entity.Property(x => x.LocalCodexSessionRouteKey).HasMaxLength(64);
             entity.Property(x => x.DeletedAt);
             entity.HasOne(x => x.Project)
                 .WithMany(x => x.QueueTabs)
@@ -149,6 +152,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.ModelSpeed).HasMaxLength(32);
             entity.Property(x => x.CodexSessionId).HasMaxLength(80);
             entity.Property(x => x.OpenHandsConversationId).HasMaxLength(80);
+            entity.Property(x => x.LocalCodexSessionId).HasMaxLength(80);
             entity.Property(x => x.CommandPreview).HasMaxLength(2048);
             entity.Property(x => x.RetryAfter);
             entity.Property(x => x.RetryReason).HasMaxLength(512);

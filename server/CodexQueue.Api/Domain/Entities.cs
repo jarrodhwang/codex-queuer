@@ -53,6 +53,7 @@ public sealed class AiProviderProfile
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Name { get; set; } = "";
     public AiProviderSource Source { get; set; }
+    public LocalAiServerType LocalAiServerType { get; set; } = LocalAiServerType.Ollama;
     public string BaseUrl { get; set; } = "";
     public ModelDiscoveryMode ModelDiscoveryMode { get; set; } = ModelDiscoveryMode.Auto;
     public string? ApiKeyEnvironmentVariable { get; set; }
@@ -80,6 +81,8 @@ public sealed class QueueTab
     public string Name { get; set; } = "";
     public string? CodexSessionId { get; set; }
     public string? OpenHandsConversationId { get; set; }
+    public string? LocalCodexSessionId { get; set; }
+    public string? LocalCodexSessionRouteKey { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? DeletedAt { get; set; }
@@ -146,6 +149,7 @@ public sealed class CodexRun
     public QueueStatus Status { get; set; } = QueueStatus.Queued;
     public string? CodexSessionId { get; set; }
     public string? OpenHandsConversationId { get; set; }
+    public string? LocalCodexSessionId { get; set; }
     public string? CommandPreview { get; set; }
     public string Output { get; set; } = "";
     public string RawDiagnosticOutput { get; set; } = "";

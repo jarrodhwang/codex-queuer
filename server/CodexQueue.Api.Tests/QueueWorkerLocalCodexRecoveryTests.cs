@@ -7,37 +7,37 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CodexQueue.Api.Tests;
 
-public sealed class QueueWorkerOpenHandsRecoveryTests
+public sealed class QueueWorkerLocalCodexRecoveryTests
 {
     [Fact]
-    public void FailClosedInterruptedOpenHandsRequests_PausesLocalWorkWithoutChangingCodex()
+    public void FailClosedInterruptedLocalCodexRequests_PausesLocalWorkWithoutChangingCodex()
     {
         var interrupted = CreateRequest(ExecutionRunner.OpenHandsCli, QueueStatus.Running, 1);
-        var waitingOpenHands = CreateRequest(ExecutionRunner.OpenHandsCli, QueueStatus.Queued, 2);
+        var waitingLocalCodex = CreateRequest(ExecutionRunner.OpenHandsCli, QueueStatus.Queued, 2);
         var waitingCodex = CreateRequest(ExecutionRunner.CodexCli, QueueStatus.Queued, 3);
 
-        var changed = QueueWorker.FailClosedInterruptedOpenHandsRequests(
-            [interrupted, waitingOpenHands, waitingCodex],
+        var changed = QueueWorker.FailClosedInterruptedLocalCodexRequests(
+            [interrupted, waitingLocalCodex, waitingCodex],
             new HashSet<Guid>());
 
         Assert.True(changed);
         Assert.Equal(QueueStatus.Failed, interrupted.Status);
-        Assert.Contains("orphaned OpenHands process", interrupted.Error, StringComparison.Ordinal);
+        Assert.Contains("orphaned Codex process", interrupted.Error, StringComparison.Ordinal);
         Assert.All(interrupted.Runs, run => Assert.Equal(QueueStatus.Failed, run.Status));
-        Assert.Equal(QueueStatus.Failed, waitingOpenHands.Status);
-        Assert.Contains("then resume this request", waitingOpenHands.Error, StringComparison.Ordinal);
-        Assert.All(waitingOpenHands.Runs, run => Assert.Equal(QueueStatus.Failed, run.Status));
+        Assert.Equal(QueueStatus.Failed, waitingLocalCodex.Status);
+        Assert.Contains("then resume this request", waitingLocalCodex.Error, StringComparison.Ordinal);
+        Assert.All(waitingLocalCodex.Runs, run => Assert.Equal(QueueStatus.Failed, run.Status));
         Assert.Equal(QueueStatus.Queued, waitingCodex.Status);
         Assert.All(waitingCodex.Runs, run => Assert.Equal(QueueStatus.Queued, run.Status));
     }
 
     [Fact]
-    public void FailClosedInterruptedOpenHandsRequests_DoesNotTouchAnActiveRun()
+    public void FailClosedInterruptedLocalCodexRequests_DoesNotTouchAnActiveRun()
     {
         var active = CreateRequest(ExecutionRunner.OpenHandsCli, QueueStatus.Running, 1);
         var waiting = CreateRequest(ExecutionRunner.OpenHandsCli, QueueStatus.Queued, 2);
 
-        var changed = QueueWorker.FailClosedInterruptedOpenHandsRequests(
+        var changed = QueueWorker.FailClosedInterruptedLocalCodexRequests(
             [active, waiting],
             new HashSet<Guid> { active.Id });
 
@@ -47,7 +47,7 @@ public sealed class QueueWorkerOpenHandsRecoveryTests
     }
 
     [Fact]
-    public void FailClosedInterruptedOpenHandsRequests_PausesWorkForUnownedCancellation()
+    public void FailClosedInterruptedLocalCodexRequests_PausesWorkForUnownedCancellation()
     {
         var cancelRequested = CreateRequest(
             ExecutionRunner.OpenHandsCli,
@@ -55,13 +55,13 @@ public sealed class QueueWorkerOpenHandsRecoveryTests
             1);
         var waiting = CreateRequest(ExecutionRunner.OpenHandsCli, QueueStatus.Queued, 2);
 
-        var changed = QueueWorker.FailClosedInterruptedOpenHandsRequests(
+        var changed = QueueWorker.FailClosedInterruptedLocalCodexRequests(
             [cancelRequested, waiting],
             new HashSet<Guid>());
 
         Assert.True(changed);
         Assert.Equal(QueueStatus.Failed, cancelRequested.Status);
-        Assert.Contains("orphaned OpenHands process", cancelRequested.Error, StringComparison.Ordinal);
+        Assert.Contains("orphaned Codex process", cancelRequested.Error, StringComparison.Ordinal);
         Assert.Equal(QueueStatus.Failed, waiting.Status);
         Assert.Contains("then resume this request", waiting.Error, StringComparison.Ordinal);
     }
@@ -71,7 +71,7 @@ public sealed class QueueWorkerOpenHandsRecoveryTests
     {
         var testRoot = Path.Combine(
             AppContext.BaseDirectory,
-            "openhands-worker-concurrency-tests",
+            "local-codex-worker-concurrency-tests",
             Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(testRoot);
         var databasePath = Path.Combine(testRoot, "queue.db");
@@ -117,7 +117,7 @@ public sealed class QueueWorkerOpenHandsRecoveryTests
                 first.ProviderProfileId = profile.Id;
                 first.ExecutionProjectPath = project.Path;
                 first.ExecutionMachineUpdatedAt = machine.UpdatedAt;
-                first.Model = "openai/test-model";
+                first.Model = "test-model";
                 first.PermissionMode = PermissionMode.FullAccess;
                 first.OpenHandsAlwaysApproveConfirmed = true;
                 foreach (var run in first.Runs)
@@ -201,7 +201,7 @@ public sealed class QueueWorkerOpenHandsRecoveryTests
         {
             Prompt = "test request",
             Model = executionRunner == ExecutionRunner.OpenHandsCli
-                ? "openai/test-model"
+                ? "test-model"
                 : "gpt-5",
             ExecutionRunner = executionRunner,
             QueueOrder = queueOrder,

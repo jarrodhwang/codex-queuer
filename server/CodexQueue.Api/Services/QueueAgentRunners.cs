@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using CodexQueue.Api.Domain;
 
 namespace CodexQueue.Api.Services;
@@ -15,9 +17,8 @@ public sealed record QueueAgentRunResult(
     string Output,
     string CommandPreview,
     string? CodexSessionId = null,
-    string? OpenHandsConversationId = null,
-    string? RawDiagnosticOutput = null,
-    bool DiscardOpenHandsConversation = false)
+    string? LocalCodexSessionId = null,
+    string? LocalCodexSessionRouteKey = null)
 {
     public bool Success => ExitCode == 0;
 }
@@ -80,8 +81,8 @@ public sealed class CodexQueueAgentRunner(ITargetCommandRunner targetRunner)
     }
 }
 
-public sealed class OpenHandsQueueAgentRunner(
-    IOpenHandsCommandRunner commandRunner,
+public sealed class LocalCodexQueueAgentRunner(
+    ITargetCommandRunner targetRunner,
     IAiProviderService providerService)
     : IQueueAgentRunner
 {
@@ -93,11 +94,11 @@ public sealed class OpenHandsQueueAgentRunner(
         CancellationToken cancellationToken)
     {
         var profile = context.Request.ProviderProfile
-            ?? throw new InvalidOperationException("OpenHands request provider profile is unavailable.");
+            ?? throw new InvalidOperationException("Local Codex request provider profile is unavailable.");
         if (profile.Source != AiProviderSource.Local)
         {
             throw new InvalidOperationException(
-                "This OpenHands release executes only Local/Ollama provider profiles.");
+                "Local Codex executes only Local AI Server profiles.");
         }
 
         if (!profile.Enabled)
@@ -108,7 +109,7 @@ public sealed class OpenHandsQueueAgentRunner(
         if (!string.IsNullOrWhiteSpace(profile.ApiKeyEnvironmentVariable))
         {
             throw new InvalidOperationException(
-                "Authenticated Local AI profiles are not supported in this release because OpenHands child processes can inherit provider credentials.");
+                "Authenticated Local AI profiles are not supported in this release. Protect the server with a private LAN or VPN.");
         }
 
         var validation = providerService.Validate(profile);
@@ -125,8 +126,9 @@ public sealed class OpenHandsQueueAgentRunner(
                 "Local AI server is offline or unavailable: " + (discovery.Error ?? "health check failed."));
         }
 
-        var selectedModel = discovery.Models.FirstOrDefault(x =>
-            string.Equals(x.Model, context.Run.Model, StringComparison.OrdinalIgnoreCase));
+        var selectedModel = AiProviderService.FindLocalModel(
+            discovery.Models,
+            context.Run.Model);
         if (selectedModel is null)
         {
             throw new InvalidOperationException("Selected model is not installed on the Local AI server.");
@@ -153,25 +155,51 @@ public sealed class OpenHandsQueueAgentRunner(
                 "The saved Local context size exceeds the selected model's advertised limit.");
         }
 
-        var result = await commandRunner.RunAsync(
+        var sessionRouteKey = BuildSessionRouteKey(
+            profile.Id,
+            profile.LocalAiServerType,
+            validation.NormalizedBaseUrl);
+        var queueTab = context.Request.QueueTab;
+        var resumableSessionId =
+            string.Equals(
+                queueTab?.LocalCodexSessionRouteKey,
+                sessionRouteKey,
+                StringComparison.Ordinal)
+                ? queueTab?.LocalCodexSessionId
+                : null;
+        var result = await targetRunner.RunLocalCodexAsync(
             context.Machine,
             context.ProjectPath,
-            context.Run.Model,
+            profile.LocalAiServerType,
             validation.NormalizedBaseUrl,
-            AiProviderService.LocalPlaceholderApiKey,
+            selectedModel.Model,
             contextWindow,
             context.Run.ModelEffort,
-            context.Request.QueueTab?.OpenHandsConversationId,
+            resumableSessionId,
             context.Prompt,
-            context.Request.OpenHandsAlwaysApproveConfirmed,
+            context.Request.PermissionMode,
             onOutput,
             cancellationToken);
         return new QueueAgentRunResult(
             result.ExitCode,
             result.Output,
             result.CommandPreview,
-            OpenHandsConversationId: result.ConversationId,
-            RawDiagnosticOutput: result.RawDiagnosticOutput,
-            DiscardOpenHandsConversation: result.DiscardConversation);
+            LocalCodexSessionId: result.CodexSessionId,
+            LocalCodexSessionRouteKey: sessionRouteKey);
+    }
+
+    internal static string BuildSessionRouteKey(
+        Guid profileId,
+        LocalAiServerType serverType,
+        string normalizedBaseUrl)
+    {
+        var route = profileId.ToString("N")
+            + "\n"
+            + serverType
+            + "\n"
+            + normalizedBaseUrl;
+        return Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(route)))
+            .ToLowerInvariant();
     }
 }

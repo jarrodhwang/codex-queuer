@@ -8,8 +8,8 @@ namespace CodexQueue.Api.Endpoints;
 
 public static class ApiEndpoints
 {
-    private const string OpenHandsAttachmentsUnavailableError =
-        "Attachments are not available for OpenHands in this release because their "
+    private const string LocalCodexAttachmentsUnavailableError =
+        "Attachments are not available for Local Codex in this release because their "
         + "project-scoped transfer path has not yet been validated against symbolic-link escapes.";
 
     public static void MapCodexQueueApi(this WebApplication app)
@@ -79,7 +79,7 @@ public static class ApiEndpoints
             {
                 return Results.Conflict(new
                 {
-                    error = "Finish or cancel active OpenHands requests before changing this machine.",
+                    error = "Finish or cancel active Local Codex requests before changing this machine.",
                 });
             }
 
@@ -107,13 +107,15 @@ public static class ApiEndpoints
             {
                 await db.QueueTabs
                     .Where(tab => tab.DeletedAt == null
-                        && tab.OpenHandsConversationId != null
+                        && (tab.OpenHandsConversationId != null || tab.LocalCodexSessionId != null)
                         && db.Projects.Any(project =>
                             project.Id == tab.ProjectId
                             && project.MachineId == id))
                     .ExecuteUpdateAsync(
                         setters => setters
                             .SetProperty(tab => tab.OpenHandsConversationId, (string?)null)
+                            .SetProperty(tab => tab.LocalCodexSessionId, (string?)null)
+                            .SetProperty(tab => tab.LocalCodexSessionRouteKey, (string?)null)
                             .SetProperty(tab => tab.UpdatedAt, machine.UpdatedAt),
                         cancellationToken);
             }
@@ -209,13 +211,13 @@ public static class ApiEndpoints
                 telemetry.MemoryName));
         });
 
-        api.MapGet("/machines/{id:guid}/openhands/test", async (
+        api.MapGet("/machines/{id:guid}/local-codex/test", async (
             Guid id,
             Guid? providerProfileId,
             string? model,
             AppDbContext db,
             IAiProviderService providers,
-            IOpenHandsCommandRunner runner,
+            ITargetCommandRunner runner,
             CancellationToken cancellationToken) =>
         {
             var machine = await db.Machines.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
@@ -257,9 +259,15 @@ public static class ApiEndpoints
                     var requestedModel = string.IsNullOrWhiteSpace(model)
                         ? validation.NormalizedDefaultModel
                         : model;
-                    selectedModel = string.IsNullOrWhiteSpace(requestedModel)
-                        ? null
-                        : AiProviderService.QualifyModel(AiProviderSource.Local, requestedModel);
+                    if (!string.IsNullOrWhiteSpace(requestedModel))
+                    {
+                        var discovery = await providers.DiscoverModelsAsync(profile, cancellationToken);
+                        selectedModel = AiProviderService.FindLocalModel(
+                                discovery.Models,
+                                requestedModel)
+                            ?.Model
+                            ?? AiProviderService.QualifyModel(AiProviderSource.Local, requestedModel);
+                    }
                 }
                 catch (ArgumentException ex)
                 {
@@ -274,15 +282,15 @@ public static class ApiEndpoints
                 });
             }
 
-            var result = await runner.TestMachineAsync(
+            var result = await runner.TestLocalCodexAsync(
                 machine,
                 cancellationToken,
                 localAiBaseUrl,
                 selectedModel);
-            return Results.Ok(new OpenHandsMachineCheckDto(
+            return Results.Ok(new LocalCodexMachineCheckDto(
                 result.Available,
                 result.Version,
-                result.RequiresWsl,
+                RequiresWsl: false,
                 result.Message,
                 result.TargetLocalAiChecked,
                 result.TargetLocalAiReachable,
@@ -696,6 +704,8 @@ public static class ApiEndpoints
 
             tab.CodexSessionId = null;
             tab.OpenHandsConversationId = null;
+            tab.LocalCodexSessionId = null;
+            tab.LocalCodexSessionRouteKey = null;
             tab.DeletedAt = DateTimeOffset.UtcNow;
             tab.UpdatedAt = tab.DeletedAt.Value;
             await db.SaveChangesAsync(cancellationToken);
@@ -793,19 +803,19 @@ public static class ApiEndpoints
                     || !string.Equals(
                         NormalizeOptional(mergedLocalDefaultsInput.DefaultLocalModel),
                         project.DefaultLocalModel,
-                        StringComparison.OrdinalIgnoreCase)
+                        StringComparison.Ordinal)
                     || !string.Equals(
-                        NormalizeOpenHandsReasoningEffort(mergedLocalDefaultsInput.DefaultLocalModelEffort),
+                        NormalizeLocalCodexReasoningEffort(mergedLocalDefaultsInput.DefaultLocalModelEffort),
                         project.DefaultLocalModelEffort,
                         StringComparison.OrdinalIgnoreCase)
                     || (!string.IsNullOrWhiteSpace(mergedLocalDefaultsInput.DefaultLocalModelEffort)
-                        && NormalizeOpenHandsReasoningEffort(mergedLocalDefaultsInput.DefaultLocalModelEffort) is null)
+                        && NormalizeLocalCodexReasoningEffort(mergedLocalDefaultsInput.DefaultLocalModelEffort) is null)
                     || !string.Equals(
-                        NormalizeOpenHandsContextWindow(mergedLocalDefaultsInput.DefaultLocalModelSpeed)?.ToString(),
+                        NormalizeLocalCodexContextWindow(mergedLocalDefaultsInput.DefaultLocalModelSpeed)?.ToString(),
                         project.DefaultLocalModelSpeed,
                         StringComparison.Ordinal)
                     || (!string.IsNullOrWhiteSpace(mergedLocalDefaultsInput.DefaultLocalModelSpeed)
-                        && NormalizeOpenHandsContextWindow(mergedLocalDefaultsInput.DefaultLocalModelSpeed) is null));
+                        && NormalizeLocalCodexContextWindow(mergedLocalDefaultsInput.DefaultLocalModelSpeed) is null));
             var mustValidateLocalDefaults = localValuesChanged
                 || (requestedDefaultRunner == ExecutionRunner.OpenHandsCli
                     && project.DefaultExecutionRunner != ExecutionRunner.OpenHandsCli);
@@ -883,11 +893,15 @@ public static class ApiEndpoints
                 await db.QueueTabs
                     .Where(x => x.ProjectId == project.Id
                         && x.DeletedAt == null
-                        && (x.CodexSessionId != null || x.OpenHandsConversationId != null))
+                        && (x.CodexSessionId != null
+                            || x.OpenHandsConversationId != null
+                            || x.LocalCodexSessionId != null))
                     .ExecuteUpdateAsync(
                         setters => setters
                             .SetProperty(x => x.CodexSessionId, (string?)null)
                             .SetProperty(x => x.OpenHandsConversationId, (string?)null)
+                            .SetProperty(x => x.LocalCodexSessionId, (string?)null)
+                            .SetProperty(x => x.LocalCodexSessionRouteKey, (string?)null)
                             .SetProperty(x => x.UpdatedAt, project.UpdatedAt),
                         cancellationToken);
             }
@@ -1390,7 +1404,7 @@ public static class ApiEndpoints
             {
                 return Results.BadRequest(new
                 {
-                    error = OpenHandsAttachmentsUnavailableError,
+                    error = LocalCodexAttachmentsUnavailableError,
                 });
             }
 
@@ -1406,11 +1420,11 @@ public static class ApiEndpoints
                 ModelEffort = input.ExecutionRunner == ExecutionRunner.CodexCli
                     ? NormalizeEffort(input.ModelEffort, input.Model)
                     : runnerValidation.SupportsReasoningEffort
-                        ? NormalizeOpenHandsReasoningEffort(input.ModelEffort)
+                        ? NormalizeLocalCodexReasoningEffort(input.ModelEffort)
                         : null,
                 ModelSpeed = input.ExecutionRunner == ExecutionRunner.CodexCli
                     ? NormalizeSpeed(input.ModelSpeed)
-                    : runnerValidation.OpenHandsContextWindow?.ToString(),
+                    : runnerValidation.LocalCodexContextWindow?.ToString(),
                 GenerateCommit = input.ExecutionRunner == ExecutionRunner.CodexCli
                     && input.PermissionMode != PermissionMode.ReadOnly
                     && input.GenerateCommit,
@@ -1500,7 +1514,7 @@ public static class ApiEndpoints
                 return Results.BadRequest(new
                 {
                     error =
-                        "This OpenHands request requires runner metadata when edited. "
+                        "This Local Codex request requires runner metadata when edited. "
                         + "Refresh the browser before changing it.",
                 });
             }
@@ -1541,7 +1555,7 @@ public static class ApiEndpoints
                 {
                     return Results.BadRequest(new
                     {
-                        error = OpenHandsAttachmentsUnavailableError,
+                        error = LocalCodexAttachmentsUnavailableError,
                     });
                 }
 
@@ -1553,8 +1567,8 @@ public static class ApiEndpoints
                 return Results.BadRequest(new
                 {
                     error =
-                        "Remove this request's attachments before changing it to OpenHands. "
-                        + "Attachments are not available for OpenHands in this release.",
+                        "Remove this request's attachments before changing it to Local Codex. "
+                        + "Attachments are not available for Local Codex in this release.",
                 });
             }
 
@@ -1563,11 +1577,11 @@ public static class ApiEndpoints
             request.ModelEffort = executionRunner == ExecutionRunner.CodexCli
                 ? NormalizeEffort(input.ModelEffort, input.Model)
                 : runnerValidation.SupportsReasoningEffort
-                    ? NormalizeOpenHandsReasoningEffort(input.ModelEffort)
+                    ? NormalizeLocalCodexReasoningEffort(input.ModelEffort)
                     : null;
             request.ModelSpeed = executionRunner == ExecutionRunner.CodexCli
                 ? NormalizeSpeed(input.ModelSpeed)
-                : runnerValidation.OpenHandsContextWindow?.ToString();
+                : runnerValidation.LocalCodexContextWindow?.ToString();
             request.GenerateCommit = executionRunner == ExecutionRunner.CodexCli
                 && input.PermissionMode != PermissionMode.ReadOnly
                 && input.GenerateCommit;
@@ -1622,6 +1636,7 @@ public static class ApiEndpoints
             requestRun.ProviderProfileName = request.ProviderProfile?.Name;
             requestRun.ProviderSource = request.ProviderProfile?.Source;
             requestRun.OpenHandsConversationId = null;
+            requestRun.LocalCodexSessionId = null;
             requestRun.RawDiagnosticOutput = "";
             requestRun.Output = "";
             requestRun.Error = null;
@@ -1778,7 +1793,8 @@ public static class ApiEndpoints
                     x.ExecutionRunner,
                     x.ProviderProfileName,
                     x.ProviderSource,
-                    x.OpenHandsConversationId))
+                    x.OpenHandsConversationId,
+                    x.LocalCodexSessionId))
                 .ToArray();
         });
     }
@@ -1909,6 +1925,7 @@ public static class ApiEndpoints
     {
         profile.Name = (input.Name ?? "").Trim();
         profile.Source = input.Source;
+        profile.LocalAiServerType = input.LocalAiServerType;
         profile.BaseUrl = (input.BaseUrl ?? "").Trim();
         profile.ModelDiscoveryMode = input.ModelDiscoveryMode;
         profile.ApiKeyEnvironmentVariable = NormalizeOptional(input.ApiKeyEnvironmentVariable);
@@ -1977,20 +1994,12 @@ public static class ApiEndpoints
             return new RunnerSelectionValidation(null, normalizedModel, "Selected project machine is unavailable.");
         }
 
-        if (machine.TargetsWindows())
+        if (!IsLocalCodexProjectPathScoped(machine, projectPath))
         {
             return new RunnerSelectionValidation(
                 null,
                 normalizedModel,
-                "Native Windows OpenHands CLI is unsupported. Configure a Linux or macOS target; Windows requires a separately configured WSL target.");
-        }
-
-        if (!IsOpenHandsProjectPathScoped(machine, projectPath))
-        {
-            return new RunnerSelectionValidation(
-                null,
-                normalizedModel,
-                "OpenHands requires a project-scoped path and cannot run against a filesystem root.");
+                "Local Codex requires a project-scoped path and cannot run against a filesystem root.");
         }
 
         if (permissionMode != PermissionMode.FullAccess)
@@ -1998,7 +2007,7 @@ public static class ApiEndpoints
             return new RunnerSelectionValidation(
                 null,
                 normalizedModel,
-                "This permission mode is not available for headless OpenHands. Select Full access and explicitly confirm unrestricted execution.");
+                "The current Local UI uses Full access. Select it and explicitly confirm unrestricted execution.");
         }
 
         if (!alwaysApproveConfirmed)
@@ -2006,7 +2015,7 @@ public static class ApiEndpoints
             return new RunnerSelectionValidation(
                 null,
                 normalizedModel,
-                "OpenHands headless mode auto-approves actions. Explicitly confirm that it may run with the selected machine account's permissions.");
+                "Explicitly confirm that Local Codex may run with the selected machine account's Full access permissions.");
         }
 
         if (generateCommit || separateCommitSession)
@@ -2014,7 +2023,7 @@ public static class ApiEndpoints
             return new RunnerSelectionValidation(
                 null,
                 normalizedModel,
-                "Automatic request commits are not available for OpenHands in this release. Leave both commit options disabled.");
+                "Automatic request commits are not available for Local Codex in this release. Leave both commit options disabled.");
         }
 
         if (!providerProfileId.HasValue)
@@ -2022,7 +2031,7 @@ public static class ApiEndpoints
             return new RunnerSelectionValidation(
                 null,
                 normalizedModel,
-                "Select a Local AI Server profile for OpenHands.");
+                "Select a Local AI Server profile for Local Codex.");
         }
 
         var profile = await db.AiProviderProfiles.FirstOrDefaultAsync(
@@ -2033,7 +2042,7 @@ public static class ApiEndpoints
             return new RunnerSelectionValidation(null, normalizedModel, "Selected provider profile does not exist.");
         }
 
-        var profileError = ValidateLocalProviderProfileForOpenHands(profile, providers);
+        var profileError = ValidateLocalCodexProviderProfile(profile, providers);
         if (profileError is not null)
         {
             return new RunnerSelectionValidation(
@@ -2056,11 +2065,9 @@ public static class ApiEndpoints
                 "Local AI server is offline or unavailable: " + (discovery.Error ?? "health check failed."));
         }
 
-        var selectedModel = discovery.Models.FirstOrDefault(
-            x => string.Equals(
-                x.Model,
-                normalizedModel,
-                StringComparison.OrdinalIgnoreCase));
+        var selectedModel = AiProviderService.FindLocalModel(
+            discovery.Models,
+            normalizedModel);
         if (selectedModel is null)
         {
             return new RunnerSelectionValidation(
@@ -2068,6 +2075,7 @@ public static class ApiEndpoints
                 normalizedModel,
                 "Selected model is not installed on the Local AI server.");
         }
+        normalizedModel = selectedModel.Model;
 
         if (selectedModel.MaximumContextWindow is { } modelContextWindow
             && modelContextWindow < AiProviderService.ContextWarningThreshold)
@@ -2078,28 +2086,18 @@ public static class ApiEndpoints
                 selectedModel.Name
                 + " supports at most "
                 + modelContextWindow.ToString("N0")
-                + " tokens; OpenHands requires at least "
+                + " tokens; Local Codex requires at least "
                 + AiProviderService.ContextWarningThreshold.ToString("N0")
                 + ".");
         }
 
-        if (!selectedModel.SupportsTools)
-        {
-            return new RunnerSelectionValidation(
-                profile,
-                normalizedModel,
-                selectedModel.Name
-                + " does not advertise Ollama tool support, which OpenHands requires "
-                + "to read files and perform actions.");
-        }
-
-        var requestedContextWindow = NormalizeOpenHandsContextWindow(localContextWindow);
+        var requestedContextWindow = NormalizeLocalCodexContextWindow(localContextWindow);
         if (!string.IsNullOrWhiteSpace(localContextWindow) && requestedContextWindow is null)
         {
             return new RunnerSelectionValidation(
                 profile,
                 normalizedModel,
-                "Local context size must use a supported preset between 4K and 1M.");
+                "Local context size must use a supported preset between 4K and 256K.");
         }
 
         requestedContextWindow ??= profile.ConfiguredContextWindow;
@@ -2109,7 +2107,7 @@ public static class ApiEndpoints
             return new RunnerSelectionValidation(
                 profile,
                 normalizedModel,
-                "OpenHands requires a context size of at least "
+                "Local Codex requires a context size of at least "
                 + AiProviderService.ContextWarningThreshold.ToString("N0")
                 + " tokens.");
         }
@@ -2146,7 +2144,7 @@ public static class ApiEndpoints
             requestedContextWindow);
     }
 
-    public static bool IsOpenHandsProjectPathScoped(
+    public static bool IsLocalCodexProjectPathScoped(
         TargetMachine machine,
         string? projectPath)
     {
@@ -2211,7 +2209,7 @@ public static class ApiEndpoints
         string Model,
         string? Error,
         bool SupportsReasoningEffort = false,
-        int? OpenHandsContextWindow = null);
+        int? LocalCodexContextWindow = null);
 
     private static string? Validate(SaveMachineRequest input)
     {
@@ -2309,7 +2307,7 @@ public static class ApiEndpoints
             return new(null, null, null, null, "The selected Local AI Server profile does not exist or is not a Local provider.");
         }
 
-        var profileError = ValidateLocalProviderProfileForOpenHands(profile, providers);
+        var profileError = ValidateLocalCodexProviderProfile(profile, providers);
         if (profileError is not null)
         {
             return new(null, null, null, null, profileError);
@@ -2334,23 +2332,23 @@ public static class ApiEndpoints
             return new(null, null, null, null, ex.Message);
         }
 
-        var effort = NormalizeOpenHandsReasoningEffort(input.DefaultLocalModelEffort);
+        var effort = NormalizeLocalCodexReasoningEffort(input.DefaultLocalModelEffort);
         if (!string.IsNullOrWhiteSpace(input.DefaultLocalModelEffort) && effort is null)
         {
             return new(null, null, null, null, "Local reasoning effort must be low, medium, or high.");
         }
 
-        var contextWindow = NormalizeOpenHandsContextWindow(input.DefaultLocalModelSpeed);
+        var contextWindow = NormalizeLocalCodexContextWindow(input.DefaultLocalModelSpeed);
         if (!string.IsNullOrWhiteSpace(input.DefaultLocalModelSpeed) && contextWindow is null)
         {
-            return new(null, null, null, null, "Local context size must use a supported preset between 4K and 1M.");
+            return new(null, null, null, null, "Local context size must use a supported preset between 4K and 256K.");
         }
 
         contextWindow ??= profile.ConfiguredContextWindow;
         if (contextWindow is null || contextWindow < AiProviderService.ContextWarningThreshold)
         {
             return new(null, null, null, null, "Local context size must be at least "
-                + AiProviderService.ContextWarningThreshold.ToString("N0") + " tokens for OpenHands.");
+                + AiProviderService.ContextWarningThreshold.ToString("N0") + " tokens for Local Codex.");
         }
 
         if (profile.ConfiguredContextWindow is { } configuredContextWindow
@@ -2362,7 +2360,7 @@ public static class ApiEndpoints
         return new(profileId, model, effort, contextWindow.ToString(), null);
     }
 
-    private static string? ValidateLocalProviderProfileForOpenHands(
+    private static string? ValidateLocalCodexProviderProfile(
         AiProviderProfile profile,
         IAiProviderService providers)
     {
@@ -2373,14 +2371,14 @@ public static class ApiEndpoints
 
         if (profile.Source != AiProviderSource.Local)
         {
-            return "This OpenHands release executes only Local/Ollama profiles. "
+            return "Local Codex executes only Local AI Server profiles. "
                 + "Authenticated cloud profiles remain disabled to prevent credential exposure to agent-launched commands.";
         }
 
         if (!string.IsNullOrWhiteSpace(profile.ApiKeyEnvironmentVariable))
         {
             return "Authenticated Local AI profiles are not available in this release. "
-                + "Use an unauthenticated Ollama endpoint protected by LAN/VPN access.";
+                + "Use an unauthenticated Local AI endpoint protected by LAN/VPN access.";
         }
 
         var validation = providers.Validate(profile);
@@ -2392,7 +2390,7 @@ public static class ApiEndpoints
         if (profile.ConfiguredContextWindow is not { } configuredContextWindow
             || configuredContextWindow < AiProviderService.ContextWarningThreshold)
         {
-            return "OpenHands requires a configured Local AI context window of at least "
+            return "Local Codex requires a configured Local AI context window of at least "
                 + AiProviderService.ContextWarningThreshold.ToString("N0")
                 + " tokens for reliable project prompts.";
         }
@@ -2416,7 +2414,7 @@ public static class ApiEndpoints
         return normalized is "low" or "medium" or "high" or "xhigh" or "ultra" ? normalized : null;
     }
 
-    private static string? NormalizeOpenHandsReasoningEffort(string? effort)
+    private static string? NormalizeLocalCodexReasoningEffort(string? effort)
     {
         if (string.IsNullOrWhiteSpace(effort))
         {
@@ -2427,7 +2425,7 @@ public static class ApiEndpoints
         return normalized is "low" or "medium" or "high" ? normalized : null;
     }
 
-    private static int? NormalizeOpenHandsContextWindow(string? contextWindow)
+    private static int? NormalizeLocalCodexContextWindow(string? contextWindow)
     {
         if (string.IsNullOrWhiteSpace(contextWindow))
         {
@@ -2436,7 +2434,7 @@ public static class ApiEndpoints
 
         return int.TryParse(contextWindow.Trim(), out var parsed)
                && parsed is 4_096 or 8_192 or 16_384 or 32_768 or 65_536
-                   or 131_072 or 262_144 or 524_288 or 1_048_576
+                   or 131_072 or 262_144
             ? parsed
             : null;
     }

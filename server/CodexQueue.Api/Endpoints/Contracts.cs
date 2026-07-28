@@ -76,7 +76,8 @@ public sealed record QueueTabDto(
     string Name,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    string? OpenHandsConversationId);
+    string? OpenHandsConversationId,
+    string? LocalCodexSessionId);
 
 public sealed record CreateQueueTabRequest(Guid ProjectId, string Name);
 
@@ -150,7 +151,8 @@ public sealed record CodexRunDto(
     Guid? ProviderProfileId,
     string? ProviderProfileName,
     AiProviderSource? ProviderSource,
-    string? OpenHandsConversationId);
+    string? OpenHandsConversationId,
+    string? LocalCodexSessionId);
 
 public sealed record CodexRequestDto(
     Guid Id,
@@ -208,7 +210,8 @@ public sealed record SessionDto(
     ExecutionRunner ExecutionRunner,
     string? ProviderProfileName,
     AiProviderSource? ProviderSource,
-    string? OpenHandsConversationId);
+    string? OpenHandsConversationId,
+    string? LocalCodexSessionId);
 
 public sealed record FileTreeEntryDto(string Name, string Path, bool IsDirectory, long? Size);
 
@@ -275,7 +278,7 @@ public sealed record MachineResourceTelemetryDto(
     string? CpuName = null,
     string? MemoryName = null);
 
-public sealed record OpenHandsMachineCheckDto(
+public sealed record LocalCodexMachineCheckDto(
     bool Available,
     string? Version,
     bool RequiresWsl,
@@ -289,6 +292,7 @@ public sealed record AiProviderProfileDto(
     Guid Id,
     string Name,
     AiProviderSource Source,
+    LocalAiServerType LocalAiServerType,
     string BaseUrl,
     ModelDiscoveryMode ModelDiscoveryMode,
     string? ApiKeyEnvironmentVariable,
@@ -306,6 +310,7 @@ public sealed record AiProviderProfileDto(
 public sealed record SaveAiProviderProfileRequest(
     string Name,
     AiProviderSource Source,
+    LocalAiServerType LocalAiServerType,
     string BaseUrl,
     ModelDiscoveryMode ModelDiscoveryMode,
     string? ApiKeyEnvironmentVariable,

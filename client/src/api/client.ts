@@ -12,7 +12,7 @@ import type {
   Machine,
   MachinePowerMode,
   MachineTest,
-  OpenHandsMachineTest,
+  LocalCodexMachineTest,
   MachineRateLimits,
   MachineResources,
   Project,
@@ -107,12 +107,12 @@ export const api = {
     }),
   deleteMachine: (id: string) => apiFetch<void>(`/machines/${id}`, { method: 'DELETE' }),
   testMachine: (id: string) => apiFetch<MachineTest>(`/machines/${id}/test`, { method: 'POST' }),
-  testOpenHands: (id: string, providerProfileId?: string, model?: string) => {
+  testLocalCodex: (id: string, providerProfileId?: string, model?: string) => {
     const params = new URLSearchParams()
     if (providerProfileId) params.set('providerProfileId', providerProfileId)
     if (model) params.set('model', model)
     const query = params.toString()
-    return apiFetch<OpenHandsMachineTest>(`/machines/${id}/openhands/test${query ? `?${query}` : ''}`)
+    return apiFetch<LocalCodexMachineTest>(`/machines/${id}/local-codex/test${query ? `?${query}` : ''}`)
   },
   machineUsage: (id: string) => apiFetch<MachineRateLimits>(`/machines/${id}/usage`),
   machineResources: (id: string) => apiFetch<MachineResources>(`/machines/${id}/resources`),

@@ -10,7 +10,7 @@ namespace CodexQueue.Api.Tests;
 public sealed class LocalProjectDefaultsTests
 {
     [Fact]
-    public async Task NormalizeLocalProjectDefaults_QualifiesModelAndEffortWithoutDiscoveringModels()
+    public async Task NormalizeLocalProjectDefaults_PreservesRawModelAndNormalizesEffortWithoutDiscovery()
     {
         await using var fixture = await LocalDefaultsFixture.CreateAsync();
         var profile = new AiProviderProfile
@@ -36,7 +36,7 @@ public sealed class LocalProjectDefaultsTests
 
         Assert.Null(result.Error);
         Assert.Equal(profile.Id, result.ProviderProfileId);
-        Assert.Equal("openai/gpt-oss:20b", result.Model);
+        Assert.Equal("gpt-oss:20b", result.Model);
         Assert.Equal("high", result.Effort);
         Assert.Equal("32768", result.ContextWindow);
     }
@@ -65,7 +65,7 @@ public sealed class LocalProjectDefaultsTests
     }
 
     [Fact]
-    public async Task NormalizeLocalProjectDefaults_RejectsContextSmallerThanOpenHandsMinimum()
+    public async Task NormalizeLocalProjectDefaults_RejectsContextSmallerThanLocalCodexMinimum()
     {
         await using var fixture = await LocalDefaultsFixture.CreateAsync();
         var profile = new AiProviderProfile
@@ -86,6 +86,34 @@ public sealed class LocalProjectDefaultsTests
 
         Assert.Contains("at least", result.Error, StringComparison.OrdinalIgnoreCase);
         Assert.Contains(AiProviderService.ContextWarningThreshold.ToString("N0"), result.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NormalizeLocalProjectDefaults_RejectsContextAboveCurrentCodexFallbackLimit()
+    {
+        await using var fixture = await LocalDefaultsFixture.CreateAsync();
+        var profile = new AiProviderProfile
+        {
+            Name = "Large-context Local AI",
+            Source = AiProviderSource.Local,
+            BaseUrl = "http://localhost:11434",
+            ConfiguredContextWindow = 1_048_576,
+        };
+        fixture.Db.AiProviderProfiles.Add(profile);
+        await fixture.Db.SaveChangesAsync();
+
+        var result = await ApiEndpoints.NormalizeLocalProjectDefaultsAsync(
+            CreateRequest(
+                ExecutionRunner.OpenHandsCli,
+                profile.Id,
+                "gpt-oss:20b",
+                "low",
+                "524288"),
+            fixture.Db,
+            fixture.Providers,
+            CancellationToken.None);
+
+        Assert.Contains("between 4K and 256K", result.Error, StringComparison.Ordinal);
     }
 
     [Fact]
