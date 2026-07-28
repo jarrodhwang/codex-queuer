@@ -346,6 +346,7 @@ export type ProviderModel = {
   supportsTools: boolean
   supportsReasoning: boolean
   supportsReasoningEffort: boolean
+  toolSupportKnown: boolean
 }
 
 export type ProviderModelsResponse = {

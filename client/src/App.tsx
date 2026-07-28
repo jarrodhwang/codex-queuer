@@ -3517,7 +3517,7 @@ function QueueComposer({
   const localModelDropdownOptions = useMemo(() => {
     const options = localModelOptions.map((model) => ({
       icon: <AiBrandImage brand={localModelBrandIcon(model.name || model.id)} />,
-      label: localModelDisplayName(model.name || model.id),
+      label: `${localModelDisplayName(model.name || model.id)}${model.toolSupportKnown && !model.supportsTools ? ' · No tools' : ''}`,
       value: model.id,
     }))
     if (!localModel && options.length === 0) {
@@ -3969,6 +3969,10 @@ function QueueComposer({
     || ((configuredContextWindow && configuredContextWindow < minimumLocalCodexContextSize)
       ? `Configured context is ${configuredContextWindow.toLocaleString()} tokens. Set it to at least ${minimumLocalCodexContextSize.toLocaleString()} before running Local Codex.`
       : '')
+  const localToolWarning = selectedLocalModelMetadata?.toolSupportKnown
+    && !selectedLocalModelMetadata.supportsTools
+    ? `${selectedLocalModelMetadata.name} does not support tool calling. Choose a tool-capable model for Local Codex.`
+    : ''
   const selectedCommitLocalModelMetadata = localModelOptions.find((model) => model.id === commitModel.model)
   const commitLocalContextLimit = Math.min(
     maximumLocalCodexContextSize,
@@ -3999,7 +4003,11 @@ function QueueComposer({
     : selectedCommitLocalContextSize > commitLocalContextLimit
       ? 'The separate commit context is larger than this model or Local AI server supports.'
       : ''
-  const localModelWarning = localContextWarning
+  const commitLocalToolWarning = selectedCommitLocalModelMetadata?.toolSupportKnown
+    && !selectedCommitLocalModelMetadata.supportsTools
+    ? `${selectedCommitLocalModelMetadata.name} does not support tool calling. Choose a tool-capable separate commit model.`
+    : ''
+  const localModelWarning = localToolWarning || localContextWarning
   const selectedLocalServerUnavailable = Boolean(
     selectedLocalProfile
     && !loadingLocalModels
@@ -4051,7 +4059,7 @@ function QueueComposer({
             ? localModelStatus.error || 'Codex Queue cannot reach the separate commit Local AI server.'
             : localModelStatus?.healthy && !localModelOptions.some((model) => model.id === commitModel.model)
               ? 'The separate commit model is not installed on the selected Local AI server.'
-              : commitLocalContextWarning
+              : commitLocalToolWarning || commitLocalContextWarning
   const selectedRequestModel = isLocalRunner ? localModel : requestModel.model
   const localApiPending = loadingLocalModels
   const localCodexPending = checkingLocalCodex
@@ -7603,7 +7611,7 @@ function GitPanel({
   const localModelOptions = localModelStatus?.models ?? []
   const localModelDropdownOptions = localModelOptions.map((model) => ({
     icon: <AiBrandImage brand={localModelBrandIcon(model.name || model.id)} />,
-    label: localModelDisplayName(model.name || model.id),
+    label: `${localModelDisplayName(model.name || model.id)}${model.toolSupportKnown && !model.supportsTools ? ' · No tools' : ''}`,
     value: model.id,
   }))
   const selectedLocalModelMetadata = localModelOptions.find((model) => model.id === suggestionModel.model)
@@ -7627,6 +7635,10 @@ function GitPanel({
     : Number(suggestionModel.speed) > localContextLimit
       ? 'The selected context exceeds the Local AI server or model limit.'
       : ''
+  const localToolWarning = selectedLocalModelMetadata?.toolSupportKnown
+    && !selectedLocalModelMetadata.supportsTools
+    ? `${selectedLocalModelMetadata.name} does not support tool calling. Local Codex cannot inspect, stage, or commit files with this model.`
+    : ''
   const localContextInfo = `Applied to ${selectedLocalProfile?.localAiServerType ?? 'the Local AI server'} and Codex CLI context accounting. Maximum available: ${Number.isFinite(localContextLimit) ? formatContextSize(localContextLimit) : 'not discovered yet'}.`
 
   useEffect(() => {
@@ -7736,6 +7748,7 @@ function GitPanel({
     || loadingLocalModels
     || Boolean(localModelError)
     || Boolean(localContextWarning)
+    || Boolean(localToolWarning)
     || !localModelOptions.some((model) => model.id === suggestionModel.model)
   )
 
@@ -7838,8 +7851,8 @@ function GitPanel({
                 onChange={(speed) => setSuggestionModel((current) => ({ ...current, speed }))}
               />
             </div>
-            {(localModelError || localContextWarning) && (
-              <span className="error-text">{localModelError || localContextWarning}</span>
+            {(localModelError || localToolWarning || localContextWarning) && (
+              <span className="error-text">{localModelError || localToolWarning || localContextWarning}</span>
             )}
           </>
         ) : (

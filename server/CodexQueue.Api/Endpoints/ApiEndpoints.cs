@@ -470,7 +470,8 @@ public static class ApiEndpoints
                     x.MaximumContextWindow,
                     x.SupportsTools,
                     x.SupportsReasoning,
-                    x.SupportsReasoningEffort)).ToArray()));
+                    x.SupportsReasoningEffort,
+                    x.ToolSupportKnown)).ToArray()));
         });
 
         api.MapGet("/provider-profiles/{id:guid}/resources", async (
@@ -2131,6 +2132,15 @@ public static class ApiEndpoints
                 "Selected model is not installed on the Local AI server.");
         }
         normalizedModel = selectedModel.Model;
+
+        if (selectedModel.ToolSupportKnown && !selectedModel.SupportsTools)
+        {
+            return new RunnerSelectionValidation(
+                profile,
+                normalizedModel,
+                selectedModel.Name
+                + " does not advertise tool calling support. Local Codex requires a tool-capable model to inspect files, apply changes, and create commits.");
+        }
 
         if (selectedModel.MaximumContextWindow is { } modelContextWindow
             && modelContextWindow < AiProviderService.ContextWarningThreshold)

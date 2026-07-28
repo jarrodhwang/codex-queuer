@@ -15,7 +15,8 @@ public sealed record AiProviderModel(
     int? MaximumContextWindow = null,
     bool SupportsTools = false,
     bool SupportsReasoning = false,
-    bool SupportsReasoningEffort = false);
+    bool SupportsReasoningEffort = false,
+    bool ToolSupportKnown = false);
 
 public sealed record AiProviderContextWarning(
     int ConfiguredContextWindow,
@@ -75,6 +76,8 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
     public const int RecommendedContextWindow = 65_536;
     private const int MaximumModelCatalogBytes = 2 * 1024 * 1024;
     private const int MaximumDiscoveredModels = 1_000;
+    private const int MaximumDetailedOllamaModels = 100;
+    private const int OllamaDetailConcurrency = 8;
     private const int MaximumModelIdentifierLength = 256;
     private const string ManagedOllamaModelPrefix = "codex-queue-context-";
 
@@ -513,7 +516,12 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
 
             if (attempts[^1].Reachable)
             {
-                return Healthy(attempts[^1].Models);
+                var detailedModels = await EnrichOllamaModelsAsync(
+                    profile,
+                    normalizedBaseUrl,
+                    attempts[^1].Models,
+                    cancellationToken);
+                return Healthy(detailedModels);
             }
 
             if (profile.ModelDiscoveryMode == ModelDiscoveryMode.Ollama)
@@ -595,7 +603,8 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
                     x.Max(model => model.MaximumContextWindow),
                     x.Any(model => model.SupportsTools),
                     x.Any(model => model.SupportsReasoning),
-                    x.Any(model => model.SupportsReasoningEffort)))
+                    x.Any(model => model.SupportsReasoningEffort),
+                    x.Any(model => model.ToolSupportKnown)))
                 .OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
                 .Take(MaximumDiscoveredModels)
                 .Select(x => new AiProviderModel(
@@ -604,7 +613,8 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
                     x.MaximumContextWindow,
                     x.SupportsTools,
                     x.SupportsReasoning,
-                    x.SupportsReasoningEffort))
+                    x.SupportsReasoningEffort,
+                    x.ToolSupportKnown))
                 .ToArray();
             return DiscoveryAttempt.Succeeded(models);
         }
@@ -619,6 +629,143 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
                     ? ex.Message
                     : "Provider model discovery failed: " + ex.Message);
         }
+    }
+
+    private async Task<IReadOnlyList<AiProviderModel>> EnrichOllamaModelsAsync(
+        AiProviderProfile profile,
+        string normalizedBaseUrl,
+        IReadOnlyList<AiProviderModel> models,
+        CancellationToken cancellationToken)
+    {
+        using var concurrency = new SemaphoreSlim(OllamaDetailConcurrency);
+        var tasks = models.Select(async (model, index) =>
+        {
+            if (index >= MaximumDetailedOllamaModels)
+            {
+                return model;
+            }
+
+            await concurrency.WaitAsync(cancellationToken);
+            try
+            {
+                return await ReadOllamaModelDetailsAsync(
+                    profile,
+                    normalizedBaseUrl,
+                    model,
+                    cancellationToken);
+            }
+            finally
+            {
+                concurrency.Release();
+            }
+        });
+
+        return await Task.WhenAll(tasks);
+    }
+
+    private async Task<AiProviderModel> ReadOllamaModelDetailsAsync(
+        AiProviderProfile profile,
+        string normalizedBaseUrl,
+        AiProviderModel model,
+        CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(RequestTimeout);
+        try
+        {
+            var baseUri = new Uri(normalizedBaseUrl, UriKind.Absolute);
+            var showUri = new UriBuilder(baseUri)
+            {
+                Path = "/api/show",
+                Query = "",
+                Fragment = ""
+            }.Uri;
+            using var request = new HttpRequestMessage(HttpMethod.Post, showUri)
+            {
+                Content = new StringContent(
+                    JsonSerializer.Serialize(new { model = model.Name, verbose = false }),
+                    Encoding.UTF8,
+                    "application/json")
+            };
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            request.Headers.Authorization = new AuthenticationHeaderValue(
+                "Bearer",
+                ResolveApiKeyForExecution(profile));
+
+            var client = httpClientFactory.CreateClient(nameof(AiProviderService));
+            using var response = await client.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                timeout.Token);
+            if (!response.IsSuccessStatusCode
+                || response.Content.Headers.ContentLength is > MaximumModelCatalogBytes)
+            {
+                return model;
+            }
+
+            await response.Content.LoadIntoBufferAsync(MaximumModelCatalogBytes, timeout.Token);
+            await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
+            using var document = await JsonDocument.ParseAsync(
+                stream,
+                cancellationToken: timeout.Token);
+            var root = document.RootElement;
+            var capabilities = ReadStringArray(root, "capabilities");
+            var capabilityListKnown = root.TryGetProperty(
+                "capabilities",
+                out var capabilitiesElement)
+                && capabilitiesElement.ValueKind == JsonValueKind.Array;
+            var family = ReadNestedString(root, "details", "family");
+            var supportsReasoningEffort =
+                string.Equals(family, "gptoss", StringComparison.OrdinalIgnoreCase)
+                || model.Name.StartsWith("gpt-oss", StringComparison.OrdinalIgnoreCase);
+            var supportsReasoning = supportsReasoningEffort
+                || capabilities.Contains("thinking", StringComparer.OrdinalIgnoreCase);
+
+            return model with
+            {
+                MaximumContextWindow =
+                    ReadOllamaMaximumContextWindow(root)
+                    ?? model.MaximumContextWindow,
+                SupportsTools = capabilityListKnown
+                    ? capabilities.Contains("tools", StringComparer.OrdinalIgnoreCase)
+                    : model.SupportsTools,
+                SupportsReasoning = supportsReasoning || model.SupportsReasoning,
+                SupportsReasoningEffort =
+                    supportsReasoningEffort
+                    || model.SupportsReasoningEffort,
+                ToolSupportKnown = capabilityListKnown || model.ToolSupportKnown
+            };
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return model;
+        }
+        catch (Exception ex) when (ex is HttpRequestException
+                                   or JsonException
+                                   or InvalidOperationException)
+        {
+            return model;
+        }
+    }
+
+    private static int? ReadOllamaMaximumContextWindow(JsonElement root)
+    {
+        if (!root.TryGetProperty("model_info", out var modelInfo)
+            || modelInfo.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        return modelInfo.EnumerateObject()
+            .Where(property => property.Name.EndsWith(
+                ".context_length",
+                StringComparison.OrdinalIgnoreCase))
+            .Select(property =>
+                property.Value.TryGetInt32(out var value) && value > 0
+                    ? value
+                    : (int?)null)
+            .Where(value => value.HasValue)
+            .Max();
     }
 
     private static string TruncateError(string value)
@@ -671,6 +818,10 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
             {
                 var name = ReadString(x, "name") ?? ReadString(x, "model") ?? "";
                 var capabilities = ReadStringArray(x, "capabilities");
+                var toolSupportKnown = x.TryGetProperty(
+                    "capabilities",
+                    out var capabilitiesElement)
+                    && capabilitiesElement.ValueKind == JsonValueKind.Array;
                 var family = ReadNestedString(x, "details", "family");
                 var supportsReasoningEffort =
                     string.Equals(family, "gptoss", StringComparison.OrdinalIgnoreCase)
@@ -684,7 +835,8 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
                     ReadPositiveInt32(x, "details", "context_length"),
                     capabilities.Contains("tools", StringComparer.OrdinalIgnoreCase),
                     supportsReasoning,
-                    supportsReasoningEffort);
+                    supportsReasoningEffort,
+                    toolSupportKnown);
             })
             .ToArray();
     }
@@ -793,7 +945,8 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
         int? MaximumContextWindow = null,
         bool SupportsTools = false,
         bool SupportsReasoning = false,
-        bool SupportsReasoningEffort = false);
+        bool SupportsReasoningEffort = false,
+        bool ToolSupportKnown = false);
 
     private sealed record DiscoveryAttempt(
         bool Reachable,

@@ -337,7 +337,8 @@ public sealed record AiProviderModelDto(
     int? MaximumContextWindow = null,
     bool SupportsTools = false,
     bool SupportsReasoning = false,
-    bool SupportsReasoningEffort = false);
+    bool SupportsReasoningEffort = false,
+    bool ToolSupportKnown = false);
 
 public sealed record AiProviderModelsDto(
     Guid ProfileId,

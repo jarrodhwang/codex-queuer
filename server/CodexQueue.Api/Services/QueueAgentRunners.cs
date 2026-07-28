@@ -137,6 +137,13 @@ public sealed class LocalCodexQueueAgentRunner(
             throw new InvalidOperationException("Selected model is not installed on the Local AI server.");
         }
 
+        if (selectedModel.ToolSupportKnown && !selectedModel.SupportsTools)
+        {
+            throw new InvalidOperationException(
+                selectedModel.Name
+                + " does not advertise tool calling support. Local Codex requires a tool-capable model to inspect files, apply changes, and create commits.");
+        }
+
         var contextWindow = profile.ConfiguredContextWindow ?? AiProviderService.RecommendedContextWindow;
         if (!string.IsNullOrWhiteSpace(context.Run.ModelSpeed))
         {

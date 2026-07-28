@@ -217,17 +217,23 @@ public sealed class AiProviderServiceTests
         var service = CreateService(request =>
         {
             requests.Enqueue(Record(request));
+            if (request.RequestUri!.AbsolutePath == "/api/show")
+            {
+                return JsonResponse(
+                    """
+                    {
+                      "capabilities": ["completion", "tools", "thinking"],
+                      "details": { "family": "qwen2" },
+                      "model_info": { "qwen2.context_length": 131072 }
+                    }
+                    """);
+            }
+
             return JsonResponse(
                 """
                 {
                   "models": [
-                    { "name": "qwen2.5-coder:32b" },
-                    { "model": "codestral:22b" },
-                    {
-                      "name": "qwen2.5-coder:32b",
-                      "capabilities": ["completion", "tools", "thinking"],
-                      "details": { "context_length": 131072 }
-                    }
+                    { "name": "qwen2.5-coder:32b" }
                   ]
                 }
                 """);
@@ -239,26 +245,51 @@ public sealed class AiProviderServiceTests
 
         Assert.Equal(ProviderHealthStatus.Healthy, result.HealthStatus);
         Assert.False(result.FromCache);
-        Assert.Collection(
-            result.Models,
-            model =>
-            {
-                Assert.Equal("codestral:22b", model.Name);
-                Assert.Equal("codestral:22b", model.Model);
-            },
-            model =>
-            {
-                Assert.Equal("qwen2.5-coder:32b", model.Name);
-                Assert.Equal("qwen2.5-coder:32b", model.Model);
-                Assert.Equal(131_072, model.MaximumContextWindow);
-                Assert.True(model.SupportsTools);
-                Assert.True(model.SupportsReasoning);
-                Assert.False(model.SupportsReasoningEffort);
-            });
-        var request = Assert.Single(requests);
-        Assert.Equal("http://ollama.test:11434/api/tags", request.Uri);
-        Assert.Equal("Bearer", request.Authorization?.Scheme);
-        Assert.Equal(AiProviderService.LocalPlaceholderApiKey, request.Authorization?.Parameter);
+        var model = Assert.Single(result.Models);
+        Assert.Equal("qwen2.5-coder:32b", model.Name);
+        Assert.Equal("qwen2.5-coder:32b", model.Model);
+        Assert.Equal(131_072, model.MaximumContextWindow);
+        Assert.True(model.SupportsTools);
+        Assert.True(model.ToolSupportKnown);
+        Assert.True(model.SupportsReasoning);
+        Assert.False(model.SupportsReasoningEffort);
+        Assert.Equal(
+            [
+                "http://ollama.test:11434/api/tags",
+                "http://ollama.test:11434/api/show",
+            ],
+            requests.Select(x => x.Uri).ToArray());
+        Assert.All(requests, request =>
+        {
+            Assert.Equal("Bearer", request.Authorization?.Scheme);
+            Assert.Equal(AiProviderService.LocalPlaceholderApiKey, request.Authorization?.Parameter);
+        });
+    }
+
+    [Fact]
+    public async Task DiscoverModelsAsync_IdentifiesOllamaModelWithoutToolCalling()
+    {
+        var service = CreateService(request =>
+            request.RequestUri!.AbsolutePath == "/api/show"
+                ? JsonResponse(
+                    """
+                    {
+                      "capabilities": ["completion", "vision"],
+                      "details": { "family": "gemma3" },
+                      "model_info": { "gemma3.context_length": 131072 }
+                    }
+                    """)
+                : JsonResponse("""{"models":[{"name":"gemma3:4b"}]}"""));
+
+        var result = await service.DiscoverModelsAsync(
+            LocalProfile(),
+            forceRefresh: true);
+
+        var model = Assert.Single(result.Models);
+        Assert.Equal("gemma3:4b", model.Name);
+        Assert.Equal(131_072, model.MaximumContextWindow);
+        Assert.True(model.ToolSupportKnown);
+        Assert.False(model.SupportsTools);
     }
 
     [Fact]
@@ -371,6 +402,7 @@ public sealed class AiProviderServiceTests
         Assert.Equal(
             [
                 "http://ollama.test:11434/api/tags",
+                "http://ollama.test:11434/api/show",
                 "http://ollama.test:11434/v1/models",
             ],
             requests.Select(x => x.Uri).ToArray());

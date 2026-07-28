@@ -170,6 +170,47 @@ public sealed class LocalCodexQueueAgentRunnerTests
     }
 
     [Fact]
+    public async Task RunAsync_RejectsModelThatAdvertisesNoToolCalling()
+    {
+        var profile = LocalProfile(LocalAiServerType.Ollama);
+        var targetRunner = new RecordingTargetCommandRunner();
+        var providerService = new StubProviderService(
+            profile,
+            "http://local-ai.test:8080/v1",
+            new AiProviderDiscoveryResult(
+                ProviderHealthStatus.Healthy,
+                DateTimeOffset.UtcNow,
+                [
+                    new AiProviderModel(
+                        "gemma3:4b",
+                        "gemma3:4b",
+                        131_072,
+                        SupportsTools: false,
+                        ToolSupportKnown: true)
+                ],
+                Error: null,
+                FromCache: false));
+        var runner = new LocalCodexQueueAgentRunner(
+            targetRunner,
+            providerService);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            runner.RunAsync(
+                CreateContext(
+                    profile,
+                    model: "gemma3:4b",
+                    modelEffort: null,
+                    contextWindow: "65536",
+                    sessionId: null,
+                    PermissionMode.FullAccess),
+                _ => Task.CompletedTask,
+                CancellationToken.None));
+
+        Assert.Contains("does not advertise tool calling support", error.Message);
+        Assert.Null(targetRunner.Invocation);
+    }
+
+    [Fact]
     public async Task RunAsync_DoesNotResumeSessionBoundToAnotherProviderRoute()
     {
         var profile = LocalProfile(LocalAiServerType.LmStudio);
