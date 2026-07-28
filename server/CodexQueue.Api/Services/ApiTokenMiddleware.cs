@@ -22,7 +22,7 @@ public sealed class ApiTokenMiddleware(RequestDelegate next, IConfiguration conf
         if (!string.Equals(supplied, _token, StringComparison.Ordinal))
         {
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            await context.Response.WriteAsJsonAsync(new { error = "API token is required." });
+            await context.Response.WriteAsJsonAsync(new { error = "Password is required." });
             return;
         }
 

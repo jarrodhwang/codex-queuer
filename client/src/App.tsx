@@ -1370,7 +1370,7 @@ function AuthScreen({ onAuthed }: { onAuthed: () => Promise<void> }) {
       await api.verifyToken()
       await onAuthed()
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Token was rejected.')
+      setError(cause instanceof Error ? cause.message : 'Password was rejected.')
     }
   }
 
@@ -1378,11 +1378,11 @@ function AuthScreen({ onAuthed }: { onAuthed: () => Promise<void> }) {
     <div className="auth-screen">
       <GlassPanel className="auth-card">
         <div className="section-header">
-          <h2>API Token</h2>
+          <h2>Password</h2>
           <Server size={18} />
         </div>
         <form className="form-grid" onSubmit={submit}>
-          <FieldLabel label="Token">
+          <FieldLabel label="Password">
             <GlassInput value={token} onChange={(event) => setToken(event.target.value)} type="password" autoFocus />
           </FieldLabel>
           {error && <span className="error-text">{error}</span>}
