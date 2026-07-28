@@ -12,3 +12,4 @@ RUN npm run build
 FROM httpd:2.4
 COPY apache/httpd.conf /usr/local/apache2/conf/httpd.conf
 COPY --from=build /app/dist/ /usr/local/apache2/htdocs/
+RUN chmod -R a+rX /usr/local/apache2/htdocs

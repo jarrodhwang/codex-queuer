@@ -1298,6 +1298,19 @@
   height: 34px;
 }
 
+.ai-brand-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
+
+.runner-icon-button .ai-brand-icon {
+  width: 20px;
+  height: 20px;
+}
+
 .runner-icon-button.active {
   color: #075985;
   box-shadow:

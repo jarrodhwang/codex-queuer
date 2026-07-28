@@ -118,6 +118,34 @@ type RunnerChoice = 'Codex' | 'Claude' | 'Local'
 type RightRailView = 'files' | 'git'
 type ColorTheme = 'light' | 'dark'
 type AttachmentKind = 'image' | 'json' | 'csv' | 'text' | 'binary'
+type AiBrandIcon = 'chatgpt' | 'claude' | 'ollama' | 'meta' | 'qwen' | 'mistral' | 'gemma'
+
+const aiBrandIconSources: Record<AiBrandIcon, string> = {
+  chatgpt: `${import.meta.env.BASE_URL}ai-icon/chatgpt-icon.png`,
+  claude: `${import.meta.env.BASE_URL}ai-icon/claude-ai-icon.png`,
+  ollama: `${import.meta.env.BASE_URL}ai-icon/ollama-icon.png`,
+  meta: `${import.meta.env.BASE_URL}ai-icon/meta-icon.png`,
+  qwen: `${import.meta.env.BASE_URL}ai-icon/qwen-ai-icon.png`,
+  mistral: `${import.meta.env.BASE_URL}ai-icon/mistral-ai-icon.png`,
+  gemma: `${import.meta.env.BASE_URL}ai-icon/google-gemma-ai-icon.png`,
+}
+
+function localModelBrandIcon(model: string): AiBrandIcon {
+  const normalized = model.toLocaleLowerCase()
+
+  if (normalized.includes('gpt') || normalized.includes('openai')) return 'chatgpt'
+  if (normalized.includes('claude') || normalized.includes('anthropic')) return 'claude'
+  if (normalized.includes('llama') || normalized.includes('meta')) return 'meta'
+  if (normalized.includes('qwen')) return 'qwen'
+  if (/(mistral|mixtral|codestral|devstral)/.test(normalized)) return 'mistral'
+  if (normalized.includes('gemma')) return 'gemma'
+
+  return 'ollama'
+}
+
+function AiBrandImage({ brand, className }: { brand: AiBrandIcon; className?: string }) {
+  return <img className={`ai-brand-icon ${className ?? ''}`} src={aiBrandIconSources[brand]} alt="" aria-hidden="true" draggable={false} />
+}
 
 type AttachmentInsight = {
   kind: AttachmentKind
@@ -199,6 +227,18 @@ const localContextSizeOptions = [
   { label: '256K', value: '262144' },
 ] as const
 const supportedLocalContextSizes = [4_096, 8_192, 16_384, 32_768, 65_536, 131_072, 262_144]
+const serverContextSizeOptions = [
+  { label: '4K', value: 4_096 },
+  { label: '8K', value: 8_192 },
+  { label: '16K', value: 16_384 },
+  { label: '32K', value: 32_768 },
+  { label: '64K', value: 65_536 },
+  { label: '128K', value: 131_072 },
+  { label: '256K', value: 262_144 },
+  { label: '512K', value: 524_288 },
+  { label: '1M', value: 1_048_576 },
+] as const
+const customServerContextSizeValue = 'custom'
 const localModelDiscoveryCache = new Map<string, ProviderModelsResponse>()
 
 type CachedLocalCodexReadiness = {
@@ -1985,6 +2025,9 @@ function LocalAiServerModal({
   const [serverStatuses, setServerStatuses] = useState<Record<string, { testing: boolean; success?: boolean; output: string }>>({})
   const [testMessage, setTestMessage] = useState('')
   const initialChecksStartedRef = useRef(false)
+  const selectedServerContextSize = serverContextSizeOptions.some((option) => option.value === draft.configuredContextWindow)
+    ? String(draft.configuredContextWindow)
+    : customServerContextSizeValue
 
   const reset = () => {
     setEditingId(undefined)
@@ -2132,7 +2175,35 @@ function LocalAiServerModal({
             <FieldLabel label="Base URL"><GlassInput value={draft.baseUrl} required onChange={(event) => update('baseUrl', event.target.value)} placeholder={localAiServerDefaults[draft.localAiServerType].baseUrl} /></FieldLabel>
             <div className="form-grid two">
               <FieldLabel label="Server type"><GlassSelect value={draft.localAiServerType} onChange={(event) => selectServerType(event.target.value as LocalAiServerType)}><option value="Ollama">Ollama</option><option value="LmStudio">LM Studio</option><option value="LlamaCpp">llama.cpp</option></GlassSelect></FieldLabel>
-              <FieldLabel label={draft.localAiServerType === 'Ollama' ? 'Maximum context (applied)' : 'Maximum context'}><GlassInput value={draft.configuredContextWindow ?? ''} type="number" min={32768} onChange={(event) => update('configuredContextWindow', Number(event.target.value))} /></FieldLabel>
+              <FieldLabel label={draft.localAiServerType === 'Ollama' ? 'Maximum context size (applied)' : 'Maximum context size'}>
+                <GlassSelect
+                  value={selectedServerContextSize}
+                  onChange={(event) => {
+                    const value = event.target.value
+                    if (value !== customServerContextSizeValue) {
+                      update('configuredContextWindow', Number(value))
+                    }
+                  }}
+                >
+                  {serverContextSizeOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  <option value={customServerContextSizeValue}>Custom</option>
+                </GlassSelect>
+                {selectedServerContextSize === customServerContextSizeValue && (
+                  <GlassInput
+                    aria-label="Custom maximum context size"
+                    value={draft.configuredContextWindow ?? ''}
+                    type="number"
+                    min={1}
+                    step={1}
+                    inputMode="numeric"
+                    placeholder="Tokens"
+                    onChange={(event) => {
+                      const value = event.target.valueAsNumber
+                      update('configuredContextWindow', Number.isFinite(value) ? value : null)
+                    }}
+                  />
+                )}
+              </FieldLabel>
             </div>
             <div className="form-grid two">
               <FieldLabel label="Default model"><GlassInput value={draft.defaultModel ?? ''} onChange={(event) => update('defaultModel', event.target.value)} placeholder="gpt-oss:20b" /></FieldLabel>
@@ -3363,19 +3434,23 @@ function QueueComposer({
   )
   const localModelDropdownOptions = useMemo(() => {
     const options = localModelOptions.map((model) => ({
-      icon: <Code2 size={14} />,
+      icon: <AiBrandImage brand={localModelBrandIcon(model.name || model.id)} />,
       label: localModelDisplayName(model.name || model.id),
       value: model.id,
     }))
     if (!localModel && options.length === 0) {
       return [{
-        icon: <Code2 size={14} />,
+        icon: <AiBrandImage brand="ollama" />,
         label: loadingLocalModels ? 'Discovering models…' : 'Select a model',
         value: '',
       }]
     }
     if (localModel && !options.some((option) => option.value === localModel)) {
-      options.unshift({ icon: <Code2 size={14} />, label: localModelDisplayName(localModel), value: localModel })
+      options.unshift({
+        icon: <AiBrandImage brand={localModelBrandIcon(localModel)} />,
+        label: localModelDisplayName(localModel),
+        value: localModel,
+      })
     }
     return options
   }, [loadingLocalModels, localModel, localModelOptions])
@@ -4513,9 +4588,9 @@ function QueueComposer({
           </div>
           <div className="runner-icon-switch" role="group" aria-label="Coding agent runner">
             {([
-              { value: 'Codex', label: 'Codex / ChatGPT', icon: <Code2 size={17} />, disabled: false },
-              { value: 'Claude', label: 'Claude (not enabled)', icon: <Network size={17} />, disabled: true },
-              { value: 'Local', label: 'Local / Codex', icon: <TerminalIcon size={17} />, disabled: false },
+              { value: 'Codex', label: 'Codex / ChatGPT', brand: 'chatgpt', disabled: false },
+              { value: 'Claude', label: 'Claude (not enabled)', brand: 'claude', disabled: true },
+              { value: 'Local', label: 'Local / Codex', brand: 'ollama', disabled: false },
             ] as const).map((option) => (
               <GlassButton
                 key={option.value}
@@ -4529,7 +4604,7 @@ function QueueComposer({
                 disabled={option.disabled}
                 onClick={() => selectRunnerChoice(option.value)}
               >
-                {option.icon}
+                <AiBrandImage brand={option.brand} />
               </GlassButton>
             ))}
           </div>

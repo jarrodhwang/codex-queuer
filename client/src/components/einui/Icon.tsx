@@ -9,10 +9,10 @@ interface IconProps {
 }
 
 const ICON_MAP: Record<ProviderIcon, { src: string; alt: string }> = {
-  codex:   { src: 'https://cdn-icons-png.flaticon.com/512/1828/1828667.png', alt: 'Codex icon' },
-  claude:  { src: 'https://cdn-icons-png.flaticon.com/512/2923/2923676.png',  alt: 'Claude icon' },
-  local:   { src: '/icons/local.svg',                                      alt: 'Local icon' }, // keep current
-  loading: { src: '', alt: '' }                                            // handled by CSS spinner
+  codex:   { src: `${import.meta.env.BASE_URL}ai-icon/chatgpt-icon.png`, alt: 'ChatGPT icon' },
+  claude:  { src: `${import.meta.env.BASE_URL}ai-icon/claude-ai-icon.png`, alt: 'Claude icon' },
+  local:   { src: `${import.meta.env.BASE_URL}ai-icon/ollama-icon.png`, alt: 'Ollama icon' },
+  loading: { src: '', alt: '' },
 };
 
 export const Icon = ({ provider, size = 24, className = '' }: IconProps) => {
@@ -21,6 +21,5 @@ export const Icon = ({ provider, size = 24, className = '' }: IconProps) => {
   }
 
   const { src, alt } = ICON_MAP[provider];
-  // For Codex & Claude we use external PNGs; for local we keep the SVG that already lives in public
   return <img src={src} width={size} height={size} className={`icon ${className}`} alt={alt} />;
 };
