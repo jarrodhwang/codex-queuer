@@ -161,8 +161,8 @@ function CardRunnerPicker({
 }) {
   const [open, setOpen] = useState(false)
   const options = [
-    { value: 'Codex' as const, label: 'Codex / ChatGPT', brand: 'chatgpt' as const },
-    { value: 'Local' as const, label: 'Local / Codex', brand: 'ollama' as const },
+    { value: 'Codex' as const, label: 'ChatGPT', brand: 'chatgpt' as const },
+    { value: 'Local' as const, label: 'Ollama', brand: 'ollama' as const },
   ]
   const selected = options.find((option) => option.value === value) ?? options[0]
 
@@ -3818,6 +3818,29 @@ function QueueComposer({
     setLocalCodexMachineError(cached?.error ?? '')
     return invalidatePendingCheck
   }, [localModel, runnerChoice, selectedLocalProfileId, selectedProject.machineId])
+
+  useEffect(() => {
+    const selectedStatusModel = runnerChoice === 'Local'
+      ? localModel
+      : commitRunnerChoice === 'Local'
+        ? commitModel.model
+        : ''
+    if (loadingLocalModels || !selectedLocalProfileId || !selectedStatusModel) {
+      return
+    }
+
+    // Discovery only tells us that the API can list models. Check the selected
+    // model from the execution machine as soon as the card has a stable choice.
+    void checkLocalCodex(selectedLocalProfileId, selectedStatusModel)
+  }, [
+    checkLocalCodex,
+    commitModel.model,
+    commitRunnerChoice,
+    loadingLocalModels,
+    localModel,
+    runnerChoice,
+    selectedLocalProfileId,
+  ])
 
   const isCodexRunner = runnerChoice === 'Codex'
   const isLocalRunner = runnerChoice === 'Local'

@@ -74,6 +74,7 @@ public sealed class LocalCodexQueueAgentRunnerTests
         const string nextSessionId = "next-local-session";
         const string normalizedBaseUrl = "http://local-ai.test:8080/v1";
         var profile = LocalProfile(serverType);
+        const int expectedContextWindow = 4_096;
         var targetRunner = new RecordingTargetCommandRunner(
             new CommandResult(
                 0,
@@ -99,7 +100,7 @@ public sealed class LocalCodexQueueAgentRunnerTests
             profile,
             selectedModel,
             modelEffort: "high",
-            contextWindow: "4096",
+            contextWindow: expectedContextWindow.ToString(),
             priorSessionId,
             PermissionMode.FullAccess);
         var streamed = new List<string>();
@@ -119,7 +120,7 @@ public sealed class LocalCodexQueueAgentRunnerTests
         Assert.Equal(serverType, invocation.ServerType);
         Assert.Equal(normalizedBaseUrl, invocation.BaseUrl);
         Assert.Equal(selectedModel, invocation.Model);
-        Assert.Equal(4_096, invocation.ContextWindow);
+        Assert.Equal(expectedContextWindow, invocation.ContextWindow);
         Assert.Equal("high", invocation.ModelEffort);
         Assert.Equal(priorSessionId, invocation.CodexSessionId);
         Assert.Equal(context.Prompt, invocation.Prompt);
@@ -134,7 +135,7 @@ public sealed class LocalCodexQueueAgentRunnerTests
             result.LocalCodexSessionRouteKey);
         Assert.Null(result.CodexSessionId);
         Assert.Equal(
-            ["Using Local context size: 4,096 tokens." + Environment.NewLine, "target-stream"],
+            [$"Using Local context size: {expectedContextWindow:N0} tokens." + Environment.NewLine, "target-stream"],
             streamed);
     }
 
