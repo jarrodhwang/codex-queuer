@@ -1745,7 +1745,8 @@ public static class ApiEndpoints
             if (requestRun is null)
             {
                 requestRun = new CodexRun { Kind = RunKind.Request, Status = QueueStatus.Queued, CreatedAt = request.CreatedAt };
-                request.Runs.Add(requestRun);
+                requestRun.Request = request;
+                db.Runs.Add(requestRun);
             }
 
             requestRun.Model = request.Model;

@@ -141,7 +141,13 @@ public static class DbInitializer
 
             var interruptedLocalCodexDetected = interruptedRequests.Any(x =>
                 x.ExecutionRunner == ExecutionRunner.OpenHandsCli
-                && x.Status is QueueStatus.Running or QueueStatus.CancelRequested);
+                && x.Status is QueueStatus.Running or QueueStatus.CancelRequested
+                && x.Runs
+                    .Where(run => run.Kind == RunKind.Request)
+                    .OrderByDescending(run => run.CreatedAt)
+                    .ThenByDescending(run => run.Id)
+                    .FirstOrDefault()?.Status
+                    is QueueStatus.Running or QueueStatus.CancelRequested);
             var repairedRequests = false;
             foreach (var request in interruptedRequests)
             {
@@ -152,7 +158,7 @@ public static class DbInitializer
                     continue;
                 }
 
-                if (RepairInterruptedRequest(request))
+                if (RepairInterruptedRequest(db, request))
                 {
                     repairedRequests = true;
                     continue;
@@ -528,7 +534,9 @@ public static class DbInitializer
         }
     }
 
-    private static bool RepairInterruptedRequest(CodexRequest request)
+    private static bool RepairInterruptedRequest(
+        AppDbContext db,
+        CodexRequest request)
     {
         var requestRun = request.Runs
             .Where(x => x.Kind == RunKind.Request)
@@ -560,7 +568,9 @@ public static class DbInitializer
 
         if (commitRun is null)
         {
-            request.Runs.Add(CreateCommitRun(request));
+            var createdCommitRun = CreateCommitRun(request);
+            createdCommitRun.Request = request;
+            db.Runs.Add(createdCommitRun);
             MarkRequestQueued(request);
             return true;
         }

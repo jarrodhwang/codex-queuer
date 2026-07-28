@@ -236,6 +236,107 @@ public sealed class CompatibilityDefaultsTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DbInitializer_InsertsMissingSeparateCommitRunForCompletedMainStage(
+        bool mainUsesLocalCodex)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        var requestId = Guid.NewGuid();
+        var commitProviderId = Guid.NewGuid();
+
+        await using (var setupDb = new AppDbContext(options))
+        {
+            await setupDb.Database.EnsureCreatedAsync();
+            var machine = new TargetMachine
+            {
+                Name = "Separate commit recovery machine",
+                Kind = MachineKind.Local,
+                Platform = MachinePlatform.Linux,
+                WorkingRoot = "/work",
+            };
+            var project = new Project
+            {
+                Name = "Separate commit recovery project",
+                Path = "/work/project",
+                Machine = machine,
+            };
+            var commitProvider = new AiProviderProfile
+            {
+                Id = commitProviderId,
+                Name = "Recovery Ollama",
+                Source = AiProviderSource.Local,
+                BaseUrl = "http://ollama.test:11434/v1",
+                Enabled = true,
+            };
+            var request = new CodexRequest
+            {
+                Id = requestId,
+                Project = project,
+                Machine = machine,
+                Prompt = "completed main stage",
+                Model = mainUsesLocalCodex ? "local-main" : "gpt-main",
+                ExecutionRunner = mainUsesLocalCodex
+                    ? ExecutionRunner.OpenHandsCli
+                    : ExecutionRunner.CodexCli,
+                ProviderProfileId = mainUsesLocalCodex
+                    ? commitProviderId
+                    : null,
+                ProviderProfile = mainUsesLocalCodex
+                    ? commitProvider
+                    : null,
+                OpenHandsAlwaysApproveConfirmed = mainUsesLocalCodex,
+                GenerateCommit = true,
+                SeparateCommitSession = true,
+                CommitExecutionRunner = ExecutionRunner.OpenHandsCli,
+                CommitProviderProfileId = commitProviderId,
+                CommitModel = "local-commit",
+                Status = QueueStatus.Running,
+            };
+            setupDb.AiProviderProfiles.Add(commitProvider);
+            setupDb.Runs.Add(new CodexRun
+            {
+                Request = request,
+                Kind = RunKind.Request,
+                Model = request.Model,
+                ExecutionRunner = request.ExecutionRunner,
+                Status = QueueStatus.Succeeded,
+                FinishedAt = DateTimeOffset.UtcNow,
+            });
+            await setupDb.SaveChangesAsync();
+        }
+
+        var services = new ServiceCollection()
+            .AddLogging()
+            .AddSingleton<IConfiguration>(
+                new ConfigurationBuilder().AddInMemoryCollection().Build())
+            .AddDbContext<AppDbContext>(builder => builder.UseSqlite(connection))
+            .BuildServiceProvider();
+        await using (services)
+        {
+            await DbInitializer.InitializeAsync(services);
+
+            await using var scope = services.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var request = await db.Requests
+                .Include(item => item.Runs)
+                .SingleAsync(item => item.Id == requestId);
+            var commitRun = Assert.Single(
+                request.Runs,
+                run => run.Kind == RunKind.Commit);
+            Assert.Equal(QueueStatus.Queued, request.Status);
+            Assert.Equal(QueueStatus.Queued, commitRun.Status);
+            Assert.Equal(ExecutionRunner.OpenHandsCli, commitRun.ExecutionRunner);
+            Assert.Equal(commitProviderId, commitRun.ProviderProfileId);
+            Assert.Equal("local-commit", commitRun.Model);
+        }
+    }
+
     [Fact]
     public async Task DbInitializer_DoesNotAutomaticallyDuplicateInterruptedLocalCodexRun()
     {

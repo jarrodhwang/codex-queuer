@@ -183,7 +183,7 @@ public sealed class QueueWorker(
             return true;
         }
 
-        ResumeRequest(request);
+        ResumeRequest(db, request);
         if (request.Status == QueueStatus.Queued)
         {
             var projectPriorityRequests = await db.Requests
@@ -207,31 +207,27 @@ public sealed class QueueWorker(
         return true;
     }
 
-    public Task<bool> KickQueueAsync(CancellationToken cancellationToken)
+    public async Task<bool> KickQueueAsync(CancellationToken cancellationToken)
     {
-        if (!_dispatchLock.Wait(0))
+        try
         {
-            return Task.FromResult(false);
+            // A kick is a durable scheduling request. Waiting for the current
+            // dispatch pass prevents a stage handoff from being silently dropped
+            // when the main request and the background worker finish at the same
+            // time.
+            await DispatchAvailableProjectsLockedAsync(cancellationToken);
+            return true;
         }
-
-        _ = Task.Run(async () =>
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            try
-            {
-                await DispatchAvailableProjectsAsync(CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                _lastError = ex.Message;
-                logger.LogError(ex, "Queue kick failed.");
-            }
-            finally
-            {
-                _dispatchLock.Release();
-            }
-        }, CancellationToken.None);
-
-        return Task.FromResult(true);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _lastError = ex.Message;
+            logger.LogError(ex, "Queue kick failed.");
+            return false;
+        }
     }
 
     public async Task<QueueModeChangeResult> ChangeQueueModeAsync(
@@ -503,7 +499,10 @@ public sealed class QueueWorker(
                 }
                 else
                 {
-                    await RunRequestAsync(dispatch.RequestId, dispatch.Execution.Cancellation.Token);
+                    await RunRequestAsync(
+                        dispatch.RequestId,
+                        dispatch.Execution,
+                        dispatch.Execution.Cancellation.Token);
                 }
             }
             catch (OperationCanceledException) when (dispatch.Execution.Cancellation.IsCancellationRequested)
@@ -531,7 +530,7 @@ public sealed class QueueWorker(
     {
         _activeRequests.TryRemove(dispatch.RequestId, out _);
         _activeQueues.TryRemove(dispatch.QueueLane, out _);
-        dispatch.Execution.ProviderLease?.Dispose();
+        dispatch.Execution.ReleaseProviderLease();
         dispatch.Execution.Cancellation.Dispose();
         dispatch.Execution.Completion.TrySetResult();
     }
@@ -552,7 +551,10 @@ public sealed class QueueWorker(
         await Task.WhenAll(completions);
     }
 
-    private async Task RunRequestAsync(Guid requestId, CancellationToken cancellationToken)
+    private async Task RunRequestAsync(
+        Guid requestId,
+        QueueExecution execution,
+        CancellationToken cancellationToken)
     {
         var requestRunSucceeded = await IsRunSucceededAsync(requestId, RunKind.Request, cancellationToken)
             || await ExecuteRunAsync(requestId, RunKind.Request, cancellationToken);
@@ -561,10 +563,108 @@ public sealed class QueueWorker(
             return;
         }
 
-        // Persist a separate queued stage and release this execution lane. The
-        // dispatcher then acquires the commit runner's own model/provider capacity
-        // and gives the commit session an independent cancellation boundary.
-        await PrepareCommitRunAfterRequestAsync(requestId, cancellationToken);
+        if (!await PrepareCommitRunAfterRequestAsync(requestId, cancellationToken))
+        {
+            return;
+        }
+
+        // A separate commit session is the second stage of the same ordered queue
+        // item. Keep ownership of the lane so another request cannot overtake it,
+        // but exchange the main stage's provider lease for the independently
+        // selected commit runner before starting the second Codex session.
+        if (await TryClaimPreparedCommitRunAsync(requestId, execution, cancellationToken))
+        {
+            await RunCommitAsync(requestId, cancellationToken);
+        }
+    }
+
+    private async Task<bool> TryClaimPreparedCommitRunAsync(
+        Guid requestId,
+        QueueExecution execution,
+        CancellationToken cancellationToken)
+    {
+        execution.ReleaseProviderLease();
+
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var request = await db.Requests
+            .Include(x => x.Project)
+            .Include(x => x.ProviderProfile)
+            .Include(x => x.Runs)
+            .FirstAsync(x => x.Id == requestId, cancellationToken);
+        var commitRun = GetLatestRunOfKind(request.Runs, RunKind.Commit);
+        if (request.Status == QueueStatus.CancelRequested
+            || commitRun?.Status != QueueStatus.Queued)
+        {
+            return false;
+        }
+
+        if (commitRun.ExecutionRunner == ExecutionRunner.CodexCli
+            && await IsRunModelUsageLimitedAsync(
+                db,
+                request.MachineId,
+                commitRun.Model,
+                DateTimeOffset.UtcNow,
+                cancellationToken))
+        {
+            return false;
+        }
+
+        IDisposable? commitProviderLease = null;
+        if (commitRun.ExecutionRunner == ExecutionRunner.OpenHandsCli
+            && commitRun.ProviderProfileId.HasValue)
+        {
+            var enabledProviderProfiles = await db.AiProviderProfiles
+                .AsNoTracking()
+                .Where(profile => profile.Enabled)
+                .ToArrayAsync(cancellationToken);
+            var profile = enabledProviderProfiles.FirstOrDefault(
+                candidate => candidate.Id == commitRun.ProviderProfileId.Value);
+            if (profile is not null)
+            {
+                var providerKey = ProviderConcurrencyKey(profile);
+                var providerLimits = BuildProviderConcurrencyLimits(enabledProviderProfiles);
+                var maximumConcurrency = providerLimits.GetValueOrDefault(
+                    providerKey,
+                    Math.Max(1, profile.MaximumConcurrency));
+                if (!providerConcurrency.TryAcquire(
+                        providerKey,
+                        maximumConcurrency,
+                        out commitProviderLease))
+                {
+                    request.QueueWaitReason = "Waiting for shared "
+                        + (profile.Source == AiProviderSource.Local ? "Local AI" : profile.Name)
+                        + " capacity ("
+                        + maximumConcurrency
+                        + " concurrent run"
+                        + (maximumConcurrency == 1 ? "" : "s")
+                        + ").";
+                    await TrySaveChangesAsync(
+                        db,
+                        "wait for separate commit provider capacity",
+                        cancellationToken);
+                    return false;
+                }
+            }
+        }
+
+        execution.ReplaceProviderLease(commitProviderLease);
+        request.QueueWaitReason = null;
+        request.Status = QueueStatus.Running;
+        request.Error = null;
+        request.FinishedAt = null;
+        commitRun.Status = QueueStatus.Running;
+        commitRun.StartedAt ??= DateTimeOffset.UtcNow;
+        commitRun.Output = TrimOutput(
+            commitRun.Output
+            + "Starting separate "
+            + (commitRun.ExecutionRunner == ExecutionRunner.OpenHandsCli ? "Local Codex" : "Codex")
+            + " commit run..."
+            + Environment.NewLine);
+        return await TrySaveChangesAsync(
+            db,
+            "claim separate commit run",
+            cancellationToken);
     }
 
     private async Task<bool> PrepareCommitRunAfterRequestAsync(Guid requestId, CancellationToken cancellationToken)
@@ -598,7 +698,8 @@ public sealed class QueueWorker(
         if (commitRun is null)
         {
             commitRun = CreateCommitRun(request);
-            request.Runs.Add(commitRun);
+            commitRun.Request = request;
+            db.Runs.Add(commitRun);
         }
         else
         {
@@ -641,11 +742,16 @@ public sealed class QueueWorker(
                 .Include(x => x.ProviderProfile)
                 .Include(x => x.Runs)
                 .FirstAsync(x => x.Id == requestId, cancellationToken);
+            var existingRun = GetLatestRunOfKind(request.Runs, kind);
             run = FindOrRestoreRunForExecution(request, kind)
                 ?? throw new InvalidOperationException(
                     kind == RunKind.Commit
                         ? "Separate commit run was not available after the request stage completed."
                         : "Request run was not found.");
+            if (existingRun is null)
+            {
+                db.Entry(run).State = EntityState.Added;
+            }
             if (run.ProviderProfileId.HasValue)
             {
                 executionProviderProfile = run.ProviderProfileId == request.ProviderProfileId
@@ -697,7 +803,21 @@ public sealed class QueueWorker(
                     return false;
                 }
 
-                await CompleteRunAsync(requestId, run.Id, kind, commitResult, cancellationToken);
+                await CompleteRunAsync(
+                    requestId,
+                    run.Id,
+                    kind,
+                    new QueueAgentRunResult(
+                        commitResult.ExitCode,
+                        commitResult.Output,
+                        commitResult.CommandPreview,
+                        CodexSessionId: run.ExecutionRunner == ExecutionRunner.CodexCli
+                            ? commitResult.CodexSessionId
+                            : null,
+                        LocalCodexSessionId: run.ExecutionRunner == ExecutionRunner.OpenHandsCli
+                            ? commitResult.CodexSessionId
+                            : null),
+                    cancellationToken);
                 return commitResult.Success;
             }
 
@@ -972,7 +1092,10 @@ public sealed class QueueWorker(
         var changed = FailClosedInterruptedLocalCodexRequests(requests, activeRequestIds);
         foreach (var request in requests)
         {
-            changed |= ReconcileRequestState(request, activeRequestIds.Contains(request.Id));
+            changed |= ReconcileRequestState(
+                db,
+                request,
+                activeRequestIds.Contains(request.Id));
         }
 
         if (changed)
@@ -1046,7 +1169,10 @@ public sealed class QueueWorker(
         return true;
     }
 
-    private static bool ReconcileRequestState(CodexRequest request, bool isActive)
+    private static bool ReconcileRequestState(
+        AppDbContext db,
+        CodexRequest request,
+        bool isActive)
     {
         var requestRun = GetLatestRunOfKind(request.Runs, RunKind.Request);
         var commitRun = GetLatestRunOfKind(request.Runs, RunKind.Commit);
@@ -1111,7 +1237,9 @@ public sealed class QueueWorker(
 
             if (commitRun is null)
             {
-                request.Runs.Add(CreateCommitRun(request));
+                var createdCommitRun = CreateCommitRun(request);
+                createdCommitRun.Request = request;
+                db.Runs.Add(createdCommitRun);
                 MarkRequestQueued(request);
                 return true;
             }
@@ -1260,7 +1388,7 @@ public sealed class QueueWorker(
         return restored;
     }
 
-    private static void ResumeRequest(CodexRequest request)
+    private static void ResumeRequest(AppDbContext db, CodexRequest request)
     {
         var requestRun = GetLatestRunOfKind(request.Runs, RunKind.Request);
         var commitRun = GetLatestRunOfKind(request.Runs, RunKind.Commit);
@@ -1270,6 +1398,7 @@ public sealed class QueueWorker(
             requestRun = new CodexRun
             {
                 RequestId = request.Id,
+                Request = request,
                 Kind = RunKind.Request,
                 Model = request.Model,
                 ModelEffort = request.ModelEffort,
@@ -1280,7 +1409,7 @@ public sealed class QueueWorker(
                 ProviderSource = request.ProviderProfile?.Source,
                 CreatedAt = DateTimeOffset.UtcNow
             };
-            request.Runs.Add(requestRun);
+            db.Runs.Add(requestRun);
         }
 
         ClearRequestRetryState(request);
@@ -1312,7 +1441,9 @@ public sealed class QueueWorker(
 
         if (commitRun is null)
         {
-            request.Runs.Add(CreateCommitRun(request));
+            var createdCommitRun = CreateCommitRun(request);
+            createdCommitRun.Request = request;
+            db.Runs.Add(createdCommitRun);
         }
         else if (commitRun.Status != QueueStatus.Succeeded)
         {
@@ -1417,23 +1548,6 @@ public sealed class QueueWorker(
         request.QueueWaitReason = null;
     }
 
-    private Task CompleteRunAsync(
-        Guid requestId,
-        Guid runId,
-        RunKind kind,
-        CommandResult result,
-        CancellationToken cancellationToken) =>
-        CompleteRunAsync(
-            requestId,
-            runId,
-            kind,
-            new QueueAgentRunResult(
-                result.ExitCode,
-                result.Output,
-                result.CommandPreview,
-                CodexSessionId: result.CodexSessionId),
-            cancellationToken);
-
     private async Task CompleteRunAsync(
         Guid requestId,
         Guid runId,
@@ -1456,7 +1570,10 @@ public sealed class QueueWorker(
             return;
         }
         run.CommandPreview = result.CommandPreview;
-        if (request.ExecutionRunner == ExecutionRunner.CodexCli)
+        var executionRunner = kind == RunKind.Commit
+            ? run.ExecutionRunner
+            : request.ExecutionRunner;
+        if (executionRunner == ExecutionRunner.CodexCli)
         {
             var sessionId = result.CodexSessionId ?? run.CodexSessionId;
             run.CodexSessionId = sessionId;
@@ -2551,9 +2668,19 @@ public sealed class QueueWorker(
         CancellationTokenSource cancellation,
         IDisposable? providerLease)
     {
+        private IDisposable? _providerLease = providerLease;
+
         public CancellationTokenSource Cancellation { get; } = cancellation;
-        public IDisposable? ProviderLease { get; } = providerLease;
         public TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void ReplaceProviderLease(IDisposable? providerLease)
+        {
+            var previousLease = Interlocked.Exchange(ref _providerLease, providerLease);
+            previousLease?.Dispose();
+        }
+
+        public void ReleaseProviderLease() =>
+            Interlocked.Exchange(ref _providerLease, null)?.Dispose();
     }
 
     private static string? ReadString(JsonElement element, string propertyName) =>
