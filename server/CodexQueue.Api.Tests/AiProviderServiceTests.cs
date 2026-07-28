@@ -12,6 +12,54 @@ namespace CodexQueue.Api.Tests;
 public sealed class AiProviderServiceTests
 {
     [Fact]
+    public async Task PrepareModelForContextAsync_CreatesOllamaModelWithNumCtx()
+    {
+        string? requestUri = null;
+        string? requestBody = null;
+        var service = CreateService(request =>
+        {
+            requestUri = request.RequestUri?.AbsoluteUri;
+            requestBody = request.Content?.ReadAsStringAsync().GetAwaiter().GetResult();
+            return JsonResponse("""{"status":"success"}""");
+        });
+        var profile = LocalProfile();
+
+        var runtimeModel = await service.PrepareModelForContextAsync(
+            profile,
+            "gpt-oss:20b",
+            131_072);
+
+        Assert.Equal("http://ollama.test:11434/api/create", requestUri);
+        Assert.StartsWith("codex-queue-context-", runtimeModel, StringComparison.Ordinal);
+        Assert.EndsWith(":ctx-131072", runtimeModel, StringComparison.Ordinal);
+        using var document = JsonDocument.Parse(Assert.IsType<string>(requestBody));
+        Assert.Equal(runtimeModel, document.RootElement.GetProperty("model").GetString());
+        Assert.Equal("gpt-oss:20b", document.RootElement.GetProperty("from").GetString());
+        Assert.Equal(
+            131_072,
+            document.RootElement.GetProperty("parameters").GetProperty("num_ctx").GetInt32());
+        Assert.False(document.RootElement.GetProperty("stream").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData(LocalAiServerType.LmStudio)]
+    [InlineData(LocalAiServerType.LlamaCpp)]
+    public async Task PrepareModelForContextAsync_LeavesOtherBackendsUnchanged(
+        LocalAiServerType serverType)
+    {
+        var service = CreateService(_ =>
+            throw new InvalidOperationException("No backend request was expected."));
+        var profile = LocalProfile(serverType: serverType);
+
+        var runtimeModel = await service.PrepareModelForContextAsync(
+            profile,
+            "local-model",
+            65_536);
+
+        Assert.Equal("local-model", runtimeModel);
+    }
+
+    [Fact]
     public void Validate_NormalizesLocalRootToOpenAiEndpoint()
     {
         var service = CreateService(_ => JsonResponse("""{"models":[]}"""));

@@ -129,7 +129,8 @@ public sealed class LocalCodexQueueAgentRunnerTests
             LocalCodexQueueAgentRunner.BuildSessionRouteKey(
                 profile.Id,
                 serverType,
-                normalizedBaseUrl),
+                normalizedBaseUrl,
+                selectedModel),
             result.LocalCodexSessionRouteKey);
         Assert.Null(result.CodexSessionId);
         Assert.Equal(["target-stream"], streamed);
@@ -187,7 +188,8 @@ public sealed class LocalCodexQueueAgentRunnerTests
             LocalCodexQueueAgentRunner.BuildSessionRouteKey(
                 profile.Id,
                 LocalAiServerType.Ollama,
-                "http://another-server.test:11434/v1");
+                "http://another-server.test:11434/v1",
+                "foo");
 
         await runner.RunAsync(
             context,
@@ -337,7 +339,8 @@ public sealed class LocalCodexQueueAgentRunnerTests
                         : LocalCodexQueueAgentRunner.BuildSessionRouteKey(
                             profile.Id,
                             profile.LocalAiServerType,
-                            "http://local-ai.test:8080/v1"),
+                            "http://local-ai.test:8080/v1",
+                            model),
             },
             PermissionMode = permissionMode,
         };
@@ -391,6 +394,16 @@ public sealed class LocalCodexQueueAgentRunnerTests
         {
             Assert.Same(expectedProfile, profile);
             return Task.FromResult(discovery);
+        }
+
+        public Task<string> PrepareModelForContextAsync(
+            AiProviderProfile profile,
+            string model,
+            int contextWindow,
+            CancellationToken cancellationToken = default)
+        {
+            Assert.Same(expectedProfile, profile);
+            return Task.FromResult(model);
         }
     }
 

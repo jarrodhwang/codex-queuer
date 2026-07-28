@@ -2132,7 +2132,7 @@ function LocalAiServerModal({
             <FieldLabel label="Base URL"><GlassInput value={draft.baseUrl} required onChange={(event) => update('baseUrl', event.target.value)} placeholder={localAiServerDefaults[draft.localAiServerType].baseUrl} /></FieldLabel>
             <div className="form-grid two">
               <FieldLabel label="Server type"><GlassSelect value={draft.localAiServerType} onChange={(event) => selectServerType(event.target.value as LocalAiServerType)}><option value="Ollama">Ollama</option><option value="LmStudio">LM Studio</option><option value="LlamaCpp">llama.cpp</option></GlassSelect></FieldLabel>
-              <FieldLabel label="Maximum context"><GlassInput value={draft.configuredContextWindow ?? ''} type="number" min={32768} onChange={(event) => update('configuredContextWindow', Number(event.target.value))} /></FieldLabel>
+              <FieldLabel label={draft.localAiServerType === 'Ollama' ? 'Maximum context (applied)' : 'Maximum context'}><GlassInput value={draft.configuredContextWindow ?? ''} type="number" min={32768} onChange={(event) => update('configuredContextWindow', Number(event.target.value))} /></FieldLabel>
             </div>
             <div className="form-grid two">
               <FieldLabel label="Default model"><GlassInput value={draft.defaultModel ?? ''} onChange={(event) => update('defaultModel', event.target.value)} placeholder="gpt-oss:20b" /></FieldLabel>
@@ -3739,7 +3739,7 @@ function QueueComposer({
   const localContextMaximumLabel = Number.isFinite(localContextLimit)
     ? formatContextSize(localContextLimit)
     : 'not discovered yet'
-  const localContextInfo = `Sets Codex CLI's model_context_window accounting for this queue request. Configure the Local AI backend with an equal or larger context allocation. This setup requires at least ${formatContextSize(minimumLocalCodexContextSize)} and conservatively caps Local requests at ${formatContextSize(maximumLocalCodexContextSize)} for current Codex fallback model metadata. Maximum available now: ${localContextMaximumLabel}${configuredContextWindow ? ` (server ${formatContextSize(configuredContextWindow)})` : ''}${selectedLocalModelMetadata?.maximumContextWindow ? `; model ${formatContextSize(selectedLocalModelMetadata.maximumContextWindow)}` : ''}.`
+  const localContextInfo = `${selectedLocalProfile?.localAiServerType === 'Ollama' ? 'Applied to Ollama as num_ctx and to Codex CLI model_context_window accounting.' : "Sets Codex CLI's model_context_window accounting; configure the backend with an equal or larger allocation."} This setup requires at least ${formatContextSize(minimumLocalCodexContextSize)} and conservatively caps Local requests at ${formatContextSize(maximumLocalCodexContextSize)} for current Codex fallback model metadata. Maximum available now: ${localContextMaximumLabel}${configuredContextWindow ? ` (server ${formatContextSize(configuredContextWindow)})` : ''}${selectedLocalModelMetadata?.maximumContextWindow ? `; model ${formatContextSize(selectedLocalModelMetadata.maximumContextWindow)}` : ''}.`
   const localContextWarning = selectedLocalContextSize < minimumLocalCodexContextSize
     ? `Select 32K or higher for Local Codex context accounting.`
     : selectedLocalContextSize > localContextLimit

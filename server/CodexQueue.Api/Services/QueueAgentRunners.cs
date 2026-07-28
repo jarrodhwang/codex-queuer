@@ -155,10 +155,16 @@ public sealed class LocalCodexQueueAgentRunner(
                 "The saved Local context size exceeds the selected model's advertised limit.");
         }
 
+        var runtimeModel = await providerService.PrepareModelForContextAsync(
+            profile,
+            selectedModel.Model,
+            contextWindow,
+            cancellationToken);
         var sessionRouteKey = BuildSessionRouteKey(
             profile.Id,
             profile.LocalAiServerType,
-            validation.NormalizedBaseUrl);
+            validation.NormalizedBaseUrl,
+            runtimeModel);
         var queueTab = context.Request.QueueTab;
         var resumableSessionId =
             string.Equals(
@@ -172,7 +178,7 @@ public sealed class LocalCodexQueueAgentRunner(
             context.ProjectPath,
             profile.LocalAiServerType,
             validation.NormalizedBaseUrl,
-            selectedModel.Model,
+            runtimeModel,
             contextWindow,
             context.Run.ModelEffort,
             resumableSessionId,
@@ -191,13 +197,16 @@ public sealed class LocalCodexQueueAgentRunner(
     internal static string BuildSessionRouteKey(
         Guid profileId,
         LocalAiServerType serverType,
-        string normalizedBaseUrl)
+        string normalizedBaseUrl,
+        string runtimeModel)
     {
         var route = profileId.ToString("N")
             + "\n"
             + serverType
             + "\n"
-            + normalizedBaseUrl;
+            + normalizedBaseUrl
+            + "\n"
+            + runtimeModel;
         return Convert.ToHexString(
                 SHA256.HashData(Encoding.UTF8.GetBytes(route)))
             .ToLowerInvariant();

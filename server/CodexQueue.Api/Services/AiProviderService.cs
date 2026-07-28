@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using CodexQueue.Api.Domain;
@@ -47,6 +49,12 @@ public interface IAiProviderService
         AiProviderProfile profile,
         CancellationToken cancellationToken = default,
         bool forceRefresh = false);
+
+    Task<string> PrepareModelForContextAsync(
+        AiProviderProfile profile,
+        string model,
+        int contextWindow,
+        CancellationToken cancellationToken = default);
 }
 
 // Secret resolution is deliberately assembly-internal. API contracts should expose only
@@ -68,6 +76,7 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
     private const int MaximumModelCatalogBytes = 2 * 1024 * 1024;
     private const int MaximumDiscoveredModels = 1_000;
     private const int MaximumModelIdentifierLength = 256;
+    private const string ManagedOllamaModelPrefix = "codex-queue-context-";
 
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan CacheDuration = TimeSpan.FromSeconds(20);
@@ -79,6 +88,88 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
         new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _discoveryLocks =
         new(StringComparer.Ordinal);
+
+    public async Task<string> PrepareModelForContextAsync(
+        AiProviderProfile profile,
+        string model,
+        int contextWindow,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        if (profile.Source != AiProviderSource.Local
+            || profile.LocalAiServerType != LocalAiServerType.Ollama)
+        {
+            return model;
+        }
+
+        if (contextWindow <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(contextWindow),
+                "Ollama context window must be greater than zero.");
+        }
+
+        var validation = Validate(profile);
+        if (!validation.IsValid || validation.NormalizedBaseUrl is null)
+        {
+            throw new InvalidOperationException(
+                "Cannot configure Ollama context because the Local AI Server profile is invalid.");
+        }
+
+        var sourceModel = QualifyModel(AiProviderSource.Local, model);
+        var hashInput = validation.NormalizedBaseUrl + "\n" + sourceModel;
+        var modelHash = Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(hashInput)))
+            .ToLowerInvariant()[..16];
+        var runtimeModel =
+            $"{ManagedOllamaModelPrefix}{modelHash}:ctx-{contextWindow.ToString(CultureInfo.InvariantCulture)}";
+        var ollamaRoot = validation.NormalizedBaseUrl[..^"/v1".Length].TrimEnd('/');
+        var createUri = new Uri(ollamaRoot + "/api/create", UriKind.Absolute);
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromMinutes(2));
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, createUri)
+            {
+                Content = JsonContent.Create(new
+                {
+                    model = runtimeModel,
+                    from = sourceModel,
+                    parameters = new Dictionary<string, object>
+                    {
+                        ["num_ctx"] = contextWindow,
+                    },
+                    stream = false,
+                }),
+            };
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+            var client = httpClientFactory.CreateClient(nameof(AiProviderService));
+            using var response = await client.SendAsync(request, timeout.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                var detail = await response.Content.ReadAsStringAsync(timeout.Token);
+                throw new InvalidOperationException(
+                    $"Ollama could not apply the selected {contextWindow:N0}-token context window "
+                    + $"(HTTP {(int)response.StatusCode}). "
+                    + TruncateError(detail));
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new InvalidOperationException(
+                "Ollama timed out while applying the selected context window.");
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new InvalidOperationException(
+                "Ollama could not apply the selected context window: " + ex.Message,
+                ex);
+        }
+
+        return runtimeModel;
+    }
 
     public AiProviderValidationResult Validate(AiProviderProfile profile)
     {
@@ -494,6 +585,9 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
             var models = parser(document.RootElement)
                 .Where(x => !string.IsNullOrWhiteSpace(x.Name))
                 .Select(x => x with { Name = x.Name.Trim() })
+                .Where(x => !x.Name.StartsWith(
+                    ManagedOllamaModelPrefix,
+                    StringComparison.Ordinal))
                 .Where(x => IsSafeModelIdentifier(x.Name))
                 .GroupBy(x => x.Name, StringComparer.Ordinal)
                 .Select(x => new DiscoveredModel(
@@ -525,6 +619,17 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
                     ? ex.Message
                     : "Provider model discovery failed: " + ex.Message);
         }
+    }
+
+    private static string TruncateError(string value)
+    {
+        var normalized = value.Trim();
+        return normalized.Length switch
+        {
+            0 => "Check that the model exists and the Ollama server allows model creation.",
+            > 500 => normalized[..500],
+            _ => normalized,
+        };
     }
 
     private bool TryGetCached(string cacheKey, out AiProviderDiscoveryResult result)
