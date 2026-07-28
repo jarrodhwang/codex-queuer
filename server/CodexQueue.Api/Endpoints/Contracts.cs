@@ -99,7 +99,8 @@ public sealed record CreateQueueRequest(
     string? CommitModelSpeed,
     ExecutionRunner ExecutionRunner = ExecutionRunner.CodexCli,
     Guid? ProviderProfileId = null,
-    bool OpenHandsAlwaysApproveConfirmed = false);
+    bool OpenHandsAlwaysApproveConfirmed = false,
+    bool InternetSearchEnabled = false);
 
 public sealed record UpdateQueueRequest(
     string Prompt,
@@ -115,7 +116,8 @@ public sealed record UpdateQueueRequest(
     string? CommitModelSpeed,
     ExecutionRunner? ExecutionRunner = null,
     Guid? ProviderProfileId = null,
-    bool OpenHandsAlwaysApproveConfirmed = false);
+    bool OpenHandsAlwaysApproveConfirmed = false,
+    bool InternetSearchEnabled = false);
 
 public sealed record ReorderQueueRequest(Guid ProjectId, IReadOnlyList<Guid> RequestIds);
 
@@ -193,7 +195,8 @@ public sealed record CodexRequestDto(
     string? ProviderProfileName,
     AiProviderSource? ProviderSource,
     string? QueueWaitReason,
-    bool OpenHandsAlwaysApproveConfirmed);
+    bool OpenHandsAlwaysApproveConfirmed,
+    bool InternetSearchEnabled);
 
 public sealed record SessionDto(
     Guid RunId,

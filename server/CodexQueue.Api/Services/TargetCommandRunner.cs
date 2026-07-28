@@ -41,6 +41,7 @@ public interface ITargetCommandRunner
         IReadOnlyList<string>? imagePaths,
         string prompt,
         PermissionMode permissionMode,
+        bool internetSearchEnabled,
         Func<string, Task> onOutput,
         CancellationToken cancellationToken);
 
@@ -55,6 +56,7 @@ public interface ITargetCommandRunner
         string? codexSessionId,
         string prompt,
         PermissionMode permissionMode,
+        bool internetSearchEnabled,
         Func<string, Task> onOutput,
         CancellationToken cancellationToken);
 
@@ -218,6 +220,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         IReadOnlyList<string>? imagePaths,
         string prompt,
         PermissionMode permissionMode,
+        bool internetSearchEnabled,
         Func<string, Task> onOutput,
         CancellationToken cancellationToken)
         => RunCodexCoreAsync(
@@ -230,6 +233,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             imagePaths,
             prompt,
             permissionMode,
+            internetSearchEnabled,
             onOutput,
             localProvider: null,
             cancellationToken);
@@ -245,6 +249,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         string? codexSessionId,
         string prompt,
         PermissionMode permissionMode,
+        bool internetSearchEnabled,
         Func<string, Task> onOutput,
         CancellationToken cancellationToken)
     {
@@ -306,6 +311,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             imagePaths: null,
             prompt,
             permissionMode,
+            internetSearchEnabled,
             onOutput,
             new LocalCodexProviderOptions(serverType, targetBaseUrl, contextWindow),
             cancellationToken);
@@ -321,6 +327,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         IReadOnlyList<string>? imagePaths,
         string prompt,
         PermissionMode permissionMode,
+        bool internetSearchEnabled,
         Func<string, Task> onOutput,
         LocalCodexProviderOptions? localProvider,
         CancellationToken cancellationToken)
@@ -335,6 +342,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 codexSessionId,
                 imagePaths,
                 permissionMode,
+                internetSearchEnabled,
                 disableWindowsSandbox: false,
                 localProvider);
             if (machine.TargetsWindows())
@@ -383,6 +391,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                     codexSessionId,
                     imagePaths,
                     permissionMode,
+                    internetSearchEnabled,
                     disableWindowsSandbox: true,
                     localProvider).Select(QuotePowerShellValue));
 
@@ -419,6 +428,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 codexSessionId,
                 imagePaths,
                 permissionMode,
+                internetSearchEnabled,
                 disableWindowsSandbox: false,
                 localProvider).Select(Quote))
         ]);
@@ -1353,6 +1363,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         string? codexSessionId,
         IReadOnlyList<string>? imagePaths,
         PermissionMode permissionMode,
+        bool internetSearchEnabled,
         bool disableWindowsSandbox,
         LocalCodexProviderOptions? localProvider = null)
     {
@@ -1374,6 +1385,10 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         arguments.Add("-m");
         arguments.Add(model);
         arguments.Add("--skip-git-repo-check");
+        if (internetSearchEnabled)
+        {
+            arguments.Add("--search");
+        }
 
         // Approval policy used to be exposed by `codex exec -a`, but newer CLI releases
         // removed that option. The config override is supported by both new sessions and

@@ -40,6 +40,7 @@ public static class DbInitializer
         await EnsureColumnAsync(db, "Requests", "CommitModelSpeed", "ALTER TABLE \"Requests\" ADD COLUMN \"CommitModelSpeed\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "SeparateCommitSession", "ALTER TABLE \"Requests\" ADD COLUMN \"SeparateCommitSession\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "PermissionMode", "ALTER TABLE \"Requests\" ADD COLUMN \"PermissionMode\" TEXT NOT NULL DEFAULT 'ApproveForMe'", cancellationToken);
+        await EnsureColumnAsync(db, "Requests", "InternetSearchEnabled", "ALTER TABLE \"Requests\" ADD COLUMN \"InternetSearchEnabled\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "AttachmentsJson", "ALTER TABLE \"Requests\" ADD COLUMN \"AttachmentsJson\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "RetryAfter", "ALTER TABLE \"Requests\" ADD COLUMN \"RetryAfter\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "RetryReason", "ALTER TABLE \"Requests\" ADD COLUMN \"RetryReason\" TEXT NULL", cancellationToken);

@@ -95,7 +95,8 @@ public static class Mapping
             request.ProviderProfile?.Name,
             request.ProviderProfile?.Source,
             request.QueueWaitReason,
-            request.OpenHandsAlwaysApproveConfirmed);
+            request.OpenHandsAlwaysApproveConfirmed,
+            request.InternetSearchEnabled);
 
     public static CodexRunDto ToDto(this CodexRun run, bool includeOutput = true) =>
         new(

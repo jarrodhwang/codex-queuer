@@ -431,6 +431,7 @@ public sealed class LocalCodexQueueAgentRunnerTests
             string? codexSessionId,
             string prompt,
             PermissionMode permissionMode,
+            bool internetSearchEnabled,
             Func<string, Task> onOutput,
             CancellationToken cancellationToken)
         {
@@ -469,6 +470,7 @@ public sealed class LocalCodexQueueAgentRunnerTests
             IReadOnlyList<string>? imagePaths,
             string prompt,
             PermissionMode permissionMode,
+            bool internetSearchEnabled,
             Func<string, Task> onOutput,
             CancellationToken cancellationToken)
         {

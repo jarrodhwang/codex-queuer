@@ -110,6 +110,7 @@ export type CreateQueueRequest = {
   generateCommit: boolean
   separateCommitSession: boolean
   permissionMode: PermissionMode
+  internetSearchEnabled?: boolean
   executionRunner?: ExecutionRunner
   providerProfileId?: string | null
   openHandsAlwaysApproveConfirmed?: boolean
@@ -174,6 +175,7 @@ export type CodexRequest = {
   generateCommit: boolean
   separateCommitSession: boolean
   permissionMode: PermissionMode
+  internetSearchEnabled?: boolean
   executionRunner?: ExecutionRunner
   providerProfileId?: string | null
   providerProfileName?: string | null

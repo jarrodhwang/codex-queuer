@@ -18,6 +18,7 @@ import {
   Gauge as GaugeIcon,
   GitBranch,
   GitCommit,
+  Globe2,
   GripVertical,
   History,
   Image as ImageIcon,
@@ -3380,6 +3381,7 @@ function QueueComposer({
   const [generateCommit, setGenerateCommit] = useState(defaults.generateCommit)
   const [separateCommitSession, setSeparateCommitSession] = useState(defaults.separateCommitSession)
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(defaults.permissionMode)
+  const [internetSearchEnabled, setInternetSearchEnabled] = useState(false)
   const [runnerChoice, setRunnerChoice] = useState<RunnerChoice>(() => runnerChoiceForExecutionRunner(defaults.executionRunner))
   const [localProfileId, setLocalProfileId] = useState(defaults.localModel.providerProfileId)
   const [localModel, setLocalModel] = useState(defaults.localModel.model)
@@ -3567,6 +3569,7 @@ function QueueComposer({
       setGenerateCommit(editingRequest.generateCommit)
       setSeparateCommitSession(editingRequest.separateCommitSession)
       setPermissionMode(editingRequest.permissionMode)
+      setInternetSearchEnabled(editingRequest.internetSearchEnabled ?? false)
       setPrompt(editingRequest.prompt)
       setAttachments([])
       setAttachmentError('')
@@ -3601,6 +3604,7 @@ function QueueComposer({
     setGenerateCommit(defaults.generateCommit)
     setSeparateCommitSession(defaults.separateCommitSession)
     setPermissionMode(defaults.permissionMode)
+    setInternetSearchEnabled(false)
     setComposerValidationError('')
   }, [defaults, editingRequest, selectedProject.id])
 
@@ -3610,6 +3614,7 @@ function QueueComposer({
     attachments,
     commitModel,
     generateCommit,
+    internetSearchEnabled,
     localContextSize,
     localModel,
     localReasoningEffort,
@@ -4043,6 +4048,7 @@ function QueueComposer({
     setGenerateCommit(defaults.generateCommit)
     setSeparateCommitSession(defaults.separateCommitSession)
     setPermissionMode(defaults.permissionMode)
+    setInternetSearchEnabled(false)
     setComposerValidationError('')
   }
 
@@ -4074,6 +4080,7 @@ function QueueComposer({
         generateCommit: (isCodexRunner || isLocalRunner) && generateCommit,
         separateCommitSession: (isCodexRunner || isLocalRunner) && generateCommit && separateCommitSession,
         permissionMode,
+        internetSearchEnabled,
         executionRunner: isLocalRunner ? 'OpenHandsCli' : 'CodexCli',
         providerProfileId: isLocalRunner ? selectedLocalProfile?.id ?? null : null,
         openHandsAlwaysApproveConfirmed: false,
@@ -4121,6 +4128,7 @@ function QueueComposer({
           generateCommit: (isCodexRunner || isLocalRunner) && generateCommit,
           separateCommitSession: (isCodexRunner || isLocalRunner) && generateCommit && separateCommitSession,
           permissionMode,
+          internetSearchEnabled,
           executionRunner: isLocalRunner ? 'OpenHandsCli' : 'CodexCli',
           providerProfileId: isLocalRunner ? selectedLocalProfile?.id ?? null : null,
           providerProfileName: isLocalRunner ? selectedLocalProfile?.name ?? null : null,
@@ -4654,6 +4662,20 @@ function QueueComposer({
                     { value: 'FullAccess', label: 'Full access', icon: <ShieldAlert size={14} /> },
                   ]}
                 />
+                <label
+                  className={`commit-toggle ${internetSearchEnabled ? 'active' : ''}`}
+                  title="Pass --search to Codex CLI for this request."
+                >
+                  <input
+                    type="checkbox"
+                    checked={internetSearchEnabled}
+                    onChange={(event) => setInternetSearchEnabled(event.target.checked)}
+                  />
+                  <span className="commit-toggle-icon">
+                    {internetSearchEnabled ? <Check size={12} /> : <Globe2 size={12} />}
+                  </span>
+                  <span>Internet search</span>
+                </label>
               </div>
             ) : null}
           </div>

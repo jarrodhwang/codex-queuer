@@ -116,6 +116,7 @@ public sealed class CodexRequest
     public bool GenerateCommit { get; set; }
     public bool SeparateCommitSession { get; set; }
     public PermissionMode PermissionMode { get; set; } = PermissionMode.ApproveForMe;
+    public bool InternetSearchEnabled { get; set; }
     public string? CommitModel { get; set; }
     public string? CommitModelEffort { get; set; }
     public string? CommitModelSpeed { get; set; }

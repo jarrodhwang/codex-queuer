@@ -72,6 +72,7 @@ public sealed class CodexQueueAgentRunner(ITargetCommandRunner targetRunner)
             context.ImagePaths,
             context.Prompt,
             context.Request.PermissionMode,
+            context.Request.InternetSearchEnabled,
             onOutput,
             cancellationToken);
         return new QueueAgentRunResult(
@@ -185,6 +186,7 @@ public sealed class LocalCodexQueueAgentRunner(
             resumableSessionId,
             context.Prompt,
             context.Request.PermissionMode,
+            context.Request.InternetSearchEnabled,
             onOutput,
             cancellationToken);
         return new QueueAgentRunResult(

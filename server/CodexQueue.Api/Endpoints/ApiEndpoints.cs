@@ -1091,6 +1091,7 @@ public static class ApiEndpoints
                     null,
                     prompt,
                     PermissionMode.FullAccess,
+                    internetSearchEnabled: false,
                     _ => Task.CompletedTask,
                     cancellationToken);
 
@@ -1191,6 +1192,7 @@ public static class ApiEndpoints
                     null,
                     prompt,
                     PermissionMode.ReadOnly,
+                    internetSearchEnabled: false,
                     _ => Task.CompletedTask,
                     cancellationToken);
 
@@ -1428,6 +1430,7 @@ public static class ApiEndpoints
                     && input.GenerateCommit
                     && input.SeparateCommitSession,
                 PermissionMode = input.PermissionMode,
+                InternetSearchEnabled = input.InternetSearchEnabled,
                 CommitModel = input.ExecutionRunner == ExecutionRunner.CodexCli && !string.IsNullOrWhiteSpace(input.CommitModel)
                     ? input.CommitModel.Trim()
                     : null,
@@ -1580,6 +1583,7 @@ public static class ApiEndpoints
                 && input.GenerateCommit
                 && input.SeparateCommitSession;
             request.PermissionMode = input.PermissionMode;
+            request.InternetSearchEnabled = input.InternetSearchEnabled;
             request.CommitModel = executionRunner == ExecutionRunner.CodexCli && !string.IsNullOrWhiteSpace(input.CommitModel)
                 ? input.CommitModel.Trim()
                 : null;

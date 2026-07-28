@@ -19,6 +19,7 @@ public sealed class TargetCommandRunnerTests
             resume ? "cloud-session-id" : null,
             ["/workspace/image.png"],
             PermissionMode.ApproveForMe,
+            internetSearchEnabled: false,
             disableWindowsSandbox: false);
 
         Assert.DoesNotContain(arguments, argument =>
@@ -29,12 +30,38 @@ public sealed class TargetCommandRunnerTests
             || argument.Contains("wire_api", StringComparison.Ordinal));
         Assert.DoesNotContain("--oss", arguments);
         Assert.DoesNotContain("--local-provider", arguments);
+        Assert.DoesNotContain("--search", arguments);
         AssertOptionValue(arguments, "-m", "gpt-5.6");
         AssertConfig(arguments, "model_reasoning_effort=\"high\"");
         AssertConfig(arguments, "service_tier=\"priority\"");
         Assert.Equal("exec", arguments[0]);
         Assert.Equal(resume ? "resume" : "--json", arguments[1]);
         Assert.Equal("-", arguments[^1]);
+    }
+
+    [Theory]
+    [InlineData(LocalAiServerType.Ollama)]
+    [InlineData(LocalAiServerType.LmStudio)]
+    [InlineData(LocalAiServerType.LlamaCpp)]
+    public void BuildCodexArguments_SearchEnabledAddsSearchForEveryLocalBackend(
+        LocalAiServerType serverType)
+    {
+        var arguments = TargetCommandRunner.BuildCodexArguments(
+            "/workspace/project",
+            "local-model",
+            modelEffort: null,
+            modelSpeed: null,
+            codexSessionId: null,
+            imagePaths: null,
+            PermissionMode.ApproveForMe,
+            internetSearchEnabled: true,
+            disableWindowsSandbox: false,
+            localProvider: new LocalCodexProviderOptions(
+                serverType,
+                "http://127.0.0.1:11434/v1",
+                65_536));
+
+        Assert.Equal(1, arguments.Count(argument => argument == "--search"));
     }
 
     [Theory]
@@ -62,8 +89,9 @@ public sealed class TargetCommandRunnerTests
             resume ? sessionId : null,
             imagePaths: null,
             PermissionMode.FullAccess,
+            internetSearchEnabled: false,
             disableWindowsSandbox: false,
-            new LocalCodexProviderOptions(serverType, baseUrl, 131_072));
+            localProvider: new LocalCodexProviderOptions(serverType, baseUrl, 131_072));
 
         Assert.Equal("exec", arguments[0]);
         Assert.Equal(resume ? "resume" : "--json", arguments[1]);
@@ -124,8 +152,9 @@ public sealed class TargetCommandRunnerTests
             codexSessionId: null,
             imagePaths: null,
             permissionMode,
+            internetSearchEnabled: false,
             disableWindowsSandbox: false,
-            new LocalCodexProviderOptions(
+            localProvider: new LocalCodexProviderOptions(
                 LocalAiServerType.Ollama,
                 "http://127.0.0.1:11434/v1",
                 65_536));
