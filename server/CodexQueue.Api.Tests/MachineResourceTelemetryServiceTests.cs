@@ -70,6 +70,32 @@ public sealed class MachineResourceTelemetryServiceTests
     }
 
     [Fact]
+    public void Parse_ReturnsMacCpuMemoryAndAppleGpuUtilization()
+    {
+        var result = new ResourceTelemetryCommandResult(
+            0,
+            """
+            CQ_CPU_INFO|Apple M4 Max
+            CQ_CPU|31.7
+            CQ_MEM_INFO|64 GB unified memory
+            CQ_MEM|27487790694|68719476736|40.0
+            CQ_DRM_GPU|0|Apple M4 Max|54|||||
+            """,
+            "");
+
+        var telemetry = MachineResourceTelemetryService.Parse(result);
+
+        Assert.True(telemetry.Available);
+        Assert.Equal("Apple M4 Max", telemetry.CpuName);
+        Assert.Equal(31.7, telemetry.CpuUsagePercent);
+        Assert.Equal("64 GB unified memory", telemetry.MemoryName);
+        Assert.Equal(40.0, telemetry.MemoryUsagePercent);
+        var gpu = Assert.Single(telemetry.Gpus);
+        Assert.Equal("Apple M4 Max", gpu.Name);
+        Assert.Equal(54.0, gpu.UtilizationPercent);
+    }
+
+    [Fact]
     public void Parse_ReturnsGracefulErrorWhenNoMetricsAreAvailable()
     {
         var result = new ResourceTelemetryCommandResult(
@@ -222,6 +248,42 @@ public sealed class MachineResourceTelemetryServiceTests
         Assert.Contains("2222", arguments);
         Assert.Contains("agent_user@zbook.example.test", arguments);
         Assert.StartsWith("LC_ALL=C /bin/sh -c ", arguments[^1]);
+    }
+
+    [Fact]
+    public void BuildSshStartInfo_AutoPlatformDispatchesToMacCollector()
+    {
+        var machine = new TargetMachine
+        {
+            Kind = MachineKind.Ssh,
+            Platform = MachinePlatform.Auto,
+            Host = "mac.example.test",
+            Port = 22,
+        };
+
+        var command = ResourceTelemetryCommandExecutor
+            .BuildSshStartInfo(machine)
+            .ArgumentList[^1];
+
+        Assert.Contains("Darwin", command);
+        Assert.Contains("vm_stat", command);
+        Assert.Contains("memory_pressure", command);
+        Assert.Contains("AGXAccelerator", command);
+    }
+
+    [Fact]
+    public void BuildLocalStartInfo_MacOsUsesMacCollector()
+    {
+        var startInfo = ResourceTelemetryCommandExecutor.BuildLocalStartInfo(
+            new TargetMachine
+            {
+                Kind = MachineKind.Local,
+                Platform = MachinePlatform.MacOs,
+            });
+
+        Assert.Equal("/bin/sh", startInfo.FileName);
+        Assert.Contains("vm_stat", startInfo.ArgumentList[^1]);
+        Assert.Contains("system_profiler SPDisplaysDataType", startInfo.ArgumentList[^1]);
     }
 
     [Theory]

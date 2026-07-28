@@ -11,7 +11,8 @@ public sealed record QueueAgentRunContext(
     string ProjectPath,
     string Prompt,
     IReadOnlyList<string>? ImagePaths,
-    bool StartNewSession = false);
+    bool StartNewSession = false,
+    AiProviderProfile? ProviderProfile = null);
 
 public sealed record QueueAgentRunResult(
     int ExitCode,
@@ -95,7 +96,7 @@ public sealed class LocalCodexQueueAgentRunner(
         Func<string, Task> onOutput,
         CancellationToken cancellationToken)
     {
-        var profile = context.Request.ProviderProfile
+        var profile = context.ProviderProfile ?? context.Request.ProviderProfile
             ?? throw new InvalidOperationException("Local Codex request provider profile is unavailable.");
         if (profile.Source != AiProviderSource.Local)
         {

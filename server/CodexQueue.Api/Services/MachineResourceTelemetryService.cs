@@ -575,19 +575,41 @@ internal sealed class ResourceTelemetryCommandExecutor(
         """;
 
     private const string MacCollectorScript = """
-        cpu_name="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
+        cpu_name="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || sysctl -n hw.model 2>/dev/null || true)"
         [ -n "$cpu_name" ] && printf 'CQ_CPU_INFO|%s\n' "$(printf '%s' "$cpu_name" | tr '|\r\n' '   ')"
-        cpu_count="$(sysctl -n hw.ncpu 2>/dev/null || printf 1)"
-        cpu_usage="$(ps -A -o %cpu 2>/dev/null | awk -v count="$cpu_count" 'NR > 1 { total += $1 } END { if (count > 0) { value=total/count; if (value > 100) value=100; printf "%.1f", value } }')"
+        cpu_usage="$(top -l 2 -n 0 -s 0.2 2>/dev/null | awk '/CPU usage/ { idle=$7; gsub("%", "", idle) } END { if (idle != "") printf "%.1f", 100-idle }')"
+        if [ -z "$cpu_usage" ]; then
+          cpu_count="$(sysctl -n hw.ncpu 2>/dev/null || printf 1)"
+          cpu_usage="$(ps -A -o %cpu 2>/dev/null | awk -v count="$cpu_count" 'NR > 1 { total += $1 } END { if (count > 0) { value=total/count; if (value > 100) value=100; printf "%.1f", value } }')"
+        fi
         [ -n "$cpu_usage" ] && printf 'CQ_CPU|%s\n' "$cpu_usage"
         mem_total="$(sysctl -n hw.memsize 2>/dev/null || true)"
         page_size="$(pagesize 2>/dev/null || printf 4096)"
-        free_pages="$(vm_stat 2>/dev/null | awk '/Pages free/ { gsub("\\.", "", $3); print $3; exit }')"
-        if [ -n "$mem_total" ] && [ -n "$free_pages" ]; then
-          mem_used=$((mem_total - free_pages * page_size))
+        available_pages="$(vm_stat 2>/dev/null | awk '
+          /Pages free/ || /Pages inactive/ || /Pages speculative/ || /Pages purgeable/ {
+            gsub("\\.", "", $3); available += $3
+          }
+          END { printf "%.0f", available }')"
+        memory_free_percent="$(memory_pressure -Q 2>/dev/null | awk -F: '/System-wide memory free percentage/ { gsub(/[%[:space:]]/, "", $2); print $2; exit }')"
+        if [ -n "$mem_total" ] && [ -n "$available_pages" ]; then
+          if [ -n "$memory_free_percent" ]; then
+            mem_used="$(awk -v total="$mem_total" -v free="$memory_free_percent" 'BEGIN { printf "%.0f", total*(100-free)/100 }')"
+          else
+            mem_used=$((mem_total - available_pages * page_size))
+            [ "$mem_used" -lt 0 ] && mem_used=0
+          fi
           mem_percent="$(awk -v used="$mem_used" -v total="$mem_total" 'BEGIN { if (total > 0) printf "%.1f", used*100/total }')"
           printf 'CQ_MEM|%s|%s|%s\n' "$mem_used" "$mem_total" "$mem_percent"
-          printf 'CQ_MEM_INFO|%s GB installed\n' "$((mem_total / 1000000000))"
+          memory_gb="$(awk -v total="$mem_total" 'BEGIN { printf "%.0f", total/1073741824 }')"
+          printf 'CQ_MEM_INFO|%s GB unified memory\n' "$memory_gb"
+        fi
+        gpu_name="$(system_profiler SPDisplaysDataType 2>/dev/null | awk -F: '/Chipset Model:/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }')"
+        gpu_util="$(ioreg -r -c IOAccelerator -l 2>/dev/null | sed -n 's/.*"Device Utilization %"=\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+        if [ -z "$gpu_util" ]; then
+          gpu_util="$(ioreg -r -c AGXAccelerator -l 2>/dev/null | sed -n 's/.*"Device Utilization %"=\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+        fi
+        if [ -n "$gpu_name" ] && [ -n "$gpu_util" ]; then
+          printf 'CQ_DRM_GPU|0|%s|%s|||||\n' "$(printf '%s' "$gpu_name" | tr '|\r\n' '   ')" "$gpu_util"
         fi
         if command -v nvidia-smi >/dev/null 2>&1; then
           nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null | while IFS=',' read -r index name util used total temp power; do
@@ -595,6 +617,20 @@ internal sealed class ResourceTelemetryCommandExecutor(
           done
         fi
         """;
+
+    private static readonly string AutoPosixCollectorScript = """
+        kernel="$(uname -s 2>/dev/null || true)"
+        if [ "$kernel" = "Darwin" ]; then
+        """
+        + Environment.NewLine
+        + MacCollectorScript
+        + Environment.NewLine
+        + """
+          exit 0
+        fi
+        """
+        + Environment.NewLine
+        + CollectorScript;
 
     // This fixed, read-only Linux collector intentionally uses only /proc, /sys and
     // vendor utilities already present on the target. It never invokes sudo or accepts
@@ -822,11 +858,11 @@ internal sealed class ResourceTelemetryCommandExecutor(
         startInfo.ArgumentList.Add(destination);
         startInfo.ArgumentList.Add(machine.TargetsWindows()
             ? "powershell -NoProfile -NonInteractive -EncodedCommand " + EncodePowerShell(WindowsCollectorScript)
-            : "LC_ALL=C /bin/sh -c " + QuotePosix(machine.Platform == MachinePlatform.MacOs ? MacCollectorScript : CollectorScript));
+            : "LC_ALL=C /bin/sh -c " + QuotePosix(PosixCollectorScriptFor(machine.Platform)));
         return startInfo;
     }
 
-    private static ProcessStartInfo BuildLocalStartInfo(TargetMachine machine)
+    internal static ProcessStartInfo BuildLocalStartInfo(TargetMachine machine)
     {
         if (machine.TargetsWindows())
         {
@@ -836,10 +872,21 @@ internal sealed class ResourceTelemetryCommandExecutor(
         }
 
         var startInfo = CreateStartInfo("/bin/sh");
-        AddArguments(startInfo, "-c", machine.Platform == MachinePlatform.MacOs ? MacCollectorScript : CollectorScript);
+        var platform = machine.Platform == MachinePlatform.Auto
+            ? OperatingSystem.IsMacOS() ? MachinePlatform.MacOs : MachinePlatform.Linux
+            : machine.Platform;
+        AddArguments(startInfo, "-c", PosixCollectorScriptFor(platform));
         startInfo.Environment["LC_ALL"] = "C";
         return startInfo;
     }
+
+    private static string PosixCollectorScriptFor(MachinePlatform platform) =>
+        platform switch
+        {
+            MachinePlatform.MacOs => MacCollectorScript,
+            MachinePlatform.Linux => CollectorScript,
+            _ => AutoPosixCollectorScript
+        };
 
     private static ProcessStartInfo CreateStartInfo(string fileName) =>
         new()

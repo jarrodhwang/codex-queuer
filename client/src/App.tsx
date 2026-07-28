@@ -64,7 +64,6 @@ import type {
   MachineRateLimits,
   MachineResources,
   MachinePlatform,
-  MachinePowerMode,
   LocalAiServerType,
   ModelDiscoveryMode,
   RateLimit,
@@ -113,6 +112,9 @@ type ProjectModelDefaults = {
   generateCommit: boolean
   separateCommitSession: boolean
   permissionMode: PermissionMode
+  internetSearchEnabled: boolean
+  commitExecutionRunner: ExecutionRunner
+  commitLocalProviderProfileId: string
 }
 
 type RunnerChoice = 'Codex' | 'Claude' | 'Local'
@@ -146,6 +148,58 @@ function localModelBrandIcon(model: string): AiBrandIcon {
 
 function AiBrandImage({ brand, className }: { brand: AiBrandIcon; className?: string }) {
   return <img className={`ai-brand-icon ${className ?? ''}`} src={aiBrandIconSources[brand]} alt="" aria-hidden="true" draggable={false} />
+}
+
+function CardRunnerPicker({
+  value,
+  label,
+  onChange,
+}: {
+  value: RunnerChoice
+  label: string
+  onChange: (value: RunnerChoice) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const options = [
+    { value: 'Codex' as const, label: 'Codex / ChatGPT', brand: 'chatgpt' as const },
+    { value: 'Local' as const, label: 'Local / Codex', brand: 'ollama' as const },
+  ]
+  const selected = options.find((option) => option.value === value) ?? options[0]
+
+  return (
+    <div className={`card-runner-picker ${open ? 'open' : ''}`}>
+      {open && (
+        <div className="card-runner-picker__menu" role="menu" aria-label={`${label} runner options`}>
+          {options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={option.value === value ? 'active' : ''}
+              role="menuitemradio"
+              aria-checked={option.value === value}
+              onClick={() => {
+                onChange(option.value)
+                setOpen(false)
+              }}
+            >
+              <AiBrandImage brand={option.brand} />
+              <span>{option.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      <button
+        type="button"
+        className="card-runner-picker__trigger"
+        aria-label={`${label} runner: ${selected.label}`}
+        aria-expanded={open}
+        title={`${label} runner: ${selected.label}`}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <AiBrandImage brand={selected.brand} />
+      </button>
+    </div>
+  )
 }
 
 type AttachmentInsight = {
@@ -319,6 +373,9 @@ function projectSavePayload(project: Project, overrides: Partial<SaveProjectRequ
     defaultGenerateCommit: project.defaultGenerateCommit ?? true,
     defaultSeparateCommitSession: project.defaultSeparateCommitSession ?? false,
     defaultPermissionMode: project.defaultPermissionMode ?? 'ApproveForMe',
+    defaultInternetSearchEnabled: project.defaultInternetSearchEnabled ?? false,
+    defaultCommitExecutionRunner: project.defaultCommitExecutionRunner ?? project.defaultExecutionRunner ?? 'CodexCli',
+    defaultCommitLocalProviderProfileId: project.defaultCommitLocalProviderProfileId ?? project.defaultLocalProviderProfileId,
     defaultExecutionRunner: project.defaultExecutionRunner ?? 'CodexCli',
     defaultLocalProviderProfileId: project.defaultLocalProviderProfileId,
     defaultLocalModel: project.defaultLocalModel,
@@ -354,6 +411,9 @@ function projectModelDefaults(project: Project, models: ModelOption[]): ProjectM
     generateCommit: permissionMode !== 'ReadOnly' && (project.defaultGenerateCommit ?? true),
     separateCommitSession: permissionMode !== 'ReadOnly' && (project.defaultSeparateCommitSession ?? false),
     permissionMode,
+    internetSearchEnabled: project.defaultInternetSearchEnabled ?? false,
+    commitExecutionRunner: project.defaultCommitExecutionRunner ?? project.defaultExecutionRunner ?? 'CodexCli',
+    commitLocalProviderProfileId: project.defaultCommitLocalProviderProfileId ?? project.defaultLocalProviderProfileId ?? '',
   }
 }
 
@@ -371,6 +431,10 @@ function formatContextSize(contextSize: number) {
 
 function runnerChoiceForExecutionRunner(runner: ExecutionRunner): RunnerChoice {
   return runner === 'OpenHandsCli' ? 'Local' : 'Codex'
+}
+
+function executionRunnerForChoice(runner: RunnerChoice): ExecutionRunner {
+  return runner === 'Local' ? 'OpenHandsCli' : 'CodexCli'
 }
 
 function requestExecutionRunner(request: Pick<CodexRequest, 'executionRunner'>): ExecutionRunner {
@@ -958,6 +1022,9 @@ function App() {
         defaultGenerateCommit: defaults.generateCommit,
         defaultSeparateCommitSession: defaults.separateCommitSession,
         defaultPermissionMode: defaults.permissionMode,
+        defaultInternetSearchEnabled: defaults.internetSearchEnabled,
+        defaultCommitExecutionRunner: defaults.commitExecutionRunner,
+        defaultCommitLocalProviderProfileId: defaults.commitLocalProviderProfileId || null,
         defaultExecutionRunner: defaults.executionRunner,
         defaultLocalProviderProfileId: defaults.localModel.providerProfileId || null,
         defaultLocalModel: defaults.localModel.model || null,
@@ -971,13 +1038,20 @@ function App() {
     }
   }
 
-  const updateProjectCommitModelDefault = async (project: Project, model: ModelValue) => {
+  const updateProjectCommitModelDefault = async (
+    project: Project,
+    model: ModelValue,
+    executionRunner: ExecutionRunner,
+    providerProfileId: string,
+  ) => {
     setError('')
     try {
       const updated = await api.saveProject(projectSavePayload(project, {
         defaultCommitModel: model.model,
         defaultCommitModelEffort: model.effort,
         defaultCommitModelSpeed: model.speed,
+        defaultCommitExecutionRunner: executionRunner,
+        defaultCommitLocalProviderProfileId: executionRunner === 'OpenHandsCli' ? providerProfileId || null : project.defaultCommitLocalProviderProfileId,
       }), project.id)
       setProjects((current) => current.map((item) => (item.id === updated.id ? updated : item)))
     } catch (cause) {
@@ -1357,6 +1431,7 @@ function App() {
       <RightRail
         open={rightOpen}
         config={config}
+        providerProfiles={providerProfiles}
         view={rightRailView}
         selectedProject={selectedProject}
         onOpenFile={openFile}
@@ -3372,25 +3447,31 @@ function QueueComposer({
     () => providerProfiles.filter((profile) => profile.enabled && profile.source === 'Local'),
     [providerProfiles],
   )
+  const defaultActiveLocalProfileId = defaults.executionRunner === 'OpenHandsCli'
+    ? defaults.localModel.providerProfileId
+    : defaults.commitLocalProviderProfileId || defaults.localModel.providerProfileId
   const preferredLocalProfileId = useMemo(() => {
-    const savedProfile = localProfiles.find((profile) => profile.id === defaults.localModel.providerProfileId)
+    const savedProfile = localProfiles.find((profile) => profile.id === defaultActiveLocalProfileId)
     return savedProfile?.id ?? localProfiles[0]?.id ?? ''
-  }, [defaults.localModel.providerProfileId, localProfiles])
+  }, [defaultActiveLocalProfileId, localProfiles])
   const [requestModel, setRequestModel] = useState<ModelValue>(defaults.requestModel)
   const [commitModel, setCommitModel] = useState<ModelValue>(defaults.commitModel)
   const [generateCommit, setGenerateCommit] = useState(defaults.generateCommit)
   const [separateCommitSession, setSeparateCommitSession] = useState(defaults.separateCommitSession)
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(defaults.permissionMode)
-  const [internetSearchEnabled, setInternetSearchEnabled] = useState(false)
+  const [internetSearchEnabled, setInternetSearchEnabled] = useState(defaults.internetSearchEnabled)
   const [runnerChoice, setRunnerChoice] = useState<RunnerChoice>(() => runnerChoiceForExecutionRunner(defaults.executionRunner))
-  const [localProfileId, setLocalProfileId] = useState(defaults.localModel.providerProfileId)
+  const [commitRunnerChoice, setCommitRunnerChoice] = useState<RunnerChoice>(
+    () => runnerChoiceForExecutionRunner(defaults.commitExecutionRunner),
+  )
+  const [commitCardFlipped, setCommitCardFlipped] = useState(false)
+  const [localProfileId, setLocalProfileId] = useState(defaultActiveLocalProfileId)
   const [localModel, setLocalModel] = useState(defaults.localModel.model)
   const [localReasoningEffort, setLocalReasoningEffort] = useState(defaults.localModel.effort)
   const [localContextSize, setLocalContextSize] = useState(defaults.localModel.speed)
   const [localModelStatus, setLocalModelStatus] = useState<ProviderModelsResponse | null>(null)
   const [loadingLocalModels, setLoadingLocalModels] = useState(false)
   const [switchingLocalServer, setSwitchingLocalServer] = useState(false)
-  const [powerMenuOpen, setPowerMenuOpen] = useState(false)
   const [localModelError, setLocalModelError] = useState('')
   const [localCodexMachineStatus, setLocalCodexMachineStatus] = useState<LocalCodexMachineTest | null>(null)
   const [checkingLocalCodex, setCheckingLocalCodex] = useState(false)
@@ -3455,6 +3536,28 @@ function QueueComposer({
     }
     return options
   }, [loadingLocalModels, localModel, localModelOptions])
+  const commitLocalModelDropdownOptions = useMemo(() => {
+    const options = localModelOptions.map((model) => ({
+      icon: <AiBrandImage brand={localModelBrandIcon(model.name || model.id)} />,
+      label: localModelDisplayName(model.name || model.id),
+      value: model.id,
+    }))
+    if (!commitModel.model && options.length === 0) {
+      return [{
+        icon: <AiBrandImage brand="ollama" />,
+        label: loadingLocalModels ? 'Discovering models…' : 'Select a model',
+        value: '',
+      }]
+    }
+    if (commitModel.model && !options.some((option) => option.value === commitModel.model)) {
+      options.unshift({
+        icon: <AiBrandImage brand={localModelBrandIcon(commitModel.model)} />,
+        label: localModelDisplayName(commitModel.model),
+        value: commitModel.model,
+      })
+    }
+    return options
+  }, [commitModel.model, loadingLocalModels, localModelOptions])
   const localProfileDropdownOptions = useMemo(() => {
     const options = localProfiles.map((profile) => ({
       icon: <Server size={14} />,
@@ -3552,10 +3655,19 @@ function QueueComposer({
 
       const nextRunnerChoice = runnerChoiceForRequest(editingRequest)
       setRunnerChoice(nextRunnerChoice)
+      const nextCommitRunnerChoice = runnerChoiceForExecutionRunner(
+        editingRequest.commitExecutionRunner ?? editingRequest.executionRunner ?? 'CodexCli',
+      )
+      setCommitRunnerChoice(nextCommitRunnerChoice)
       setRequestModel({ model: editingRequest.model, effort: editingRequest.modelEffort || 'medium', speed: editingRequest.modelSpeed || 'normal' })
-      setLocalProfileId(editingRequest.providerProfileId ?? '')
-      setLocalModelStatus(editingRequest.providerProfileId
-        ? localModelDiscoveryCache.get(editingRequest.providerProfileId) ?? null
+      const nextLocalProfileId = nextRunnerChoice === 'Local'
+        ? editingRequest.providerProfileId ?? ''
+        : nextCommitRunnerChoice === 'Local'
+          ? editingRequest.commitProviderProfileId ?? defaults.commitLocalProviderProfileId
+          : defaults.localModel.providerProfileId
+      setLocalProfileId(nextLocalProfileId)
+      setLocalModelStatus(nextLocalProfileId
+        ? localModelDiscoveryCache.get(nextLocalProfileId) ?? null
         : null)
       setLocalModelError('')
       setLocalModel(nextRunnerChoice === 'Local' ? normalizeLocalModelId(editingRequest.model) : '')
@@ -3589,13 +3701,15 @@ function QueueComposer({
     setAttachments([])
     setAttachmentError('')
     setRunnerChoice(runnerChoiceForExecutionRunner(defaults.executionRunner))
+    setCommitRunnerChoice(runnerChoiceForExecutionRunner(defaults.commitExecutionRunner))
+    setCommitCardFlipped(false)
     setRequestModel(defaults.requestModel)
-    setLocalProfileId(defaults.localModel.providerProfileId)
+    setLocalProfileId(defaultActiveLocalProfileId)
     setLocalModel(defaults.localModel.model)
     setLocalReasoningEffort(defaults.localModel.effort)
     setLocalContextSize(defaults.localModel.speed)
-    setLocalModelStatus(defaults.localModel.providerProfileId
-      ? localModelDiscoveryCache.get(defaults.localModel.providerProfileId) ?? null
+    setLocalModelStatus(defaultActiveLocalProfileId
+      ? localModelDiscoveryCache.get(defaultActiveLocalProfileId) ?? null
       : null)
     setLocalModelError('')
     setLocalCodexMachineStatus(null)
@@ -3604,9 +3718,9 @@ function QueueComposer({
     setGenerateCommit(defaults.generateCommit)
     setSeparateCommitSession(defaults.separateCommitSession)
     setPermissionMode(defaults.permissionMode)
-    setInternetSearchEnabled(false)
+    setInternetSearchEnabled(defaults.internetSearchEnabled)
     setComposerValidationError('')
-  }, [defaults, editingRequest, selectedProject.id])
+  }, [defaultActiveLocalProfileId, defaults, editingRequest, selectedProject.id])
 
   useEffect(() => {
     draftRevisionRef.current += 1
@@ -3623,6 +3737,7 @@ function QueueComposer({
     prompt,
     requestModel,
     runnerChoice,
+    commitRunnerChoice,
     separateCommitSession,
   ])
 
@@ -3638,7 +3753,7 @@ function QueueComposer({
   }, [localProfiles, preferredLocalProfileId])
 
   useEffect(() => {
-    if (runnerChoice !== 'Local') {
+    if (runnerChoice !== 'Local' && commitRunnerChoice !== 'Local') {
       localModelLoadSequenceRef.current += 1
       setLoadingLocalModels(false)
       return
@@ -3664,7 +3779,24 @@ function QueueComposer({
     }
 
     void loadLocalModels(selectedLocalProfileId, false, selectedLocalProfileDefaultModel)
-  }, [loadLocalModels, runnerChoice, selectedLocalProfileDefaultModel, selectedLocalProfileId])
+  }, [commitRunnerChoice, loadLocalModels, runnerChoice, selectedLocalProfileDefaultModel, selectedLocalProfileId])
+
+  useEffect(() => {
+    if (commitRunnerChoice !== 'Local' || localModelOptions.length === 0) return
+    setCommitModel((current) => {
+      const nextModel = localModelOptions.some((model) => model.id === current.model)
+        ? current.model
+        : localModelOptions.some((model) => model.id === selectedLocalProfileDefaultModel)
+          ? selectedLocalProfileDefaultModel
+          : localModelOptions[0].id
+      const metadata = localModelOptions.find((model) => model.id === nextModel)
+      const nextEffort = metadata?.supportsReasoningEffort ? current.effort || 'low' : ''
+      const nextSpeed = normalizeLocalContextSize(current.speed)
+      return nextModel === current.model && nextEffort === current.effort && nextSpeed === current.speed
+        ? current
+        : { model: nextModel, effort: nextEffort, speed: nextSpeed }
+    })
+  }, [commitRunnerChoice, localModelOptions, selectedLocalProfileDefaultModel])
 
   useEffect(() => {
     localCodexCheckSequenceRef.current += 1
@@ -3689,12 +3821,10 @@ function QueueComposer({
   const isCodexRunner = runnerChoice === 'Codex'
   const isLocalRunner = runnerChoice === 'Local'
   useEffect(() => {
-    if (!isLocalRunner) {
-      setLoadingMachineResources(false)
-      return
-    }
-
-    if (!selectedLocalProfile?.serverMachineId) {
+    const resourceMachineId = isLocalRunner
+      ? selectedLocalProfile?.serverMachineId
+      : selectedProject.machineId
+    if (!resourceMachineId) {
       setMachineResources(null)
       setMachineResourceError('Select the machine hosting this A.I. Server in Local AI Server settings.')
       setLoadingMachineResources(false)
@@ -3706,7 +3836,7 @@ function QueueComposer({
     let pollingStopped = false
     let retryDelayMs = 5_000
     let timer: number | null = null
-    setMachineResources((current) => current?.machineId === selectedLocalProfile.serverMachineId ? current : null)
+    setMachineResources((current) => current?.machineId === resourceMachineId ? current : null)
     setMachineResourceError('')
 
     const schedule = (delayMs: number) => {
@@ -3724,7 +3854,9 @@ function QueueComposer({
       inFlight = true
       setLoadingMachineResources(true)
       try {
-        const result = await api.providerResources(selectedLocalProfileId)
+        const result = isLocalRunner
+          ? await api.providerResources(selectedLocalProfileId)
+          : await api.machineResources(selectedProject.machineId)
         if (!cancelled) {
           const deterministicUnavailable = !result.available
             && /currently supports Linux|No supported resource sensors/i.test(result.error ?? '')
@@ -3771,7 +3903,13 @@ function QueueComposer({
       if (timer !== null) window.clearTimeout(timer)
       document.removeEventListener('visibilitychange', onVisibilityChange)
     }
-  }, [isLocalRunner, machineResourceRefreshVersion, selectedLocalProfile?.serverMachineId, selectedLocalProfileId])
+  }, [
+    isLocalRunner,
+    machineResourceRefreshVersion,
+    selectedLocalProfile?.serverMachineId,
+    selectedLocalProfileId,
+    selectedProject.machineId,
+  ])
   const localModelInstalled = Boolean(localModel && localModelOptions.some((model) => model.id === localModel))
   const selectedLocalModelMetadata = localModelOptions.find((model) => model.id === localModel)
   const selectedLocalModelId = selectedLocalModelMetadata?.id
@@ -3831,6 +3969,36 @@ function QueueComposer({
     || ((configuredContextWindow && configuredContextWindow < minimumLocalCodexContextSize)
       ? `Configured context is ${configuredContextWindow.toLocaleString()} tokens. Set it to at least ${minimumLocalCodexContextSize.toLocaleString()} before running Local Codex.`
       : '')
+  const selectedCommitLocalModelMetadata = localModelOptions.find((model) => model.id === commitModel.model)
+  const commitLocalContextLimit = Math.min(
+    maximumLocalCodexContextSize,
+    configuredContextWindow ?? Number.POSITIVE_INFINITY,
+    selectedCommitLocalModelMetadata?.maximumContextWindow ?? Number.POSITIVE_INFINITY,
+  )
+  const commitLocalContextPresetOptions = localContextSizeOptions.map((option) => {
+    const contextSize = Number(option.value)
+    return {
+      ...option,
+      disabled: contextSize < minimumLocalCodexContextSize || contextSize > commitLocalContextLimit,
+      title: contextSize < minimumLocalCodexContextSize
+        ? `Local Codex requires at least ${(minimumLocalCodexContextSize / 1024).toFixed(0)}K tokens for this queue setup.`
+        : contextSize > commitLocalContextLimit
+          ? `This model or server supports up to ${commitLocalContextLimit.toLocaleString()} tokens.`
+          : option.value === '32768'
+            ? '32K tokens.'
+            : undefined,
+    }
+  })
+  const selectedCommitLocalContextSize = Number(commitModel.speed)
+  const commitLocalContextMaximumLabel = Number.isFinite(commitLocalContextLimit)
+    ? formatContextSize(commitLocalContextLimit)
+    : 'not discovered yet'
+  const commitLocalContextInfo = `${selectedLocalProfile?.localAiServerType === 'Ollama' ? 'Applied to Ollama as num_ctx and to Codex CLI model_context_window accounting.' : "Sets Codex CLI's model_context_window accounting; configure the backend with an equal or larger allocation."} Maximum available now: ${commitLocalContextMaximumLabel}${configuredContextWindow ? ` (server ${formatContextSize(configuredContextWindow)})` : ''}${selectedCommitLocalModelMetadata?.maximumContextWindow ? `; model ${formatContextSize(selectedCommitLocalModelMetadata.maximumContextWindow)}` : ''}.`
+  const commitLocalContextWarning = selectedCommitLocalContextSize < minimumLocalCodexContextSize
+    ? 'Select 32K or higher for the separate Local Codex commit session.'
+    : selectedCommitLocalContextSize > commitLocalContextLimit
+      ? 'The separate commit context is larger than this model or Local AI server supports.'
+      : ''
   const localModelWarning = localContextWarning
   const selectedLocalServerUnavailable = Boolean(
     selectedLocalProfile
@@ -3871,6 +4039,19 @@ function QueueComposer({
                   : localModelWarning
                     ? localModelWarning
                     : localCodexBlockingMessage
+  const commitLocalBlockingMessage = !generateCommit || !separateCommitSession || commitRunnerChoice !== 'Local'
+    ? ''
+    : !selectedLocalProfile
+      ? 'Choose an enabled Local AI Server for the separate commit session.'
+      : !commitModel.model
+        ? 'Choose a Local model for the separate commit session.'
+        : localModelError && !localModelStatus
+          ? localModelError
+          : localModelStatus && !localModelStatus.healthy
+            ? localModelStatus.error || 'Codex Queue cannot reach the separate commit Local AI server.'
+            : localModelStatus?.healthy && !localModelOptions.some((model) => model.id === commitModel.model)
+              ? 'The separate commit model is not installed on the selected Local AI server.'
+              : commitLocalContextWarning
   const selectedRequestModel = isLocalRunner ? localModel : requestModel.model
   const localApiPending = loadingLocalModels
   const localCodexPending = checkingLocalCodex
@@ -3918,7 +4099,6 @@ function QueueComposer({
             : localCodexMachineStatus?.available
             ? 'ok'
             : 'bad',
-      icon: <TerminalIcon size={15} />,
     },
     {
       key: 'server',
@@ -3938,7 +4118,6 @@ function QueueComposer({
           : localModelStatus?.healthy
             ? 'ok'
             : 'bad',
-      icon: <Server size={15} />,
     },
     {
       key: 'route',
@@ -3963,7 +4142,6 @@ function QueueComposer({
           : targetLocalAiReachable
             ? 'ok'
             : 'bad',
-      icon: <Network size={15} />,
     },
     {
       key: 'model',
@@ -3990,9 +4168,25 @@ function QueueComposer({
             : localModelStatus || localModelError
               ? 'bad'
               : 'idle',
-      icon: <Code2 size={15} />,
     },
   ]
+  const localOverallState = localHealthItems.some((item) => item.state === 'pending')
+    ? 'pending'
+    : localHealthItems.some((item) => item.state === 'bad')
+      ? 'bad'
+      : localHealthItems.every((item) => item.state === 'ok')
+        ? 'ok'
+        : 'idle'
+  const localOverallLabel = localOverallState === 'pending'
+    ? 'Checking'
+    : localOverallState === 'ok'
+      ? 'Online'
+      : localOverallState === 'bad'
+        ? 'Offline'
+        : 'Not checked'
+  const localOverallDetail = localHealthItems
+    .map((item) => `${item.label}: ${item.detail}`)
+    .join('\n')
 
   const codexDefaultsChanged =
     defaults.executionRunner !== 'CodexCli' ||
@@ -4002,19 +4196,55 @@ function QueueComposer({
     commitModel.model !== defaults.commitModel.model ||
     commitModel.effort !== defaults.commitModel.effort ||
     commitModel.speed !== defaults.commitModel.speed ||
+    executionRunnerForChoice(commitRunnerChoice) !== defaults.commitExecutionRunner ||
+    (commitRunnerChoice === 'Local' && selectedLocalProfileId !== defaults.commitLocalProviderProfileId) ||
     generateCommit !== defaults.generateCommit ||
     separateCommitSession !== defaults.separateCommitSession ||
-    permissionMode !== defaults.permissionMode
+    permissionMode !== defaults.permissionMode ||
+    internetSearchEnabled !== defaults.internetSearchEnabled
   const localDefaultsChanged =
     defaults.executionRunner !== 'OpenHandsCli' ||
     selectedLocalProfileId !== defaults.localModel.providerProfileId ||
     localModel !== defaults.localModel.model ||
     localReasoningEffort !== defaults.localModel.effort ||
     localContextSize !== defaults.localModel.speed ||
+    commitModel.model !== defaults.commitModel.model ||
+    commitModel.effort !== defaults.commitModel.effort ||
+    commitModel.speed !== defaults.commitModel.speed ||
+    executionRunnerForChoice(commitRunnerChoice) !== defaults.commitExecutionRunner ||
+    (commitRunnerChoice === 'Local' && selectedLocalProfileId !== defaults.commitLocalProviderProfileId) ||
     generateCommit !== defaults.generateCommit ||
     separateCommitSession !== defaults.separateCommitSession ||
-    permissionMode !== defaults.permissionMode
+    permissionMode !== defaults.permissionMode ||
+    internetSearchEnabled !== defaults.internetSearchEnabled
   const defaultsChanged = isLocalRunner ? localDefaultsChanged : codexDefaultsChanged
+
+  const selectLocalProfile = (nextProfileId: string) => {
+    const nextProfile = localProfiles.find((profile) => profile.id === nextProfileId)
+    const switchSequence = ++localServerSwitchSequenceRef.current
+    localModelLoadSequenceRef.current += 1
+    setSwitchingLocalServer(true)
+    setLoadingLocalModels(true)
+    setLocalModelStatus(null)
+    setLocalModelError('')
+    setLocalProfileId(nextProfileId)
+    setLocalModel(normalizeLocalModelId(nextProfile?.defaultModel ?? ''))
+    if (commitRunnerChoice === 'Local') {
+      setCommitModel((current) => ({
+        model: normalizeLocalModelId(nextProfile?.defaultModel ?? ''),
+        effort: current.effort || 'low',
+        speed: normalizeLocalContextSize(current.speed),
+      }))
+    }
+    setLocalReasoningEffort('')
+    setComposerValidationError('')
+    void loadLocalModels(nextProfileId, true, nextProfile?.defaultModel ?? '')
+      .finally(() => {
+        if (switchSequence === localServerSwitchSequenceRef.current) {
+          setSwitchingLocalServer(false)
+        }
+      })
+  }
 
   const selectRunnerChoice = (nextChoice: RunnerChoice) => {
     localModelLoadSequenceRef.current += 1
@@ -4036,11 +4266,26 @@ function QueueComposer({
     }
   }
 
+  const selectCommitRunnerChoice = (nextChoice: RunnerChoice) => {
+    setCommitRunnerChoice(nextChoice)
+    if (nextChoice === 'Local') {
+      setCommitModel({
+        model: isLocalRunner ? localModel : selectedLocalProfileDefaultModel,
+        effort: isLocalRunner ? localReasoningEffort || 'low' : 'low',
+        speed: isLocalRunner ? localContextSize : defaultLocalCodexContextSize,
+      })
+    } else {
+      setCommitModel(defaults.commitModel)
+    }
+  }
+
   const resetModelSelections = () => {
     localModelLoadSequenceRef.current += 1
     setRunnerChoice(runnerChoiceForExecutionRunner(defaults.executionRunner))
+    setCommitRunnerChoice(runnerChoiceForExecutionRunner(defaults.commitExecutionRunner))
+    setCommitCardFlipped(false)
     setRequestModel(defaults.requestModel)
-    setLocalProfileId(defaults.localModel.providerProfileId)
+    setLocalProfileId(defaultActiveLocalProfileId)
     setLocalModel(defaults.localModel.model)
     setLocalReasoningEffort(defaults.localModel.effort)
     setLocalContextSize(defaults.localModel.speed)
@@ -4048,7 +4293,7 @@ function QueueComposer({
     setGenerateCommit(defaults.generateCommit)
     setSeparateCommitSession(defaults.separateCommitSession)
     setPermissionMode(defaults.permissionMode)
-    setInternetSearchEnabled(false)
+    setInternetSearchEnabled(defaults.internetSearchEnabled)
     setComposerValidationError('')
   }
 
@@ -4084,9 +4329,13 @@ function QueueComposer({
         executionRunner: isLocalRunner ? 'OpenHandsCli' : 'CodexCli',
         providerProfileId: isLocalRunner ? selectedLocalProfile?.id ?? null : null,
         openHandsAlwaysApproveConfirmed: false,
-        commitModel: isCodexRunner ? commitModel.model : null,
-        commitModelEffort: isCodexRunner ? commitModel.effort : null,
-        commitModelSpeed: isCodexRunner ? commitModel.speed : null,
+        commitModel: separateCommitSession ? commitModel.model : null,
+        commitModelEffort: separateCommitSession ? commitModel.effort : null,
+        commitModelSpeed: separateCommitSession ? commitModel.speed : null,
+        commitExecutionRunner: separateCommitSession ? executionRunnerForChoice(commitRunnerChoice) : null,
+        commitProviderProfileId: separateCommitSession && commitRunnerChoice === 'Local'
+          ? selectedLocalProfile?.id ?? null
+          : null,
       }
 
       if (editingRequest) {
@@ -4134,9 +4383,13 @@ function QueueComposer({
           providerProfileName: isLocalRunner ? selectedLocalProfile?.name ?? null : null,
           providerSource: isLocalRunner ? 'Local' : null,
           queueWaitReason: null,
-          commitModel: isCodexRunner ? commitModel.model : null,
-          commitModelEffort: isCodexRunner ? commitModel.effort : null,
-          commitModelSpeed: isCodexRunner ? commitModel.speed : null,
+          commitModel: separateCommitSession ? commitModel.model : null,
+          commitModelEffort: separateCommitSession ? commitModel.effort : null,
+          commitModelSpeed: separateCommitSession ? commitModel.speed : null,
+          commitExecutionRunner: separateCommitSession ? executionRunnerForChoice(commitRunnerChoice) : null,
+          commitProviderProfileId: separateCommitSession && commitRunnerChoice === 'Local'
+            ? selectedLocalProfile?.id ?? null
+            : null,
           createdAt,
           runs: [],
         }
@@ -4180,6 +4433,11 @@ function QueueComposer({
         setComposerValidationError(localBlockingMessage)
         return
       }
+    }
+    if (commitLocalBlockingMessage) {
+      setComposerValidationError(commitLocalBlockingMessage)
+      setCommitCardFlipped(true)
+      return
     }
     if (permissionMode === 'AskForApproval') {
       setApprovalDialogOpen(true)
@@ -4261,9 +4519,13 @@ function QueueComposer({
               effort: selectedLocalModelSupportsReasoningEffort === false ? '' : localReasoningEffort,
               speed: localContextSize,
             },
+            commitModel,
             generateCommit: permissionMode !== 'ReadOnly' && generateCommit,
             separateCommitSession: permissionMode !== 'ReadOnly' && generateCommit && separateCommitSession,
             permissionMode,
+            internetSearchEnabled,
+            commitExecutionRunner: executionRunnerForChoice(commitRunnerChoice),
+            commitLocalProviderProfileId: selectedLocalProfileId,
           }
         : {
             ...defaults,
@@ -4273,6 +4535,9 @@ function QueueComposer({
             generateCommit: permissionMode !== 'ReadOnly' && generateCommit,
             separateCommitSession: permissionMode !== 'ReadOnly' && generateCommit && separateCommitSession,
             permissionMode,
+            internetSearchEnabled,
+            commitExecutionRunner: executionRunnerForChoice(commitRunnerChoice),
+            commitLocalProviderProfileId: selectedLocalProfileId,
           })
     } catch (cause) {
       onError(cause)
@@ -4280,6 +4545,76 @@ function QueueComposer({
       setSavingDefaults(false)
     }
   }
+
+  const commitLocalModelControls = (
+    <div
+      className="commit-local-model-controls"
+      title="Click empty card space to show resources"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) setCommitCardFlipped(false)
+      }}
+    >
+      <div className="card-model-selector-row">
+        <CardRunnerPicker value={commitRunnerChoice} label="Commit" onChange={selectCommitRunnerChoice} />
+        {isCodexRunner ? (
+          <GlassDropdownSelect
+            value={selectedLocalProfileId}
+            label="Separate commit Local AI Server"
+            options={localProfileDropdownOptions}
+            disabled={localProfiles.length === 0}
+            onChange={selectLocalProfile}
+          />
+        ) : (
+          <div className="commit-local-inherited-server" title="The separate commit session uses the main Local runner's AI server.">
+            <Server size={14} />
+            <span>{selectedLocalProfile?.name || 'Main Local AI Server'}</span>
+          </div>
+        )}
+      </div>
+      <div className="model-picker-head">
+        <span className="model-picker-title">Model</span>
+        <GlassDropdownSelect
+          label="Local separate commit model"
+          value={commitModel.model}
+          options={commitLocalModelDropdownOptions}
+          disabled={!selectedLocalProfile || localModelOptions.length === 0}
+          onChange={(model) => {
+            const metadata = localModelOptions.find((item) => item.id === model)
+            setCommitModel((current) => ({
+              ...current,
+              model,
+              effort: metadata?.supportsReasoningEffort ? current.effort || 'low' : '',
+              speed: normalizeLocalContextSize(current.speed),
+            }))
+          }}
+        />
+      </div>
+      <div className={`model-options-row model-options-row--local ${selectedCommitLocalModelMetadata?.supportsReasoningEffort ? '' : 'model-options-row--single'}`}>
+        {selectedCommitLocalModelMetadata?.supportsReasoningEffort && (
+          <SegmentedRadio
+            label="Effort"
+            name="Local-separate-commit-reasoning-effort"
+            value={commitModel.effort || 'low'}
+            options={[
+              { label: 'Low', value: 'low' },
+              { label: 'Medium', value: 'medium' },
+              { label: 'High', value: 'high' },
+            ]}
+            onChange={(effort) => setCommitModel((current) => ({ ...current, effort }))}
+          />
+        )}
+        <ContextSizePicker
+          label="Context size"
+          helpText={commitLocalContextInfo}
+          name="Local-separate-commit-context-size"
+          value={normalizeLocalContextSize(commitModel.speed)}
+          options={commitLocalContextPresetOptions}
+          onChange={(speed) => setCommitModel((current) => ({ ...current, speed }))}
+        />
+      </div>
+      {commitLocalContextWarning && <span className="local-capability-note error-text">{commitLocalContextWarning}</span>}
+    </div>
+  )
 
   return (
     <GlassPanel className="prompt-card">
@@ -4397,84 +4732,87 @@ function QueueComposer({
           <div className="composer-runtime-main">
             {isCodexRunner ? (
               <div className="composer-grid compact">
-                <ModelPicker label="Request" options={config.models} value={requestModel} onChange={setRequestModel} />
-                <ModelPicker label="Commit" options={config.models} value={commitModel} onChange={setCommitModel} disabled={!generateCommit || !separateCommitSession} />
+                <div className="model-picker-grid runner-model-card">
+                  <div className="card-model-selector-row">
+                    <CardRunnerPicker value={runnerChoice} label="Main" onChange={selectRunnerChoice} />
+                    <ModelPicker label="Model" options={config.models} value={requestModel} onChange={setRequestModel} />
+                  </div>
+                </div>
+                <div className={`model-picker-grid resource-monitor-card resource-monitor-card--compact ${commitCardFlipped ? 'is-flipped' : ''}`}>
+                  {commitCardFlipped ? (
+                    <div
+                      className="commit-model-card"
+                      title="Click empty card space to show resources"
+                      onClick={(event) => {
+                        if (event.target === event.currentTarget) setCommitCardFlipped(false)
+                      }}
+                    >
+                      {commitRunnerChoice === 'Local' ? (
+                        commitLocalModelControls
+                      ) : (
+                        <div className="card-model-selector-row">
+                          <CardRunnerPicker value={commitRunnerChoice} label="Commit" onChange={selectCommitRunnerChoice} />
+                          <ModelPicker label="Separate commit" options={config.models} value={commitModel} onChange={setCommitModel} />
+                        </div>
+                      )}
+                      <GlassButton
+                        className="commit-card-resource-button"
+                        variant="ghost"
+                        size="sm"
+                        type="button"
+                        onClick={() => setCommitCardFlipped(false)}
+                      >
+                        <GaugeIcon size={14} /> Show resources
+                      </GlassButton>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className="resource-card-flip-target"
+                        title={separateCommitSession ? 'Open separate commit session model selection' : 'Enable Separate commit session to select its runner and model'}
+                        aria-label="Show separate commit session model selection"
+                        onClick={() => setCommitCardFlipped(true)}
+                      />
+                      <ResourceMonitorFace
+                        resources={machineResources}
+                        loading={loadingMachineResources}
+                        error={machineResourceError}
+                      />
+                    </>
+                  )}
+                </div>
               </div>
             ) : isLocalRunner ? (
               <div className="local-runner-panel">
                 <div className="composer-grid compact local-composer-grid">
                   <div className="model-picker-grid local-model-card">
                     <div className="local-profile-field">
-                      <span><Server size={13} /> A.I. Server</span>
+                      <div className="card-model-selector-row">
+                      <CardRunnerPicker value={runnerChoice} label="Main" onChange={selectRunnerChoice} />
                       <GlassDropdownSelect
                         value={selectedLocalProfileId}
                         label="Local AI Server profile"
                         options={localProfileDropdownOptions}
                         disabled={localProfiles.length === 0}
-                        onChange={(nextProfileId) => {
-                          const nextProfile = localProfiles.find((profile) => profile.id === nextProfileId)
-                          const switchSequence = ++localServerSwitchSequenceRef.current
-                          localModelLoadSequenceRef.current += 1
-                          setSwitchingLocalServer(true)
-                          setLoadingLocalModels(true)
-                          setLocalModelStatus(null)
-                          setLocalModelError('')
-                          setLocalProfileId(nextProfileId)
-                          setLocalModel(normalizeLocalModelId(nextProfile?.defaultModel ?? ''))
-                          setLocalReasoningEffort('')
-                          setComposerValidationError('')
-                          setPowerMenuOpen(false)
-                          void loadLocalModels(nextProfileId, true, nextProfile?.defaultModel ?? '')
-                            .finally(() => {
-                              if (switchSequence === localServerSwitchSequenceRef.current) {
-                                setSwitchingLocalServer(false)
-                              }
-                            })
-                        }}
+                        onChange={selectLocalProfile}
                       />
-                      <div className="local-picker-actions" role="status" aria-live="polite" aria-label="Local Codex readiness">
-                        <GlassButton
-                          variant="secondary"
-                          size="icon"
+                      </div>
+                      <div className="local-health-strip local-health-strip--compact" role="status" aria-live="polite">
+                        <button
+                          className={`local-online-status local-online-status--${localOverallState}`}
                           type="button"
-                          disabled={!selectedLocalProfile}
-                          title="AI server power mode"
-                          aria-label="AI server power mode"
-                          aria-expanded={powerMenuOpen}
-                          onClick={() => setPowerMenuOpen((current) => !current)}
-                        >
-                          <Zap size={15} />
-                        </GlassButton>
-                        <div className="local-health-strip">
-                          {localHealthItems.map((item) => (
-                            <span
-                              key={item.key}
-                              className={`local-health-icon local-health-icon--${item.state}`}
-                              title={`${item.label}: ${item.detail}`}
-                            >
-                              <span aria-hidden="true">{item.icon}</span>
-                              <span className="local-health-dot" aria-hidden="true" />
-                              <span className="sr-only">{item.label}: {item.detail}</span>
-                            </span>
-                          ))}
-                        </div>
-                        <GlassButton
-                          variant="secondary"
-                          size="icon"
-                          type="button"
-                          disabled={loadingMachineResources}
-                          title={selectedLocalProfile ? 'Refresh models, Local Codex readiness, target route, and resources' : 'Refresh system resources'}
-                          aria-label={selectedLocalProfile ? 'Refresh Local model readiness and resources' : 'Refresh system resources'}
+                          disabled={loadingLocalModels || checkingLocalCodex || loadingMachineResources}
+                          title={`${localOverallLabel}. Click to refresh.\n${localOverallDetail}`}
+                          aria-label={`${localOverallLabel}. Refresh Local Codex readiness and resources.`}
                           onClick={() => {
                             setMachineResourceRefreshVersion((current) => current + 1)
                             if (selectedLocalProfile && !loadingLocalModels && !checkingLocalCodex) void refreshLocalEnvironment()
                           }}
                         >
-                          <RefreshCcw size={15} className={loadingLocalModels || checkingLocalCodex || loadingMachineResources ? 'action-spinner' : ''} />
-                        </GlassButton>
-                        {powerMenuOpen && selectedLocalProfile && (
-                          <PowerModePopover profileId={selectedLocalProfile.id} onClose={() => setPowerMenuOpen(false)} />
-                        )}
+                          <span className="local-online-status__dot" aria-hidden="true" />
+                          <span>{localOverallLabel}</span>
+                        </button>
                       </div>
                     </div>
                     <div className="model-picker-head">
@@ -4518,7 +4856,51 @@ function QueueComposer({
                     </div>
                   </div>
 
-                  <div className="model-picker-grid resource-monitor-card resource-monitor-card--compact">
+                  <div className={`model-picker-grid resource-monitor-card resource-monitor-card--compact ${commitCardFlipped ? 'is-flipped' : ''}`}>
+                    {commitCardFlipped ? (
+                      <div
+                        className="commit-model-card"
+                        title="Click empty card space to show resources"
+                        onClick={(event) => {
+                          if (event.target === event.currentTarget) setCommitCardFlipped(false)
+                        }}
+                    >
+                      {commitRunnerChoice === 'Local' ? (
+                        commitLocalModelControls
+                      ) : (
+                        <div className="card-model-selector-row">
+                          <CardRunnerPicker
+                            value={commitRunnerChoice}
+                            label="Commit"
+                            onChange={selectCommitRunnerChoice}
+                          />
+                          <ModelPicker
+                            label="Commit"
+                            options={config.models}
+                            value={commitModel}
+                            onChange={setCommitModel}
+                          />
+                        </div>
+                      )}
+                      <GlassButton
+                        className="commit-card-resource-button"
+                        variant="ghost"
+                        size="sm"
+                        type="button"
+                        onClick={() => setCommitCardFlipped(false)}
+                      >
+                        <GaugeIcon size={14} /> Show resources
+                      </GlassButton>
+                      </div>
+                    ) : (
+                      <>
+                    <button
+                      type="button"
+                      className="resource-card-flip-target"
+                      title={separateCommitSession ? 'Open separate commit session model selection' : 'Enable Separate commit session to select its runner and model'}
+                      aria-label="Show separate commit session model selection"
+                      onClick={() => setCommitCardFlipped(true)}
+                    />
                     {selectedLocalServerUnavailable ? (
                       <div className="resource-unavailable resource-unavailable--server">
                         <Server size={16} />
@@ -4577,6 +4959,8 @@ function QueueComposer({
                           : machineResourceError}
                       </span>
                     )}
+                      </>
+                    )}
                   </div>
                 </div>
                 {localModelWarning && <div className="local-runner-warning"><ShieldAlert size={15} /> <span>{localModelWarning}</span></div>}
@@ -4590,28 +4974,6 @@ function QueueComposer({
             ) : (
               <div className="local-runner-error">Claude mode is not enabled in this Local-only release.</div>
             )}
-          </div>
-          <div className="runner-icon-switch" role="group" aria-label="Coding agent runner">
-            {([
-              { value: 'Codex', label: 'Codex / ChatGPT', brand: 'chatgpt', disabled: false },
-              { value: 'Claude', label: 'Claude (not enabled)', brand: 'claude', disabled: true },
-              { value: 'Local', label: 'Local / Codex', brand: 'ollama', disabled: false },
-            ] as const).map((option) => (
-              <GlassButton
-                key={option.value}
-                className={`runner-icon-button ${runnerChoice === option.value ? 'active' : ''}`}
-                variant={runnerChoice === option.value ? 'primary' : 'secondary'}
-                size="icon"
-                type="button"
-                aria-pressed={runnerChoice === option.value}
-                aria-label={`${option.label} runner`}
-                title={`${option.label} runner`}
-                disabled={option.disabled}
-                onClick={() => selectRunnerChoice(option.value)}
-              >
-                <AiBrandImage brand={option.brand} />
-              </GlassButton>
-            ))}
           </div>
         </div>
         <div className="composer-actions-row">
@@ -4627,6 +4989,7 @@ function QueueComposer({
                       setGenerateCommit(event.target.checked)
                       if (!event.target.checked) {
                         setSeparateCommitSession(false)
+                        setCommitCardFlipped(false)
                       }
                     }}
                   />
@@ -4638,14 +5001,31 @@ function QueueComposer({
                     type="checkbox"
                     checked={generateCommit && separateCommitSession}
                     disabled={!generateCommit || permissionMode === 'ReadOnly'}
-                    onChange={(event) => setSeparateCommitSession(event.target.checked)}
+                    onChange={(event) => {
+                      setSeparateCommitSession(event.target.checked)
+                      if (!event.target.checked) setCommitCardFlipped(false)
+                    }}
                   />
                   <span className="commit-toggle-icon"><Check size={12} /></span>
                   <span>Separate commit session</span>
                 </label>
+                <label
+                  className={`commit-toggle internet-search-toggle ${internetSearchEnabled ? 'active' : ''}`}
+                  title="Pass --search to Codex CLI for this request."
+                >
+                  <input
+                    type="checkbox"
+                    checked={internetSearchEnabled}
+                    onChange={(event) => setInternetSearchEnabled(event.target.checked)}
+                  />
+                  <span className="commit-toggle-icon">
+                    {internetSearchEnabled ? <Check size={12} /> : <Globe2 size={12} />}
+                  </span>
+                  <span>Internet search</span>
+                </label>
                 <GlassDropdownSelect
                   label="Codex permission"
-                  className="permission-mode-select"
+                  className={`permission-mode-select permission-mode-select--${permissionMode.toLowerCase()}`}
                   value={permissionMode}
                   onChange={(value) => {
                     const nextMode = value as PermissionMode
@@ -4662,20 +5042,6 @@ function QueueComposer({
                     { value: 'FullAccess', label: 'Full access', icon: <ShieldAlert size={14} /> },
                   ]}
                 />
-                <label
-                  className={`commit-toggle ${internetSearchEnabled ? 'active' : ''}`}
-                  title="Pass --search to Codex CLI for this request."
-                >
-                  <input
-                    type="checkbox"
-                    checked={internetSearchEnabled}
-                    onChange={(event) => setInternetSearchEnabled(event.target.checked)}
-                  />
-                  <span className="commit-toggle-icon">
-                    {internetSearchEnabled ? <Check size={12} /> : <Globe2 size={12} />}
-                  </span>
-                  <span>Internet search</span>
-                </label>
               </div>
             ) : null}
           </div>
@@ -4686,7 +5052,10 @@ function QueueComposer({
                 size="sm"
                 type="button"
                 onClick={saveDefaults}
-                disabled={!defaultsChanged || savingDefaults || (isLocalRunner && (!selectedLocalProfile || !localModel || Boolean(localContextWarning)))}
+                disabled={!defaultsChanged
+                  || savingDefaults
+                  || (isLocalRunner && (!selectedLocalProfile || !localModel || Boolean(localContextWarning)))
+                  || Boolean(commitLocalBlockingMessage)}
               >
                 <Check size={13} /> {savingDefaults ? 'Saving' : 'Save defaults'}
               </GlassButton>
@@ -4908,6 +5277,57 @@ function supportsUltraEffort(model: string) {
   return /^gpt-5\.6(?:$|[-.])/i.test(model.trim())
 }
 
+function ResourceMonitorFace({
+  resources,
+  loading,
+  error,
+  unavailable,
+}: {
+  resources: MachineResources | null
+  loading: boolean
+  error: string
+  unavailable?: string
+}) {
+  if (unavailable) {
+    return <div className="resource-unavailable resource-unavailable--server"><Server size={16} /><span>{unavailable}</span></div>
+  }
+  if (loading && !resources) return <ResourceTelemetryLoading />
+  if (!resources) return <div className="resource-empty-state">Resource telemetry is not available yet.</div>
+
+  return (
+    <>
+      <div className="resource-meter-list">
+        <ResourceMeter icon={<Cpu size={17} />} label="CPU" name={resources.cpuName || 'Processor details unavailable'} percent={resources.cpuUsagePercent} temperature={resources.cpuTemperatureCelsius} />
+        <ResourceMeter
+          icon={<MemoryStick size={17} />}
+          label="RAM"
+          name={resources.memoryName || (resources.memoryTotalBytes != null ? `${formatResourceBytes(resources.memoryTotalBytes)} installed` : 'Memory details unavailable')}
+          percent={resources.memoryUsagePercent}
+          detail={resources.memoryUsedBytes != null && resources.memoryTotalBytes != null ? `${formatResourceBytes(resources.memoryUsedBytes)} / ${formatResourceBytes(resources.memoryTotalBytes)}` : undefined}
+        />
+        {resources.gpus.map((gpu) => (
+          <ResourceMeter
+            key={`${gpu.index}:${gpu.name}`}
+            icon={<GaugeIcon size={17} />}
+            label={resources.gpus.length === 1 ? 'GPU' : `GPU ${gpu.index}`}
+            name={gpu.name}
+            percent={gpu.utilizationPercent}
+            detail={gpu.memoryUsedBytes != null && gpu.memoryTotalBytes != null ? `VRAM ${formatResourceBytes(gpu.memoryUsedBytes)} / ${formatResourceBytes(gpu.memoryTotalBytes)}` : undefined}
+            temperature={gpu.temperatureCelsius}
+            power={gpu.powerWatts}
+          />
+        ))}
+        {resources.gpus.length === 0 && <div className="resource-unavailable"><GaugeIcon size={14} /> GPU telemetry unavailable</div>}
+      </div>
+      {error && (
+        <span className={`resource-monitor-error ${resources.available ? 'resource-monitor-error--stale' : ''}`} title={error}>
+          {resources.available ? `Last telemetry sample retained: ${error}` : error}
+        </span>
+      )}
+    </>
+  )
+}
+
 function ResourceTelemetryLoading() {
   return (
     <div className="resource-telemetry-loading" role="status" aria-label="Loading resource telemetry">
@@ -4920,55 +5340,6 @@ function ResourceTelemetryLoading() {
           <span className="resource-telemetry-skeleton-meter" />
         </div>
       ))}
-    </div>
-  )
-}
-
-function PowerModePopover({ profileId, onClose }: { profileId: string; onClose: () => void }) {
-  const [snapshot, setSnapshot] = useState<MachinePowerMode | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [updating, setUpdating] = useState('')
-  const [error, setError] = useState('')
-
-  const refresh = useCallback(async () => {
-    setLoading(true)
-    setError('')
-    try {
-      setSnapshot(await api.providerPowerMode(profileId))
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not read the power mode.')
-    } finally {
-      setLoading(false)
-    }
-  }, [profileId])
-
-  useEffect(() => { void refresh() }, [refresh])
-
-  const setMode = async (mode: string) => {
-    setUpdating(mode)
-    setError('')
-    try {
-      setSnapshot(await api.setProviderPowerMode(profileId, mode))
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not set the power mode.')
-    } finally {
-      setUpdating('')
-    }
-  }
-
-  return (
-    <div className="power-mode-popover" role="dialog" aria-label="AI server power mode">
-      <div className="power-mode-popover__head"><strong>Power mode</strong><button type="button" onClick={onClose} aria-label="Close power mode"><X size={13} /></button></div>
-      {loading ? <div className="meta">Checking power mode…</div> : error ? <div className="error-text">{error}</div> : <>
-        <div className="meta truncate" title={snapshot?.machineName}>{snapshot?.machineName} · {snapshot?.mode ?? 'Unknown'}</div>
-        <div className="power-mode-options">
-          {[
-            { value: 'power-saver', label: 'Power saver' },
-            { value: 'balanced', label: 'Balanced' },
-            { value: 'performance', label: 'Performance' },
-          ].map((option) => <GlassButton key={option.value} variant={snapshot?.mode === option.value ? 'primary' : 'secondary'} size="sm" type="button" disabled={Boolean(updating)} onClick={() => void setMode(option.value)}>{updating === option.value ? 'Setting…' : option.label}</GlassButton>)}
-        </div>
-      </>}
     </div>
   )
 }
@@ -7081,6 +7452,7 @@ function RequestHistory({
 function RightRail({
   open,
   config,
+  providerProfiles,
   view,
   selectedProject,
   onOpenFile,
@@ -7092,6 +7464,7 @@ function RightRail({
 }: {
   open: boolean
   config: ApiConfig
+  providerProfiles: AiProviderProfile[]
   view: RightRailView
   selectedProject?: Project
   onOpenFile: (project: Project, path: string) => Promise<void>
@@ -7099,7 +7472,7 @@ function RightRail({
   onViewChange: (view: RightRailView) => void
   onError: (cause: unknown) => void
   onGitStatusChange: (projectId: string, status: GitStatus) => void
-  onSaveCommitModelDefault: (project: Project, model: ModelValue) => Promise<void>
+  onSaveCommitModelDefault: (project: Project, model: ModelValue, executionRunner: ExecutionRunner, providerProfileId: string) => Promise<void>
 }) {
   if (!open) return null
 
@@ -7135,6 +7508,7 @@ function RightRail({
           <GitPanel
             project={selectedProject}
             config={config}
+            providerProfiles={providerProfiles}
             onError={onError}
             onStatusChange={onGitStatusChange}
             onSaveCommitModelDefault={onSaveCommitModelDefault}
@@ -7150,20 +7524,35 @@ function RightRail({
 function GitPanel({
   project,
   config,
+  providerProfiles,
   onError,
   onStatusChange,
   onSaveCommitModelDefault,
 }: {
   project: Project
   config: ApiConfig
+  providerProfiles: AiProviderProfile[]
   onError: (cause: unknown) => void
   onStatusChange: (projectId: string, status: GitStatus) => void
-  onSaveCommitModelDefault: (project: Project, model: ModelValue) => Promise<void>
+  onSaveCommitModelDefault: (project: Project, model: ModelValue, executionRunner: ExecutionRunner, providerProfileId: string) => Promise<void>
 }) {
   const defaults = useMemo(() => projectModelDefaults(project, config.models), [config.models, project])
+  const localProfiles = useMemo(
+    () => providerProfiles.filter((profile) => profile.enabled && profile.source === 'Local'),
+    [providerProfiles],
+  )
   const [status, setStatus] = useState<GitStatus | null>(null)
   const [commitMessage, setCommitMessage] = useState('')
   const [suggestionModel, setSuggestionModel] = useState<ModelValue>(defaults.commitModel)
+  const [commitRunnerChoice, setCommitRunnerChoice] = useState<RunnerChoice>(
+    () => runnerChoiceForExecutionRunner(defaults.commitExecutionRunner),
+  )
+  const [localProfileId, setLocalProfileId] = useState(
+    defaults.commitLocalProviderProfileId || defaults.localModel.providerProfileId,
+  )
+  const [localModelStatus, setLocalModelStatus] = useState<ProviderModelsResponse | null>(null)
+  const [loadingLocalModels, setLoadingLocalModels] = useState(false)
+  const [localModelError, setLocalModelError] = useState('')
   const [loading, setLoading] = useState(false)
   const [committing, setCommitting] = useState(false)
   const [generating, setGenerating] = useState(false)
@@ -7188,8 +7577,94 @@ function GitPanel({
     setCommitMessage('')
     setActionOutput('')
     setSuggestionModel(defaults.commitModel)
+    setCommitRunnerChoice(runnerChoiceForExecutionRunner(defaults.commitExecutionRunner))
+    setLocalProfileId(defaults.commitLocalProviderProfileId || defaults.localModel.providerProfileId)
     void loadStatus()
-  }, [defaults.commitModel, loadStatus, project.id])
+  }, [
+    defaults.commitExecutionRunner,
+    defaults.commitLocalProviderProfileId,
+    defaults.commitModel,
+    defaults.localModel.providerProfileId,
+    loadStatus,
+    project.id,
+  ])
+
+  const selectedLocalProfileId = localProfiles.some((profile) => profile.id === localProfileId)
+    ? localProfileId
+    : localProfiles.some((profile) => profile.id === defaults.commitLocalProviderProfileId)
+      ? defaults.commitLocalProviderProfileId
+      : localProfiles[0]?.id ?? ''
+  const selectedLocalProfile = localProfiles.find((profile) => profile.id === selectedLocalProfileId)
+  const localProfileOptions = localProfiles.map((profile) => ({
+    icon: <AiBrandImage brand={profile.localAiServerType === 'Ollama' ? 'ollama' : 'meta'} />,
+    label: profile.name,
+    value: profile.id,
+  }))
+  const localModelOptions = localModelStatus?.models ?? []
+  const localModelDropdownOptions = localModelOptions.map((model) => ({
+    icon: <AiBrandImage brand={localModelBrandIcon(model.name || model.id)} />,
+    label: localModelDisplayName(model.name || model.id),
+    value: model.id,
+  }))
+  const selectedLocalModelMetadata = localModelOptions.find((model) => model.id === suggestionModel.model)
+  const configuredContextWindow = localModelStatus?.configuredContextWindow ?? selectedLocalProfile?.configuredContextWindow
+  const localContextLimit = Math.min(
+    maximumLocalCodexContextSize,
+    configuredContextWindow ?? Number.POSITIVE_INFINITY,
+    selectedLocalModelMetadata?.maximumContextWindow ?? Number.POSITIVE_INFINITY,
+  )
+  const localContextOptions = localContextSizeOptions.map((option) => ({
+    ...option,
+    disabled: Number(option.value) < minimumLocalCodexContextSize || Number(option.value) > localContextLimit,
+    title: Number(option.value) < minimumLocalCodexContextSize
+      ? 'Local Codex requires at least 32K tokens.'
+      : Number(option.value) > localContextLimit
+        ? `This server or model supports up to ${localContextLimit.toLocaleString()} tokens.`
+        : undefined,
+  }))
+  const localContextWarning = Number(suggestionModel.speed) < minimumLocalCodexContextSize
+    ? 'Select 32K or higher for Local Codex.'
+    : Number(suggestionModel.speed) > localContextLimit
+      ? 'The selected context exceeds the Local AI server or model limit.'
+      : ''
+  const localContextInfo = `Applied to ${selectedLocalProfile?.localAiServerType ?? 'the Local AI server'} and Codex CLI context accounting. Maximum available: ${Number.isFinite(localContextLimit) ? formatContextSize(localContextLimit) : 'not discovered yet'}.`
+
+  useEffect(() => {
+    if (commitRunnerChoice !== 'Local' || !selectedLocalProfileId) return
+    let active = true
+    setLoadingLocalModels(true)
+    setLocalModelError('')
+    const cached = localModelDiscoveryCache.get(selectedLocalProfileId)
+    const request = cached ? Promise.resolve(cached) : api.providerModels(selectedLocalProfileId, false)
+    void request
+      .then((result) => {
+        if (!active) return
+        localModelDiscoveryCache.set(selectedLocalProfileId, result)
+        setLocalModelStatus(result)
+        setSuggestionModel((current) => {
+          const nextModel = result.models.some((model) => model.id === current.model)
+            ? current.model
+            : result.models.some((model) => model.id === selectedLocalProfile?.defaultModel)
+              ? selectedLocalProfile?.defaultModel ?? ''
+              : result.models[0]?.id ?? ''
+          const metadata = result.models.find((model) => model.id === nextModel)
+          return {
+            model: nextModel,
+            effort: metadata?.supportsReasoningEffort ? current.effort || 'low' : '',
+            speed: normalizeLocalContextSize(current.speed),
+          }
+        })
+      })
+      .catch((cause) => {
+        if (active) setLocalModelError(cause instanceof Error ? cause.message : 'Could not load Local AI models.')
+      })
+      .finally(() => {
+        if (active) setLoadingLocalModels(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [commitRunnerChoice, selectedLocalProfile?.defaultModel, selectedLocalProfileId])
 
   const commitWithCodex = async () => {
     setGenerating(true)
@@ -7199,6 +7674,8 @@ function GitPanel({
         model: suggestionModel.model,
         modelEffort: suggestionModel.effort,
         modelSpeed: suggestionModel.speed,
+        executionRunner: executionRunnerForChoice(commitRunnerChoice),
+        providerProfileId: commitRunnerChoice === 'Local' ? selectedLocalProfileId : null,
       })
       setCommitMessage('')
       setActionOutput(gitCommitSuccessMessage(result, 'Codex commit finished.'))
@@ -7232,7 +7709,12 @@ function GitPanel({
   const saveCommitModelDefault = async () => {
     setSavingDefault(true)
     try {
-      await onSaveCommitModelDefault(project, suggestionModel)
+      await onSaveCommitModelDefault(
+        project,
+        suggestionModel,
+        executionRunnerForChoice(commitRunnerChoice),
+        commitRunnerChoice === 'Local' ? selectedLocalProfileId : '',
+      )
     } catch (cause) {
       onError(cause)
     } finally {
@@ -7246,6 +7728,16 @@ function GitPanel({
   const commitModelChanged = suggestionModel.model !== defaults.commitModel.model
     || suggestionModel.effort !== defaults.commitModel.effort
     || suggestionModel.speed !== defaults.commitModel.speed
+    || executionRunnerForChoice(commitRunnerChoice) !== defaults.commitExecutionRunner
+    || (commitRunnerChoice === 'Local' && selectedLocalProfileId !== defaults.commitLocalProviderProfileId)
+  const localCommitInvalid = commitRunnerChoice === 'Local' && (
+    !selectedLocalProfile
+    || !suggestionModel.model
+    || loadingLocalModels
+    || Boolean(localModelError)
+    || Boolean(localContextWarning)
+    || !localModelOptions.some((model) => model.id === suggestionModel.model)
+  )
 
   return (
     <div className="git-panel">
@@ -7269,24 +7761,109 @@ function GitPanel({
         <span>{loading ? 'Refreshing...' : status ? 'Up to date' : 'Loading status'}</span>
       </div>
 
-      <section className="git-changes-section" aria-label="Git changes">
-        <div className="run-output-head">
-          <span>Git changes</span>
-          <span>{loading ? 'refreshing' : formatFileCount(changeCount)}</span>
+      <div className="git-ai-box git-ai-box--top">
+        <div className="card-model-selector-row">
+          <CardRunnerPicker
+            value={commitRunnerChoice}
+            label="Git commit"
+            onChange={(nextRunner) => {
+              setCommitRunnerChoice(nextRunner)
+              setActionOutput('')
+              if (nextRunner === 'Local') {
+                setSuggestionModel((current) => ({
+                  model: current.model,
+                  effort: current.effort || 'low',
+                  speed: normalizeLocalContextSize(current.speed),
+                }))
+              } else {
+                setSuggestionModel(defaults.commitModel)
+              }
+            }}
+          />
+          <span className="model-picker-title">{commitRunnerChoice === 'Local' ? 'Local commit' : 'Codex commit'}</span>
         </div>
-        <div className="git-change-list">
-          {status?.changes.map((change) => (
-            <div key={`${change.status}:${change.path}`} className="git-change-row">
-              <span className={`git-status-chip git-status-chip--${statusClassName(change.status)}`}>{formatGitStatus(change.status)}</span>
-              <span className="git-file-path truncate" title={change.path}>{change.path}</span>
-              <span className="git-stage-state">{formatGitStageState(change)}</span>
+        {commitRunnerChoice === 'Local' ? (
+          <>
+            <GlassDropdownSelect
+              label="Local AI Server"
+              value={selectedLocalProfileId}
+              options={localProfileOptions}
+              disabled={localProfiles.length === 0 || generating}
+              onChange={(profileId) => {
+                setLocalProfileId(profileId)
+                setLocalModelStatus(null)
+                setLocalModelError('')
+                setSuggestionModel((current) => ({ ...current, model: '' }))
+              }}
+            />
+            <div className="model-picker-head">
+              <span className="model-picker-title">Model</span>
+              <GlassDropdownSelect
+                label="Local commit model"
+                value={suggestionModel.model}
+                options={localModelDropdownOptions}
+                disabled={!selectedLocalProfile || loadingLocalModels || localModelOptions.length === 0 || generating}
+                onChange={(model) => {
+                  const metadata = localModelOptions.find((item) => item.id === model)
+                  setSuggestionModel((current) => ({
+                    ...current,
+                    model,
+                    effort: metadata?.supportsReasoningEffort ? current.effort || 'low' : '',
+                    speed: normalizeLocalContextSize(current.speed),
+                  }))
+                }}
+              />
             </div>
-          ))}
-          {!loading && status && status.changes.length === 0 && <div className="empty-state">Working tree is clean.</div>}
-          {loading && !status && <div className="empty-state">Loading git changes...</div>}
-        </div>
-        {status?.diffStat && <GitDiffStat diffStat={status.diffStat} />}
-      </section>
+            <div className={`model-options-row model-options-row--local ${selectedLocalModelMetadata?.supportsReasoningEffort ? '' : 'model-options-row--single'}`}>
+              {selectedLocalModelMetadata?.supportsReasoningEffort && (
+                <SegmentedRadio
+                  label="Effort"
+                  name="Git-Local-commit-effort"
+                  value={suggestionModel.effort || 'low'}
+                  disabled={generating}
+                  options={[
+                    { label: 'Low', value: 'low' },
+                    { label: 'Medium', value: 'medium' },
+                    { label: 'High', value: 'high' },
+                  ]}
+                  onChange={(effort) => setSuggestionModel((current) => ({ ...current, effort }))}
+                />
+              )}
+              <ContextSizePicker
+                label="Context size"
+                helpText={localContextInfo}
+                name="Git-Local-commit-context"
+                value={normalizeLocalContextSize(suggestionModel.speed)}
+                options={localContextOptions}
+                onChange={(speed) => setSuggestionModel((current) => ({ ...current, speed }))}
+              />
+            </div>
+            {(localModelError || localContextWarning) && (
+              <span className="error-text">{localModelError || localContextWarning}</span>
+            )}
+          </>
+        ) : (
+          <ModelPicker label="Codex commit" options={config.models} value={suggestionModel} onChange={setSuggestionModel} disabled={clean || generating} />
+        )}
+        <GlassButton
+          variant="secondary"
+          type="button"
+          onClick={saveCommitModelDefault}
+          disabled={!commitModelChanged || savingDefault || generating || localCommitInvalid}
+        >
+          {savingDefault ? <RefreshCcw size={15} className="action-spinner" /> : <Check size={15} />}
+          {savingDefault ? 'Saving default...' : 'Save commit defaults'}
+        </GlassButton>
+        <GlassButton
+          variant="primary"
+          type="button"
+          onClick={commitWithCodex}
+          disabled={clean || generating || !suggestionModel.model.trim() || localCommitInvalid}
+        >
+          {generating ? <RefreshCcw size={15} className="action-spinner" /> : <GitCommit size={15} />}
+          {generating ? 'Committing...' : commitRunnerChoice === 'Local' ? 'Commit with Local Codex' : 'Commit with Codex'}
+        </GlassButton>
+      </div>
 
       <form className="git-commit-form" onSubmit={commit}>
         <FieldLabel label="Commit message">
@@ -7305,17 +7882,24 @@ function GitPanel({
 
       {actionOutput && <GitActionOutput output={actionOutput} />}
 
-      <div className="git-ai-box">
-        <ModelPicker label="Codex commit" options={config.models} value={suggestionModel} onChange={setSuggestionModel} disabled={clean || generating} />
-        <GlassButton variant="secondary" type="button" onClick={saveCommitModelDefault} disabled={!commitModelChanged || savingDefault || generating}>
-          {savingDefault ? <RefreshCcw size={15} className="action-spinner" /> : <Check size={15} />}
-          {savingDefault ? 'Saving default...' : 'Save model as default'}
-        </GlassButton>
-        <GlassButton variant="primary" type="button" onClick={commitWithCodex} disabled={clean || generating || !suggestionModel.model.trim()}>
-          {generating ? <RefreshCcw size={15} className="action-spinner" /> : <GitCommit size={15} />}
-          {generating ? 'Committing...' : 'Commit with Codex'}
-        </GlassButton>
-      </div>
+      <section className="git-changes-section" aria-label="Git changes">
+        <div className="run-output-head">
+          <span>Git changes</span>
+          <span>{loading ? 'refreshing' : formatFileCount(changeCount)}</span>
+        </div>
+        <div className="git-change-list">
+          {status?.changes.map((change) => (
+            <div key={`${change.status}:${change.path}`} className="git-change-row">
+              <span className={`git-status-chip git-status-chip--${statusClassName(change.status)}`}>{formatGitStatus(change.status)}</span>
+              <span className="git-file-path truncate" title={change.path}>{change.path}</span>
+              <span className="git-stage-state">{formatGitStageState(change)}</span>
+            </div>
+          ))}
+          {!loading && status && status.changes.length === 0 && <div className="empty-state">Working tree is clean.</div>}
+          {loading && !status && <div className="empty-state">Loading git changes...</div>}
+        </div>
+        {status?.diffStat && <GitDiffStat diffStat={status.diffStat} />}
+      </section>
     </div>
   )
 }

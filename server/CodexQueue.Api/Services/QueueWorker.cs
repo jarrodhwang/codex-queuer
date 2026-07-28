@@ -628,6 +628,7 @@ public sealed class QueueWorker(
     {
         CodexRequest request;
         CodexRun run;
+        AiProviderProfile? executionProviderProfile = null;
         await using (var scope = scopeFactory.CreateAsyncScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -639,6 +640,14 @@ public sealed class QueueWorker(
                 .Include(x => x.Runs)
                 .FirstAsync(x => x.Id == requestId, cancellationToken);
             run = GetLatestRunOfKind(request.Runs, kind) ?? throw new InvalidOperationException("Request run was not found.");
+            if (run.ProviderProfileId.HasValue)
+            {
+                executionProviderProfile = run.ProviderProfileId == request.ProviderProfileId
+                    ? request.ProviderProfile
+                    : await db.AiProviderProfiles.FirstOrDefaultAsync(
+                        x => x.Id == run.ProviderProfileId.Value,
+                        cancellationToken);
+            }
             request.Status = QueueStatus.Running;
             request.StartedAt ??= DateTimeOffset.UtcNow;
             request.FinishedAt = null;
@@ -666,7 +675,13 @@ public sealed class QueueWorker(
             if (kind == RunKind.Commit)
             {
                 await AppendOutputAsync(run.Id, "Preparing commit run..." + Environment.NewLine, CancellationToken.None);
-                var commitResult = await RunCodexCommitSessionAsync(request, run, machine, projectPath, cancellationToken);
+                var commitResult = await RunCodexCommitSessionAsync(
+                    request,
+                    run,
+                    machine,
+                    projectPath,
+                    executionProviderProfile,
+                    cancellationToken);
                 if (TryParseUsageLimit(commitResult, out var commitUsageLimit))
                 {
                     await MarkUsageLimitedAsync(request, run, kind, commitResult, commitUsageLimit, cancellationToken);
@@ -707,7 +722,8 @@ public sealed class QueueWorker(
                     machine,
                     projectPath,
                     prompt,
-                    attachments.ImagePaths),
+                    attachments.ImagePaths,
+                    ProviderProfile: executionProviderProfile),
                 chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
                 cancellationToken);
 
@@ -783,6 +799,7 @@ public sealed class QueueWorker(
         CodexRun run,
         TargetMachine machine,
         string projectPath,
+        AiProviderProfile? executionProviderProfile,
         CancellationToken cancellationToken)
     {
         var beforeCommitHead = await ReadGitHeadAsync(machine, projectPath, cancellationToken);
@@ -796,7 +813,7 @@ public sealed class QueueWorker(
 
         await AppendOutputAsync(run.Id, "Starting Codex commit session..." + Environment.NewLine, CancellationToken.None);
         var prompt = BuildProjectScopedPrompt(projectPath, BuildSeparateCommitPrompt());
-        var selectedRunner = agentRunnerResolver.Resolve(request.ExecutionRunner);
+        var selectedRunner = agentRunnerResolver.Resolve(run.ExecutionRunner);
         var agentResult = await selectedRunner.RunAsync(
             new QueueAgentRunContext(
                 request,
@@ -805,7 +822,8 @@ public sealed class QueueWorker(
                 projectPath,
                 prompt,
                 ImagePaths: null,
-                StartNewSession: true),
+                StartNewSession: true,
+                ProviderProfile: executionProviderProfile),
             chunk => AppendOutputAsync(run.Id, chunk, CancellationToken.None),
             cancellationToken);
         var result = new CommandResult(
@@ -1277,10 +1295,9 @@ public sealed class QueueWorker(
         {
             RequestId = request.Id,
             Kind = RunKind.Commit,
-            ExecutionRunner = request.ExecutionRunner,
-            ProviderProfileId = request.ProviderProfileId,
-            ProviderProfileName = request.ProviderProfile?.Name,
-            ProviderSource = request.ProviderProfile?.Source,
+            ExecutionRunner = request.CommitExecutionRunner ?? request.ExecutionRunner,
+            ProviderProfileId = request.CommitProviderProfileId
+                ?? (request.CommitExecutionRunner is null ? request.ProviderProfileId : null),
             Status = QueueStatus.Queued,
             CreatedAt = DateTimeOffset.UtcNow
         });

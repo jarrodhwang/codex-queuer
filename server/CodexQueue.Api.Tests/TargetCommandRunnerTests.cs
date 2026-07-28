@@ -62,6 +62,30 @@ public sealed class TargetCommandRunnerTests
                 65_536));
 
         Assert.Equal(1, arguments.Count(argument => argument == "--search"));
+        Assert.Equal("--search", arguments[0]);
+        Assert.Equal("exec", arguments[1]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BuildCodexArguments_SearchEnabledIsGlobalForCloudRuns(bool resume)
+    {
+        var arguments = TargetCommandRunner.BuildCodexArguments(
+            "/workspace/project",
+            "gpt-5.3-codex-spark",
+            "medium",
+            modelSpeed: null,
+            codexSessionId: resume ? "cloud-session-id" : null,
+            imagePaths: null,
+            PermissionMode.ApproveForMe,
+            internetSearchEnabled: true,
+            disableWindowsSandbox: false);
+
+        Assert.Equal("--search", arguments[0]);
+        Assert.Equal("exec", arguments[1]);
+        Assert.Equal(resume ? "resume" : "--json", arguments[2]);
+        Assert.Equal(1, arguments.Count(argument => argument == "--search"));
     }
 
     [Theory]

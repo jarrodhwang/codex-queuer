@@ -524,34 +524,6 @@ public static class ApiEndpoints
                 telemetry.MemoryName));
         });
 
-        api.MapGet("/provider-profiles/{id:guid}/power-mode", async (
-            Guid id,
-            AppDbContext db,
-            ITargetCommandRunner runner,
-            CancellationToken cancellationToken) =>
-        {
-            var machine = await GetProviderMachineAsync(id, db, cancellationToken);
-            if (machine is null) return Results.BadRequest(new { error = "Select the machine that hosts this AI server first." });
-            var result = await runner.RunShellAsync(machine, "", PowerModeReadCommand(machine), _ => Task.CompletedTask, cancellationToken);
-            return Results.Ok(new MachinePowerModeDto(machine.Id, machine.Name, result.Success, result.Success ? ParsePowerMode(machine, result.Output) : null, result.Success ? null : Truncate(result.Output, 2_000)));
-        });
-
-        api.MapPost("/provider-profiles/{id:guid}/power-mode", async (
-            Guid id,
-            SetMachinePowerModeRequest input,
-            AppDbContext db,
-            ITargetCommandRunner runner,
-            CancellationToken cancellationToken) =>
-        {
-            var machine = await GetProviderMachineAsync(id, db, cancellationToken);
-            if (machine is null) return Results.BadRequest(new { error = "Select the machine that hosts this AI server first." });
-            var mode = input.Mode?.Trim().ToLowerInvariant();
-            if (mode is not ("power-saver" or "balanced" or "performance")) return Results.BadRequest(new { error = "Power mode must be power-saver, balanced, or performance." });
-            if (machine.Platform == MachinePlatform.MacOs) return Results.BadRequest(new { error = "Power mode control is not available for macOS machines." });
-            var result = await runner.RunShellAsync(machine, "", PowerModeSetCommand(machine, mode), _ => Task.CompletedTask, cancellationToken);
-            return Results.Ok(new MachinePowerModeDto(machine.Id, machine.Name, result.Success, result.Success ? mode : null, result.Success ? null : Truncate(result.Output, 2_000)));
-        });
-
         api.MapGet("/machines/{id:guid}/usage", async (Guid id, AppDbContext db, ITargetCommandRunner runner, CancellationToken cancellationToken) =>
         {
             var machine = await db.Machines.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
@@ -748,6 +720,9 @@ public static class ApiEndpoints
                 DefaultGenerateCommit = input.DefaultPermissionMode != PermissionMode.ReadOnly && (input.DefaultGenerateCommit ?? true),
                 DefaultSeparateCommitSession = input.DefaultPermissionMode != PermissionMode.ReadOnly && (input.DefaultSeparateCommitSession ?? false),
                 DefaultPermissionMode = input.DefaultPermissionMode ?? PermissionMode.ApproveForMe,
+                DefaultInternetSearchEnabled = input.DefaultInternetSearchEnabled ?? false,
+                DefaultCommitExecutionRunner = input.DefaultCommitExecutionRunner,
+                DefaultCommitLocalProviderProfileId = input.DefaultCommitLocalProviderProfileId,
                 DefaultExecutionRunner = input.DefaultExecutionRunner ?? ExecutionRunner.CodexCli,
                 DefaultLocalProviderProfileId = localDefaults.ProviderProfileId,
                 DefaultLocalModel = localDefaults.Model,
@@ -881,6 +856,9 @@ public static class ApiEndpoints
             project.DefaultGenerateCommit = input.DefaultPermissionMode != PermissionMode.ReadOnly && (input.DefaultGenerateCommit ?? true);
             project.DefaultSeparateCommitSession = input.DefaultPermissionMode != PermissionMode.ReadOnly && (input.DefaultSeparateCommitSession ?? false);
             project.DefaultPermissionMode = input.DefaultPermissionMode ?? PermissionMode.ApproveForMe;
+            project.DefaultInternetSearchEnabled = input.DefaultInternetSearchEnabled ?? false;
+            project.DefaultCommitExecutionRunner = input.DefaultCommitExecutionRunner;
+            project.DefaultCommitLocalProviderProfileId = input.DefaultCommitLocalProviderProfileId;
             project.DefaultExecutionRunner = requestedDefaultRunner;
             project.DefaultLocalProviderProfileId = localDefaults.ProviderProfileId;
             project.DefaultLocalModel = localDefaults.Model;
@@ -1047,7 +1025,14 @@ public static class ApiEndpoints
             }
         });
 
-        api.MapPost("/projects/{id:guid}/git/codex-commit", async (Guid id, CodexGitCommitRequest input, AppDbContext db, ITargetCommandRunner runner, CancellationToken cancellationToken) =>
+        api.MapPost("/projects/{id:guid}/git/codex-commit", async (
+            Guid id,
+            CodexGitCommitRequest input,
+            AppDbContext db,
+            ITargetCommandRunner runner,
+            IAiProviderService providers,
+            IQueueAgentRunnerResolver agentRunnerResolver,
+            CancellationToken cancellationToken) =>
         {
             var project = await LoadProjectWithMachineAsync(id, db, cancellationToken);
             if (project is null)
@@ -1063,6 +1048,40 @@ public static class ApiEndpoints
             if (string.IsNullOrWhiteSpace(input.Model))
             {
                 return Results.BadRequest(new { error = "Model is required." });
+            }
+
+            var executionRunner = input.ExecutionRunner ?? ExecutionRunner.CodexCli;
+            RunnerSelectionValidation? localSelection = null;
+            string? localEffort = null;
+            if (executionRunner == ExecutionRunner.OpenHandsCli)
+            {
+                localSelection = await ValidateRunnerSelectionAsync(
+                    executionRunner,
+                    input.ProviderProfileId,
+                    input.Model,
+                    input.ModelSpeed,
+                    PermissionMode.FullAccess,
+                    project.Machine,
+                    project.Path,
+                    db,
+                    providers,
+                    cancellationToken);
+                if (localSelection.Error is not null)
+                {
+                    return Results.BadRequest(new { error = localSelection.Error });
+                }
+
+                localEffort = NormalizeLocalCodexReasoningEffort(input.ModelEffort);
+                if (!string.IsNullOrWhiteSpace(input.ModelEffort) && localEffort is null)
+                {
+                    return Results.BadRequest(new { error = "Local reasoning effort must be low, medium, or high." });
+                }
+
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            else if (executionRunner != ExecutionRunner.CodexCli)
+            {
+                return Results.BadRequest(new { error = "Selected execution runner is invalid." });
             }
 
             try
@@ -1081,24 +1100,83 @@ public static class ApiEndpoints
 
                 var beforeHead = await ReadGitHeadAsync(runner, project.Machine, project.Path, cancellationToken);
                 var prompt = BuildProjectScopedPrompt(project.Path, GitCommitMessageHelper.BuildCommitPrompt());
-                var result = await runner.RunCodexAsync(
-                    project.Machine,
-                    project.Path,
-                    input.Model.Trim(),
-                    NormalizeEffort(input.ModelEffort, input.Model),
-                    NormalizeOptionalSpeed(input.ModelSpeed),
-                    null,
-                    null,
-                    prompt,
-                    PermissionMode.FullAccess,
-                    internetSearchEnabled: false,
-                    _ => Task.CompletedTask,
-                    cancellationToken);
-
-                var output = StripCommandPreview(result.Output).Trim();
-                if (!result.Success)
+                int exitCode;
+                string commandPreview;
+                string output;
+                bool succeeded;
+                if (localSelection is not null)
                 {
-                    return Results.BadRequest(new { error = string.IsNullOrWhiteSpace(output) ? "Codex commit failed." : output });
+                    var request = new CodexRequest
+                    {
+                        ProjectId = project.Id,
+                        Project = project,
+                        MachineId = project.MachineId,
+                        Machine = project.Machine,
+                        ExecutionRunner = executionRunner,
+                        ProviderProfileId = localSelection.Profile?.Id,
+                        ProviderProfile = localSelection.Profile,
+                        Model = localSelection.Model,
+                        ModelEffort = localEffort,
+                        ModelSpeed = localSelection.LocalCodexContextWindow?.ToString(),
+                        Prompt = prompt,
+                        PermissionMode = PermissionMode.FullAccess,
+                        InternetSearchEnabled = false
+                    };
+                    var run = new CodexRun
+                    {
+                        Request = request,
+                        Kind = RunKind.Commit,
+                        ExecutionRunner = executionRunner,
+                        ProviderProfileId = localSelection.Profile?.Id,
+                        ProviderProfileName = localSelection.Profile?.Name,
+                        ProviderSource = localSelection.Profile?.Source,
+                        Model = localSelection.Model,
+                        ModelEffort = localEffort,
+                        ModelSpeed = localSelection.LocalCodexContextWindow?.ToString()
+                    };
+                    var localResult = await agentRunnerResolver
+                        .Resolve(executionRunner)
+                        .RunAsync(
+                            new QueueAgentRunContext(
+                                request,
+                                run,
+                                project.Machine,
+                                project.Path,
+                                prompt,
+                                ImagePaths: null,
+                                StartNewSession: true,
+                                ProviderProfile: localSelection.Profile),
+                            _ => Task.CompletedTask,
+                            cancellationToken);
+                    exitCode = localResult.ExitCode;
+                    commandPreview = localResult.CommandPreview;
+                    output = StripCommandPreview(localResult.Output).Trim();
+                    succeeded = localResult.Success;
+                }
+                else
+                {
+                    var codexResult = await runner.RunCodexAsync(
+                        project.Machine,
+                        project.Path,
+                        input.Model.Trim(),
+                        NormalizeEffort(input.ModelEffort, input.Model),
+                        NormalizeOptionalSpeed(input.ModelSpeed),
+                        null,
+                        null,
+                        prompt,
+                        PermissionMode.FullAccess,
+                        internetSearchEnabled: false,
+                        _ => Task.CompletedTask,
+                        cancellationToken);
+                    exitCode = codexResult.ExitCode;
+                    commandPreview = codexResult.CommandPreview;
+                    output = StripCommandPreview(codexResult.Output).Trim();
+                    succeeded = codexResult.Success;
+                }
+
+                if (!succeeded)
+                {
+                    return Results.BadRequest(new { error = string.IsNullOrWhiteSpace(output) ? "AI commit failed." : output });
                 }
 
                 var afterHead = await ReadGitHeadAsync(runner, project.Machine, project.Path, cancellationToken);
@@ -1108,16 +1186,17 @@ public static class ApiEndpoints
                     return Results.Ok(new GitCommitDto(
                         true,
                         GitCommitResultFormatter.Format(afterHead, commitInfo.Message ?? GitCommitMessageHelper.ExtractFromOutput(output)),
-                        result.ExitCode,
-                        result.CommandPreview,
+                        exitCode,
+                        commandPreview,
                         afterHead));
                 }
 
                 var afterStatusResult = await ReadGitStatusPorcelainAsync(runner, project.Machine, project.Path, cancellationToken);
                 var afterStatusOutput = afterStatusResult.Success ? StripCommandPreview(afterStatusResult.Output).Trim() : statusOutput;
+                var agentLabel = localSelection is null ? "Codex" : "Local Codex";
                 var error = string.IsNullOrWhiteSpace(afterStatusOutput)
-                    ? "Codex finished without creating a git commit."
-                    : "Codex finished without creating a git commit; project changes remain.";
+                    ? agentLabel + " finished without creating a git commit."
+                    : agentLabel + " finished without creating a git commit; project changes remain.";
                 var errorOutput = string.IsNullOrWhiteSpace(output) ? error : output + Environment.NewLine + error;
                 return Results.BadRequest(new { error = errorOutput });
             }
@@ -1378,6 +1457,26 @@ public static class ApiEndpoints
             {
                 return Results.BadRequest(new { error = runnerValidation.Error });
             }
+            RunnerSelectionValidation? commitValidation = null;
+            var commitExecutionRunner = input.CommitExecutionRunner ?? input.ExecutionRunner;
+            if (input.GenerateCommit && input.SeparateCommitSession)
+            {
+                commitValidation = await ValidateRunnerSelectionAsync(
+                    commitExecutionRunner,
+                    input.CommitProviderProfileId,
+                    input.CommitModel ?? input.Model,
+                    input.CommitModelSpeed ?? input.ModelSpeed,
+                    input.PermissionMode,
+                    project.Machine,
+                    project.Path,
+                    db,
+                    providers,
+                    cancellationToken);
+                if (commitValidation.Error is not null)
+                {
+                    return Results.BadRequest(new { error = "Separate commit session: " + commitValidation.Error });
+                }
+            }
 
             QueueTab? queueTab = null;
             if (input.QueueTabId.HasValue)
@@ -1431,15 +1530,19 @@ public static class ApiEndpoints
                     && input.SeparateCommitSession,
                 PermissionMode = input.PermissionMode,
                 InternetSearchEnabled = input.InternetSearchEnabled,
-                CommitModel = input.ExecutionRunner == ExecutionRunner.CodexCli && !string.IsNullOrWhiteSpace(input.CommitModel)
+                CommitExecutionRunner = commitExecutionRunner,
+                CommitProviderProfileId = commitValidation?.Profile?.Id,
+                CommitModel = commitValidation?.Model ?? (!string.IsNullOrWhiteSpace(input.CommitModel)
                     ? input.CommitModel.Trim()
-                    : null,
-                CommitModelEffort = input.ExecutionRunner == ExecutionRunner.CodexCli
+                    : null),
+                CommitModelEffort = commitExecutionRunner == ExecutionRunner.CodexCli
                     ? NormalizeEffort(input.CommitModelEffort, input.CommitModel ?? input.Model)
+                    : commitValidation?.SupportsReasoningEffort == true
+                        ? NormalizeLocalCodexReasoningEffort(input.CommitModelEffort)
                     : null,
-                CommitModelSpeed = input.ExecutionRunner == ExecutionRunner.CodexCli
+                CommitModelSpeed = commitExecutionRunner == ExecutionRunner.CodexCli
                     ? NormalizeSpeed(input.CommitModelSpeed)
-                    : null,
+                    : commitValidation?.LocalCodexContextWindow?.ToString(),
                 ExecutionRunner = input.ExecutionRunner,
                 ProviderProfileId = runnerValidation.Profile?.Id,
                 ProviderProfile = runnerValidation.Profile,
@@ -1537,6 +1640,26 @@ public static class ApiEndpoints
             {
                 return Results.BadRequest(new { error = runnerValidation.Error });
             }
+            RunnerSelectionValidation? commitValidation = null;
+            var commitExecutionRunner = input.CommitExecutionRunner ?? executionRunner;
+            if (input.GenerateCommit && input.SeparateCommitSession)
+            {
+                commitValidation = await ValidateRunnerSelectionAsync(
+                    commitExecutionRunner,
+                    input.CommitProviderProfileId,
+                    input.CommitModel ?? input.Model,
+                    input.CommitModelSpeed ?? input.ModelSpeed,
+                    input.PermissionMode,
+                    request.Machine,
+                    request.Project?.Path,
+                    db,
+                    providers,
+                    cancellationToken);
+                if (commitValidation.Error is not null)
+                {
+                    return Results.BadRequest(new { error = "Separate commit session: " + commitValidation.Error });
+                }
+            }
 
             if (input.Attachments is not null)
             {
@@ -1584,15 +1707,17 @@ public static class ApiEndpoints
                 && input.SeparateCommitSession;
             request.PermissionMode = input.PermissionMode;
             request.InternetSearchEnabled = input.InternetSearchEnabled;
-            request.CommitModel = executionRunner == ExecutionRunner.CodexCli && !string.IsNullOrWhiteSpace(input.CommitModel)
-                ? input.CommitModel.Trim()
-                : null;
-            request.CommitModelEffort = executionRunner == ExecutionRunner.CodexCli
+            request.CommitExecutionRunner = commitExecutionRunner;
+            request.CommitProviderProfileId = commitValidation?.Profile?.Id;
+            request.CommitModel = commitValidation?.Model ?? NormalizeOptional(input.CommitModel);
+            request.CommitModelEffort = commitExecutionRunner == ExecutionRunner.CodexCli
                 ? NormalizeEffort(input.CommitModelEffort, input.CommitModel ?? input.Model)
-                : null;
-            request.CommitModelSpeed = executionRunner == ExecutionRunner.CodexCli
+                : commitValidation?.SupportsReasoningEffort == true
+                    ? NormalizeLocalCodexReasoningEffort(input.CommitModelEffort)
+                    : null;
+            request.CommitModelSpeed = commitExecutionRunner == ExecutionRunner.CodexCli
                 ? NormalizeSpeed(input.CommitModelSpeed)
-                : null;
+                : commitValidation?.LocalCodexContextWindow?.ToString();
             request.ExecutionRunner = executionRunner;
             request.ProviderProfileId = runnerValidation.Profile?.Id;
             request.ProviderProfile = runnerValidation.Profile;
@@ -1876,43 +2001,6 @@ public static class ApiEndpoints
         machine.WorkingRoot = string.IsNullOrWhiteSpace(input.WorkingRoot)
             ? DefaultPaths.DefaultWorkingRoot(machine.Kind, machine.Platform)
             : input.WorkingRoot.Trim();
-    }
-
-    private static async Task<TargetMachine?> GetProviderMachineAsync(
-        Guid profileId,
-        AppDbContext db,
-        CancellationToken cancellationToken) =>
-        await db.AiProviderProfiles
-            .AsNoTracking()
-            .Where(x => x.Id == profileId)
-            .Select(x => x.ServerMachine)
-            .FirstOrDefaultAsync(cancellationToken);
-
-    private static string PowerModeReadCommand(TargetMachine machine) => machine.TargetsWindows()
-        ? "powercfg /getactivescheme"
-        : "command -v powerprofilesctl >/dev/null 2>&1 || { echo 'powerprofilesctl is not installed.' >&2; exit 127; }; powerprofilesctl get";
-
-    private static string PowerModeSetCommand(TargetMachine machine, string mode) => machine.TargetsWindows()
-        ? "powercfg /setactive " + (mode switch
-            {
-                "power-saver" => "SCHEME_MIN",
-                "balanced" => "SCHEME_BALANCED",
-                _ => "SCHEME_MAX",
-            })
-        : "sudo -n powerprofilesctl set " + mode;
-
-    private static string? ParsePowerMode(TargetMachine machine, string output)
-    {
-        var value = output.Trim().ToLowerInvariant();
-        if (machine.TargetsWindows())
-        {
-            if (value.Contains("scheme_min", StringComparison.Ordinal)) return "power-saver";
-            if (value.Contains("scheme_max", StringComparison.Ordinal)) return "performance";
-            if (value.Contains("scheme_balanced", StringComparison.Ordinal)) return "balanced";
-            return null;
-        }
-
-        return value is "power-saver" or "balanced" or "performance" ? value : null;
     }
 
     private static void Apply(SaveAiProviderProfileRequest input, AiProviderProfile profile)

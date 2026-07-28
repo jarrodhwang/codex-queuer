@@ -352,7 +352,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                     "powershell",
                     new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command },
                     projectPath,
-                    BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, localProvider),
+                    BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, internetSearchEnabled, localProvider),
                     onOutput,
                     cancellationToken,
                     firstProcessOutputTimeout: CodexFirstOutputTimeout,
@@ -366,7 +366,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                 "codex",
                 arguments,
                 projectPath,
-                BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, localProvider),
+                BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, internetSearchEnabled, localProvider),
                 onOutput,
                 cancellationToken,
                 firstProcessOutputTimeout: CodexFirstOutputTimeout,
@@ -398,7 +398,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             return RunSshAsync(
                 machine,
                 BuildPowerShellRemoteCommand(windowsCommand),
-                "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, localProvider),
+                "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, internetSearchEnabled, localProvider),
                 onOutput,
                 cancellationToken,
                 firstProcessOutputTimeout: CodexFirstOutputTimeout,
@@ -442,7 +442,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         return RunSshAsync(
             machine,
             remoteCommand,
-            "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, localProvider),
+            "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, internetSearchEnabled, localProvider),
             onOutput,
             cancellationToken,
             firstProcessOutputTimeout: CodexFirstOutputTimeout,
@@ -1367,7 +1367,14 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         bool disableWindowsSandbox,
         LocalCodexProviderOptions? localProvider = null)
     {
-        var arguments = new List<string> { "exec" };
+        var arguments = new List<string>();
+        if (internetSearchEnabled)
+        {
+            // `--search` is a Codex-wide flag. Placing it after `exec` makes
+            // current CLI releases reject it as an unexpected exec argument.
+            arguments.Add("--search");
+        }
+        arguments.Add("exec");
 
         if (!string.IsNullOrWhiteSpace(codexSessionId))
         {
@@ -1385,11 +1392,6 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         arguments.Add("-m");
         arguments.Add(model);
         arguments.Add("--skip-git-repo-check");
-        if (internetSearchEnabled)
-        {
-            arguments.Add("--search");
-        }
-
         // Approval policy used to be exposed by `codex exec -a`, but newer CLI releases
         // removed that option. The config override is supported by both new sessions and
         // `exec resume`, so use one stable representation on every target OS.
@@ -1456,13 +1458,14 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         string? modelEffort,
         string? modelSpeed,
         string? codexSessionId,
+        bool internetSearchEnabled,
         LocalCodexProviderOptions? localProvider)
     {
         var parts = new List<string>
         {
             string.IsNullOrWhiteSpace(codexSessionId)
-                ? "codex exec -m " + model
-                : "codex exec resume -m " + model
+                ? "codex " + (internetSearchEnabled ? "--search " : "") + "exec -m " + model
+                : "codex " + (internetSearchEnabled ? "--search " : "") + "exec resume -m " + model
         };
         if (localProvider is not null)
         {

@@ -41,6 +41,8 @@ public static class DbInitializer
         await EnsureColumnAsync(db, "Requests", "SeparateCommitSession", "ALTER TABLE \"Requests\" ADD COLUMN \"SeparateCommitSession\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "PermissionMode", "ALTER TABLE \"Requests\" ADD COLUMN \"PermissionMode\" TEXT NOT NULL DEFAULT 'ApproveForMe'", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "InternetSearchEnabled", "ALTER TABLE \"Requests\" ADD COLUMN \"InternetSearchEnabled\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnAsync(db, "Requests", "CommitExecutionRunner", "ALTER TABLE \"Requests\" ADD COLUMN \"CommitExecutionRunner\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "Requests", "CommitProviderProfileId", "ALTER TABLE \"Requests\" ADD COLUMN \"CommitProviderProfileId\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "AttachmentsJson", "ALTER TABLE \"Requests\" ADD COLUMN \"AttachmentsJson\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "RetryAfter", "ALTER TABLE \"Requests\" ADD COLUMN \"RetryAfter\" TEXT NULL", cancellationToken);
         await EnsureColumnAsync(db, "Requests", "RetryReason", "ALTER TABLE \"Requests\" ADD COLUMN \"RetryReason\" TEXT NULL", cancellationToken);
@@ -57,6 +59,9 @@ public static class DbInitializer
         await EnsureColumnAsync(db, "Projects", "DefaultGenerateCommit", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultGenerateCommit\" INTEGER NOT NULL DEFAULT 1", cancellationToken);
         await EnsureColumnAsync(db, "Projects", "DefaultSeparateCommitSession", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultSeparateCommitSession\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnAsync(db, "Projects", "DefaultPermissionMode", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultPermissionMode\" TEXT NOT NULL DEFAULT 'ApproveForMe'", cancellationToken);
+        await EnsureColumnAsync(db, "Projects", "DefaultInternetSearchEnabled", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultInternetSearchEnabled\" INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnAsync(db, "Projects", "DefaultCommitExecutionRunner", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultCommitExecutionRunner\" TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(db, "Projects", "DefaultCommitLocalProviderProfileId", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultCommitLocalProviderProfileId\" TEXT NULL REFERENCES \"AiProviderProfiles\" (\"Id\") ON DELETE SET NULL", cancellationToken);
         await EnsureColumnAsync(db, "Projects", "DefaultExecutionRunner", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultExecutionRunner\" TEXT NOT NULL DEFAULT 'CodexCli'", cancellationToken);
         await EnsureColumnAsync(db, "Projects", "DefaultLocalProviderProfileId", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultLocalProviderProfileId\" TEXT NULL REFERENCES \"AiProviderProfiles\" (\"Id\") ON DELETE SET NULL", cancellationToken);
         await EnsureColumnAsync(db, "Projects", "DefaultLocalModel", "ALTER TABLE \"Projects\" ADD COLUMN \"DefaultLocalModel\" TEXT NULL", cancellationToken);

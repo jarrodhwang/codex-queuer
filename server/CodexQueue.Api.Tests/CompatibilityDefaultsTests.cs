@@ -20,6 +20,8 @@ public sealed class CompatibilityDefaultsTests
         Assert.Equal(ExecutionRunner.CodexCli, new CodexRequest().ExecutionRunner);
         Assert.Equal(ExecutionRunner.CodexCli, new CodexRun().ExecutionRunner);
         Assert.Equal(LocalAiServerType.Ollama, new AiProviderProfile().LocalAiServerType);
+        Assert.False(new Project().DefaultInternetSearchEnabled);
+        Assert.False(new CodexRequest().InternetSearchEnabled);
     }
 
     [Fact]

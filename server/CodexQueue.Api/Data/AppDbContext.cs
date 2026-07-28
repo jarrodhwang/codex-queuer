@@ -40,6 +40,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.DefaultGenerateCommit);
             entity.Property(x => x.DefaultSeparateCommitSession);
             entity.Property(x => x.DefaultPermissionMode).HasConversion<string>().HasMaxLength(32);
+            entity.Property(x => x.DefaultInternetSearchEnabled);
+            entity.Property(x => x.DefaultCommitExecutionRunner).HasConversion<string>().HasMaxLength(32);
             entity.Property(x => x.DefaultExecutionRunner).HasConversion<string>().HasMaxLength(32);
             entity.Property(x => x.DefaultLocalModel).HasMaxLength(256);
             entity.Property(x => x.DefaultLocalModelEffort).HasMaxLength(32);
@@ -94,6 +96,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.CommitModel).HasMaxLength(256);
             entity.Property(x => x.CommitModelEffort).HasMaxLength(32);
             entity.Property(x => x.CommitModelSpeed).HasMaxLength(32);
+            entity.Property(x => x.CommitExecutionRunner).HasConversion<string>().HasMaxLength(32);
             entity.Property(x => x.Status).HasConversion<string>().HasMaxLength(32);
             entity.Property(x => x.RetryAfter);
             entity.Property(x => x.RetryReason).HasMaxLength(512);

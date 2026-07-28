@@ -41,6 +41,9 @@ public sealed record ProjectDto(
     bool DefaultGenerateCommit,
     bool DefaultSeparateCommitSession,
     PermissionMode DefaultPermissionMode,
+    bool DefaultInternetSearchEnabled,
+    ExecutionRunner? DefaultCommitExecutionRunner,
+    Guid? DefaultCommitLocalProviderProfileId,
     ExecutionRunner DefaultExecutionRunner,
     Guid? DefaultLocalProviderProfileId,
     string? DefaultLocalModel,
@@ -68,7 +71,10 @@ public sealed record SaveProjectRequest(
     string? DefaultLocalModel,
     string? DefaultLocalModelEffort,
     string? DefaultLocalModelSpeed,
-    bool? SeparateQueuesByTab);
+    bool? SeparateQueuesByTab,
+    bool? DefaultInternetSearchEnabled = null,
+    ExecutionRunner? DefaultCommitExecutionRunner = null,
+    Guid? DefaultCommitLocalProviderProfileId = null);
 
 public sealed record QueueTabDto(
     Guid Id,
@@ -100,7 +106,9 @@ public sealed record CreateQueueRequest(
     ExecutionRunner ExecutionRunner = ExecutionRunner.CodexCli,
     Guid? ProviderProfileId = null,
     bool OpenHandsAlwaysApproveConfirmed = false,
-    bool InternetSearchEnabled = false);
+    bool InternetSearchEnabled = false,
+    ExecutionRunner? CommitExecutionRunner = null,
+    Guid? CommitProviderProfileId = null);
 
 public sealed record UpdateQueueRequest(
     string Prompt,
@@ -117,7 +125,9 @@ public sealed record UpdateQueueRequest(
     ExecutionRunner? ExecutionRunner = null,
     Guid? ProviderProfileId = null,
     bool OpenHandsAlwaysApproveConfirmed = false,
-    bool InternetSearchEnabled = false);
+    bool InternetSearchEnabled = false,
+    ExecutionRunner? CommitExecutionRunner = null,
+    Guid? CommitProviderProfileId = null);
 
 public sealed record ReorderQueueRequest(Guid ProjectId, IReadOnlyList<Guid> RequestIds);
 
@@ -196,7 +206,9 @@ public sealed record CodexRequestDto(
     AiProviderSource? ProviderSource,
     string? QueueWaitReason,
     bool OpenHandsAlwaysApproveConfirmed,
-    bool InternetSearchEnabled);
+    bool InternetSearchEnabled,
+    ExecutionRunner? CommitExecutionRunner,
+    Guid? CommitProviderProfileId);
 
 public sealed record SessionDto(
     Guid RunId,
@@ -232,7 +244,12 @@ public sealed record GitCommitRequest(string Message);
 
 public sealed record GitCommitDto(bool Success, string Output, int ExitCode, string CommandPreview, string? CommitSha);
 
-public sealed record CodexGitCommitRequest(string Model, string? ModelEffort, string? ModelSpeed);
+public sealed record CodexGitCommitRequest(
+    string Model,
+    string? ModelEffort,
+    string? ModelSpeed,
+    ExecutionRunner? ExecutionRunner = null,
+    Guid? ProviderProfileId = null);
 
 public sealed record SuggestGitCommitMessageRequest(string Model, string? ModelEffort, string? ModelSpeed);
 
@@ -243,15 +260,6 @@ public sealed record ModelOptionDto(string Label, string Model, bool SupportsPri
 public sealed record ApiConfigDto(bool RequiresToken, IReadOnlyList<ModelOptionDto> Models);
 
 public sealed record MachineTestDto(bool Success, string Output);
-
-public sealed record MachinePowerModeDto(
-    Guid MachineId,
-    string MachineName,
-    bool Available,
-    string? Mode,
-    string? Error);
-
-public sealed record SetMachinePowerModeRequest(string Mode);
 
 public sealed record GpuResourceTelemetryDto(
     int Index,

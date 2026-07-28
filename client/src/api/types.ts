@@ -58,6 +58,9 @@ export type Project = {
   defaultGenerateCommit?: boolean | null
   defaultSeparateCommitSession?: boolean | null
   defaultPermissionMode?: PermissionMode | null
+  defaultInternetSearchEnabled?: boolean | null
+  defaultCommitExecutionRunner?: ExecutionRunner | null
+  defaultCommitLocalProviderProfileId?: string | null
   defaultExecutionRunner?: ExecutionRunner | null
   defaultLocalProviderProfileId?: string | null
   defaultLocalModel?: string | null
@@ -81,6 +84,9 @@ export type SaveProjectRequest = {
   defaultGenerateCommit?: boolean | null
   defaultSeparateCommitSession?: boolean | null
   defaultPermissionMode?: PermissionMode | null
+  defaultInternetSearchEnabled?: boolean | null
+  defaultCommitExecutionRunner?: ExecutionRunner | null
+  defaultCommitLocalProviderProfileId?: string | null
   defaultExecutionRunner?: ExecutionRunner | null
   defaultLocalProviderProfileId?: string | null
   defaultLocalModel?: string | null
@@ -111,6 +117,8 @@ export type CreateQueueRequest = {
   separateCommitSession: boolean
   permissionMode: PermissionMode
   internetSearchEnabled?: boolean
+  commitExecutionRunner?: ExecutionRunner | null
+  commitProviderProfileId?: string | null
   executionRunner?: ExecutionRunner
   providerProfileId?: string | null
   openHandsAlwaysApproveConfirmed?: boolean
@@ -176,6 +184,8 @@ export type CodexRequest = {
   separateCommitSession: boolean
   permissionMode: PermissionMode
   internetSearchEnabled?: boolean
+  commitExecutionRunner?: ExecutionRunner | null
+  commitProviderProfileId?: string | null
   executionRunner?: ExecutionRunner
   providerProfileId?: string | null
   providerProfileName?: string | null
@@ -269,6 +279,8 @@ export type CodexGitCommitRequest = {
   model: string
   modelEffort?: string | null
   modelSpeed?: string | null
+  executionRunner?: ExecutionRunner | null
+  providerProfileId?: string | null
 }
 
 export type SuggestGitCommitMessageRequest = {
@@ -350,14 +362,6 @@ export type ProviderModelsResponse = {
 export type MachineTest = {
   success: boolean
   output: string
-}
-
-export type MachinePowerMode = {
-  machineId: string
-  machineName: string
-  available: boolean
-  mode?: string | null
-  error?: string | null
 }
 
 export type LocalCodexMachineTest = {

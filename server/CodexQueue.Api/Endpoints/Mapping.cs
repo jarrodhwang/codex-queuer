@@ -36,6 +36,9 @@ public static class Mapping
             project.DefaultGenerateCommit,
             project.DefaultSeparateCommitSession,
             project.DefaultPermissionMode,
+            project.DefaultInternetSearchEnabled,
+            project.DefaultCommitExecutionRunner,
+            project.DefaultCommitLocalProviderProfileId,
             project.DefaultExecutionRunner,
             project.DefaultLocalProviderProfileId,
             project.DefaultLocalModel,
@@ -96,7 +99,9 @@ public static class Mapping
             request.ProviderProfile?.Source,
             request.QueueWaitReason,
             request.OpenHandsAlwaysApproveConfirmed,
-            request.InternetSearchEnabled);
+            request.InternetSearchEnabled,
+            request.CommitExecutionRunner,
+            request.CommitProviderProfileId);
 
     public static CodexRunDto ToDto(this CodexRun run, bool includeOutput = true) =>
         new(

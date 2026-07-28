@@ -32,6 +32,9 @@ public sealed class Project
     public bool DefaultGenerateCommit { get; set; } = true;
     public bool DefaultSeparateCommitSession { get; set; }
     public PermissionMode DefaultPermissionMode { get; set; } = PermissionMode.ApproveForMe;
+    public bool DefaultInternetSearchEnabled { get; set; }
+    public ExecutionRunner? DefaultCommitExecutionRunner { get; set; }
+    public Guid? DefaultCommitLocalProviderProfileId { get; set; }
     public ExecutionRunner DefaultExecutionRunner { get; set; } = ExecutionRunner.CodexCli;
     public Guid? DefaultLocalProviderProfileId { get; set; }
     public AiProviderProfile? DefaultLocalProviderProfile { get; set; }
@@ -120,6 +123,8 @@ public sealed class CodexRequest
     public string? CommitModel { get; set; }
     public string? CommitModelEffort { get; set; }
     public string? CommitModelSpeed { get; set; }
+    public ExecutionRunner? CommitExecutionRunner { get; set; }
+    public Guid? CommitProviderProfileId { get; set; }
     public string? Summary { get; set; }
     public string? Error { get; set; }
     public DateTimeOffset? RetryAfter { get; set; }
