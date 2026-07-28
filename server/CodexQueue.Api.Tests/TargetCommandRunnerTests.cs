@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using CodexQueue.Api.Domain;
 using CodexQueue.Api.Services;
 
@@ -25,6 +26,7 @@ public sealed class TargetCommandRunnerTests
         Assert.DoesNotContain(arguments, argument =>
             argument.Contains("codex_queue_local", StringComparison.Ordinal)
             || argument.StartsWith("model_context_window=", StringComparison.Ordinal)
+            || argument.StartsWith("model_catalog_json=", StringComparison.Ordinal)
             || argument.Contains("requires_openai_auth", StringComparison.Ordinal)
             || argument.Contains("base_url", StringComparison.Ordinal)
             || argument.Contains("wire_api", StringComparison.Ordinal));
@@ -135,6 +137,7 @@ public sealed class TargetCommandRunnerTests
             "model_providers.codex_queue_local.requires_openai_auth=false");
         AssertConfig(arguments, "model_context_window=131072");
         AssertConfig(arguments, "model_reasoning_effort=\"HIGH\"");
+        AssertConfig(arguments, "service_tier=\"default\"");
         AssertConfig(arguments, "approval_policy=\"never\"");
         Assert.DoesNotContain("--oss", arguments);
         Assert.DoesNotContain("--local-provider", arguments);
@@ -185,6 +188,58 @@ public sealed class TargetCommandRunnerTests
 
         AssertConfig(arguments, $"approval_policy=\"{approvalPolicy}\"");
         AssertOptionValue(arguments, "-s", sandboxMode);
+    }
+
+    [Fact]
+    public void BuildCodexArguments_LocalRunIncludesGeneratedModelCatalog()
+    {
+        const string catalogPath = "/tmp/codex-queue-model-catalog/models.json";
+        var arguments = TargetCommandRunner.BuildCodexArguments(
+            "/workspace/project",
+            "codex-queue-context-test:ctx-65536",
+            "medium",
+            modelSpeed: null,
+            codexSessionId: null,
+            imagePaths: null,
+            PermissionMode.ApproveForMe,
+            internetSearchEnabled: false,
+            disableWindowsSandbox: false,
+            localProvider: new LocalCodexProviderOptions(
+                LocalAiServerType.Ollama,
+                "http://127.0.0.1:11434/v1",
+                65_536,
+                catalogPath));
+
+        AssertConfig(arguments, "model_catalog_json=\"" + catalogPath + "\"");
+        AssertConfig(arguments, "model_context_window=65536");
+    }
+
+    [Fact]
+    public void TryCreateLocalModelCatalog_ClonesInstructionsAndAppliesRuntimeIdentity()
+    {
+        const string output =
+            "$ codex debug models --bundled\n"
+            + """
+              {"models":[{"slug":"code-mode-model","display_name":"Code mode","description":"Code mode metadata","visibility":"list","tool_mode":"code_mode_only","context_window":200000,"base_instructions":"do not select code-mode-only instructions"},{"slug":"bundled-model","display_name":"Bundled","description":"Bundled metadata","visibility":"list","context_window":200000,"max_context_window":200000,"effective_context_window_percent":95,"base_instructions":"preserve these instructions","model_messages":{"instructions_template":"template"},"comp_hash":"bundled-hash"}]}
+              """;
+
+        var catalog = TargetCommandRunner.TryCreateLocalModelCatalog(
+            output,
+            "codex-queue-context-abcd:ctx-32768",
+            32_768);
+
+        Assert.NotNull(catalog);
+        using var document = JsonDocument.Parse(catalog);
+        var models = document.RootElement.GetProperty("models");
+        Assert.Equal(1, models.GetArrayLength());
+        var metadata = models[0];
+        Assert.Equal("codex-queue-context-abcd:ctx-32768", metadata.GetProperty("slug").GetString());
+        Assert.Equal(32_768, metadata.GetProperty("context_window").GetInt32());
+        Assert.Equal(32_768, metadata.GetProperty("max_context_window").GetInt32());
+        Assert.Equal(100, metadata.GetProperty("effective_context_window_percent").GetInt32());
+        Assert.Equal("preserve these instructions", metadata.GetProperty("base_instructions").GetString());
+        Assert.Equal("template", metadata.GetProperty("model_messages").GetProperty("instructions_template").GetString());
+        Assert.False(metadata.TryGetProperty("comp_hash", out _));
     }
 
     [Fact]

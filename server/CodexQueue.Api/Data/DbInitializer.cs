@@ -584,10 +584,18 @@ public static class DbInitializer
         {
             RequestId = request.Id,
             Kind = RunKind.Commit,
-            ExecutionRunner = request.ExecutionRunner,
-            ProviderProfileId = request.ProviderProfileId,
-            ProviderProfileName = request.ProviderProfile?.Name,
-            ProviderSource = request.ProviderProfile?.Source,
+            // A separate commit can deliberately use a different runner and
+            // Local AI profile than the request. Preserve that selection when
+            // rebuilding an interrupted commit stage at startup.
+            ExecutionRunner = request.CommitExecutionRunner ?? request.ExecutionRunner,
+            ProviderProfileId = request.CommitProviderProfileId
+                ?? (request.CommitExecutionRunner is null ? request.ProviderProfileId : null),
+            ProviderProfileName = request.CommitExecutionRunner is null
+                ? request.ProviderProfile?.Name
+                : null,
+            ProviderSource = request.CommitExecutionRunner is null
+                ? request.ProviderProfile?.Source
+                : null,
             Status = QueueStatus.Queued,
             CreatedAt = DateTimeOffset.UtcNow
         });

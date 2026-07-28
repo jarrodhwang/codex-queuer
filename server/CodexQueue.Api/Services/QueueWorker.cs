@@ -350,13 +350,14 @@ public sealed class QueueWorker(
                         && (x.QueueTabId == null || x.QueueTab!.DeletedAt == null)
                         && (x.Status == QueueStatus.Queued || x.Status == QueueStatus.Running))
                     .ToArrayAsync(stoppingToken);
-                var providerLimits = BuildProviderConcurrencyLimits(
-                    await db.AiProviderProfiles
-                        .AsNoTracking()
-                        .Where(x => x.Enabled)
-                        .ToArrayAsync(stoppingToken));
+                var enabledProviderProfiles = await db.AiProviderProfiles
+                    .AsNoTracking()
+                    .Where(x => x.Enabled)
+                    .ToArrayAsync(stoppingToken);
+                var providerLimits = BuildProviderConcurrencyLimits(enabledProviderProfiles);
                 var lanesWithUnclaimedRunningRequests = queuedRequests
-                    .Where(x => x.Status == QueueStatus.Running && !_activeQueues.ContainsKey(QueueLaneFor(x)))
+                    .Where(x => HasUnclaimedRunningStage(x)
+                        && !_activeQueues.ContainsKey(QueueLaneFor(x)))
                     .Select(QueueLaneFor)
                     .ToHashSet();
                 var providerBlockedQueueLanes = new HashSet<QueueLaneKey>();
@@ -378,7 +379,7 @@ public sealed class QueueWorker(
                         continue;
                     }
 
-                    var modelLimited = candidate.ExecutionRunner == ExecutionRunner.CodexCli
+                    var modelLimited = candidateRun.ExecutionRunner == ExecutionRunner.CodexCli
                         && await IsRunModelUsageLimitedAsync(db, candidate.MachineId, candidateRun.Model, now, stoppingToken);
                     if (modelLimited)
                     {
@@ -386,8 +387,11 @@ public sealed class QueueWorker(
                     }
 
                     IDisposable? providerLease = null;
-                    if (candidate.ExecutionRunner == ExecutionRunner.OpenHandsCli
-                        && candidate.ProviderProfile is { } profile)
+                    var executionProviderProfile = candidateRun.ProviderProfileId.HasValue
+                        ? enabledProviderProfiles.FirstOrDefault(profile => profile.Id == candidateRun.ProviderProfileId.Value)
+                        : candidate.ProviderProfile;
+                    if (candidateRun.ExecutionRunner == ExecutionRunner.OpenHandsCli
+                        && executionProviderProfile is { } profile)
                     {
                         var providerKey = ProviderConcurrencyKey(profile);
                         var maximumConcurrency = providerLimits.GetValueOrDefault(
@@ -441,7 +445,7 @@ public sealed class QueueWorker(
                     candidate.StartedAt ??= DateTimeOffset.UtcNow;
                     candidateRun.Status = QueueStatus.Running;
                     candidateRun.StartedAt ??= DateTimeOffset.UtcNow;
-                    var runnerName = candidate.ExecutionRunner == ExecutionRunner.OpenHandsCli ? "Local Codex" : "Codex";
+                    var runnerName = candidateRun.ExecutionRunner == ExecutionRunner.OpenHandsCli ? "Local Codex" : "Codex";
                     candidateRun.Output = TrimOutput(candidateRun.Output + "Dispatching " + runnerName + " " + candidateRun.Kind.ToString().ToLowerInvariant() + " run on " + (candidate.Machine?.Name ?? candidate.Project?.Machine?.Name ?? "target machine") + "..." + Environment.NewLine);
                     dispatches.Add(new PendingDispatch(queueLane, candidate.Id, candidateRun.Kind, execution));
                 }
@@ -557,10 +561,10 @@ public sealed class QueueWorker(
             return;
         }
 
-        if (await PrepareCommitRunAfterRequestAsync(requestId, cancellationToken))
-        {
-            await ExecuteRunAsync(requestId, RunKind.Commit, cancellationToken);
-        }
+        // Persist a separate queued stage and release this execution lane. The
+        // dispatcher then acquires the commit runner's own model/provider capacity
+        // and gives the commit session an independent cancellation boundary.
+        await PrepareCommitRunAfterRequestAsync(requestId, cancellationToken);
     }
 
     private async Task<bool> PrepareCommitRunAfterRequestAsync(Guid requestId, CancellationToken cancellationToken)
@@ -613,10 +617,8 @@ public sealed class QueueWorker(
             return false;
         }
 
-        request.Status = QueueStatus.Running;
-        request.Error = null;
-        request.FinishedAt = null;
-        return await TrySaveChangesAsync(db, "prepare immediate commit run", cancellationToken);
+        MarkRequestQueued(request);
+        return await TrySaveChangesAsync(db, "queue separate commit run", cancellationToken);
     }
 
     private async Task RunCommitAsync(Guid requestId, CancellationToken cancellationToken)
@@ -639,7 +641,11 @@ public sealed class QueueWorker(
                 .Include(x => x.ProviderProfile)
                 .Include(x => x.Runs)
                 .FirstAsync(x => x.Id == requestId, cancellationToken);
-            run = GetLatestRunOfKind(request.Runs, kind) ?? throw new InvalidOperationException("Request run was not found.");
+            run = FindOrRestoreRunForExecution(request, kind)
+                ?? throw new InvalidOperationException(
+                    kind == RunKind.Commit
+                        ? "Separate commit run was not available after the request stage completed."
+                        : "Request run was not found.");
             if (run.ProviderProfileId.HasValue)
             {
                 executionProviderProfile = run.ProviderProfileId == request.ProviderProfileId
@@ -661,12 +667,15 @@ public sealed class QueueWorker(
         }
 
         var project = request.Project ?? throw new InvalidOperationException("Request project is missing.");
-        var machine = request.ExecutionRunner == ExecutionRunner.CodexCli
+        var executionRunner = kind == RunKind.Commit ? run.ExecutionRunner : request.ExecutionRunner;
+        var machine = executionRunner == ExecutionRunner.CodexCli
             ? request.Project?.Machine ?? request.Machine ?? throw new InvalidOperationException("Request machine is missing.")
             : request.Machine ?? throw new InvalidOperationException("Local Codex request machine snapshot is missing.");
-        var projectPath = request.ExecutionRunner == ExecutionRunner.CodexCli
+        var projectPath = executionRunner == ExecutionRunner.CodexCli
             ? project.Path
-            : ValidateLocalCodexExecutionTarget(request, project, machine);
+            : request.ExecutionRunner == ExecutionRunner.OpenHandsCli
+                ? ValidateLocalCodexExecutionTarget(request, project, machine)
+                : project.Path;
         var attachmentsCleaned = false;
         var attachmentMaterializationAttempted = false;
 
@@ -1226,6 +1235,31 @@ public sealed class QueueWorker(
             .ThenByDescending(x => x.Id)
             .FirstOrDefault();
 
+    internal static bool HasUnclaimedRunningStage(CodexRequest request) =>
+        request.Status == QueueStatus.Running
+        && request.Runs.Any(run => run.Status is QueueStatus.Running or QueueStatus.CancelRequested);
+
+    internal static CodexRun? FindOrRestoreRunForExecution(CodexRequest request, RunKind kind)
+    {
+        var existing = GetLatestRunOfKind(request.Runs, kind);
+        if (existing is not null || kind != RunKind.Commit)
+        {
+            return existing;
+        }
+
+        var requestRun = GetLatestRunOfKind(request.Runs, RunKind.Request);
+        if (!request.GenerateCommit
+            || !request.SeparateCommitSession
+            || requestRun?.Status != QueueStatus.Succeeded)
+        {
+            return null;
+        }
+
+        var restored = CreateCommitRun(request);
+        request.Runs.Add(restored);
+        return restored;
+    }
+
     private static void ResumeRequest(CodexRequest request)
     {
         var requestRun = GetLatestRunOfKind(request.Runs, RunKind.Request);
@@ -1678,7 +1712,12 @@ public sealed class QueueWorker(
             .Include(x => x.QueueTab)
             .Include(x => x.Runs)
             .FirstAsync(x => x.Id == request.Id, cancellationToken);
-        run = GetLatestRunOfKind(request.Runs, kind) ?? throw new InvalidOperationException("Request run was not found.");
+        run = request.Runs.FirstOrDefault(candidate => candidate.Id == run.Id)
+            ?? GetLatestRunOfKind(request.Runs, kind)
+            ?? throw new InvalidOperationException(
+                kind == RunKind.Commit
+                    ? "Separate commit run disappeared while recording its usage limit."
+                    : "Request run was not found.");
         var finishedAt = DateTimeOffset.UtcNow;
         run.CommandPreview = result.CommandPreview;
         run.CodexSessionId = result.CodexSessionId ?? run.CodexSessionId;

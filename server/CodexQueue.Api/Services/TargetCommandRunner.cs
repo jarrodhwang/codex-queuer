@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using CodexQueue.Api.Domain;
 
@@ -18,7 +19,8 @@ public sealed record LocalCodexMachineCheck(
 internal sealed record LocalCodexProviderOptions(
     LocalAiServerType ServerType,
     string BaseUrl,
-    int ContextWindow);
+    int ContextWindow,
+    string? ModelCatalogPath = null);
 
 internal sealed record LocalAiRouteCheck(
     bool Reachable,
@@ -99,6 +101,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
     public const string UnixRemotePathSetup = "export PATH=\"$HOME/.local/bin:$HOME/bin:$HOME/.npm-global/bin:$HOME/.volta/bin:$HOME/.asdf/shims:$HOME/.cargo/bin:$HOME/.local/share/pnpm:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH\"; if [ -n \"${ZSH_VERSION-}\" ]; then setopt nonomatch; fi; for nodeBin in \"$HOME\"/.nvm/versions/node/*/bin; do [ -d \"$nodeBin\" ] && PATH=\"$nodeBin:$PATH\"; done; export PATH;";
     private static readonly TimeSpan CodexFirstOutputTimeout = TimeSpan.FromSeconds(75);
     private static readonly TimeSpan RateLimitsTimeout = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan ModelCatalogTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan LocalAiProbeTimeout = TimeSpan.FromSeconds(15);
     private const int MaximumLocalAiProbeBytes = 1024 * 1024;
     private static readonly string[] AllowedLocalCodexEnvironmentVariables =
@@ -317,7 +320,7 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             cancellationToken);
     }
 
-    private Task<CommandResult> RunCodexCoreAsync(
+    private async Task<CommandResult> RunCodexCoreAsync(
         TargetMachine machine,
         string projectPath,
         string model,
@@ -332,25 +335,77 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         LocalCodexProviderOptions? localProvider,
         CancellationToken cancellationToken)
     {
-        if (machine.Kind == MachineKind.Local)
+        string? catalogDirectory = null;
+        if (localProvider is not null)
         {
-            var arguments = BuildCodexArguments(
-                projectPath,
-                model,
-                modelEffort,
-                modelSpeed,
-                codexSessionId,
-                imagePaths,
-                permissionMode,
-                internetSearchEnabled,
-                disableWindowsSandbox: false,
-                localProvider);
-            if (machine.TargetsWindows())
+            try
             {
-                var command = BuildPowerShellCodexCommandSetup() + "; & $codexCommand " + string.Join(" ", arguments.Select(QuotePowerShellValue));
-                return RunProcessAsync(
-                    "powershell",
-                    new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command },
+                var catalog = await TryBuildLocalModelCatalogAsync(
+                    machine,
+                    model,
+                    localProvider.ContextWindow,
+                    cancellationToken);
+                if (catalog is not null)
+                {
+                    catalogDirectory = await CreateModelCatalogDirectoryAsync(machine, cancellationToken);
+                    var catalogPath = machine.TargetsWindows()
+                        ? catalogDirectory.TrimEnd('\\', '/') + "\\models.json"
+                        : catalogDirectory.TrimEnd('/') + "/models.json";
+                    await WriteAttachmentAsync(
+                        machine,
+                        catalogPath,
+                        Encoding.UTF8.GetBytes(catalog),
+                        cancellationToken);
+                    localProvider = localProvider with { ModelCatalogPath = catalogPath };
+                }
+            }
+            catch (Exception ex) when (ex is InvalidOperationException
+                                       or IOException
+                                       or JsonException
+                                       or TimeoutException)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Could not prepare Codex model metadata for local model {Model}; continuing with Codex fallback metadata",
+                    model);
+            }
+        }
+
+        try
+        {
+            if (machine.Kind == MachineKind.Local)
+            {
+                var arguments = BuildCodexArguments(
+                    projectPath,
+                    model,
+                    modelEffort,
+                    modelSpeed,
+                    codexSessionId,
+                    imagePaths,
+                    permissionMode,
+                    internetSearchEnabled,
+                    disableWindowsSandbox: false,
+                    localProvider);
+                if (machine.TargetsWindows())
+                {
+                    var command = BuildPowerShellCodexCommandSetup() + "; & $codexCommand " + string.Join(" ", arguments.Select(QuotePowerShellValue));
+                    return await RunProcessAsync(
+                        "powershell",
+                        new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command },
+                        projectPath,
+                        BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, internetSearchEnabled, localProvider),
+                        onOutput,
+                        cancellationToken,
+                        firstProcessOutputTimeout: CodexFirstOutputTimeout,
+                        standardInput: prompt,
+                        environment: localProvider is null
+                            ? null
+                            : BuildSanitizedLocalCodexEnvironment());
+                }
+
+                return await RunProcessAsync(
+                    "codex",
+                    arguments,
                     projectPath,
                     BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, internetSearchEnabled, localProvider),
                     onOutput,
@@ -362,28 +417,51 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                         : BuildSanitizedLocalCodexEnvironment());
             }
 
-            return RunProcessAsync(
-                "codex",
-                arguments,
-                projectPath,
-                BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, internetSearchEnabled, localProvider),
-                onOutput,
-                cancellationToken,
-                firstProcessOutputTimeout: CodexFirstOutputTimeout,
-                standardInput: prompt,
-                environment: localProvider is null
-                    ? null
-                    : BuildSanitizedLocalCodexEnvironment());
-        }
+            if (machine.TargetsWindows())
+            {
+                var windowsCommand = BuildPowerShellSetLocationCommand(projectPath) + "; "
+                    + (localProvider is null
+                        ? ""
+                        : BuildPowerShellLocalCodexEnvironmentSanitizer() + "; ")
+                    + BuildPowerShellCodexCommandSetup() + "; & $codexCommand "
+                    + string.Join(" ", BuildCodexArguments(
+                        projectPath,
+                        model,
+                        modelEffort,
+                        modelSpeed,
+                        codexSessionId,
+                        imagePaths,
+                        permissionMode,
+                        internetSearchEnabled,
+                        disableWindowsSandbox: true,
+                        localProvider).Select(QuotePowerShellValue));
 
-        if (machine.TargetsWindows())
-        {
-            var windowsCommand = BuildPowerShellSetLocationCommand(projectPath) + "; "
-                + (localProvider is null
-                    ? ""
-                    : BuildPowerShellLocalCodexEnvironmentSanitizer() + "; ")
-                + BuildPowerShellCodexCommandSetup() + "; & $codexCommand "
-                + string.Join(" ", BuildCodexArguments(
+                return await RunSshAsync(
+                    machine,
+                    BuildPowerShellRemoteCommand(windowsCommand),
+                    "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, internetSearchEnabled, localProvider),
+                    onOutput,
+                    cancellationToken,
+                    firstProcessOutputTimeout: CodexFirstOutputTimeout,
+                    standardInput: prompt);
+            }
+
+            var remoteCommandParts = new List<string>();
+            remoteCommandParts.AddRange([
+                UnixRemotePathSetup,
+                "cd",
+                Quote(projectPath),
+                "&&",
+            ]);
+            if (localProvider is not null)
+            {
+                remoteCommandParts.Add("{");
+                remoteCommandParts.Add(BuildUnixLocalCodexEnvironmentSanitizer());
+            }
+
+            remoteCommandParts.AddRange([
+                "codex",
+                string.Join(" ", BuildCodexArguments(
                     projectPath,
                     model,
                     modelEffort,
@@ -392,61 +470,206 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
                     imagePaths,
                     permissionMode,
                     internetSearchEnabled,
-                    disableWindowsSandbox: true,
-                    localProvider).Select(QuotePowerShellValue));
+                    disableWindowsSandbox: false,
+                    localProvider).Select(Quote))
+            ]);
+            if (localProvider is not null)
+            {
+                remoteCommandParts.Add("; }");
+            }
 
-            return RunSshAsync(
+            var remoteCommand = string.Join(" ", remoteCommandParts);
+
+            return await RunSshAsync(
                 machine,
-                BuildPowerShellRemoteCommand(windowsCommand),
+                remoteCommand,
                 "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, internetSearchEnabled, localProvider),
                 onOutput,
                 cancellationToken,
                 firstProcessOutputTimeout: CodexFirstOutputTimeout,
                 standardInput: prompt);
         }
-
-        var remoteCommandParts = new List<string>();
-        remoteCommandParts.AddRange([
-            UnixRemotePathSetup,
-            "cd",
-            Quote(projectPath),
-            "&&",
-        ]);
-        if (localProvider is not null)
+        finally
         {
-            remoteCommandParts.Add("{");
-            remoteCommandParts.Add(BuildUnixLocalCodexEnvironmentSanitizer());
+            if (catalogDirectory is not null)
+            {
+                try
+                {
+                    using var cleanupTimeout = new CancellationTokenSource(
+                        TimeSpan.FromSeconds(15));
+                    await DeleteAttachmentDirectoryAsync(
+                        machine,
+                        catalogDirectory,
+                        cleanupTimeout.Token);
+                }
+                catch (Exception ex) when (ex is InvalidOperationException
+                                           or IOException
+                                           or TimeoutException
+                                           or OperationCanceledException)
+                {
+                    logger.LogWarning(
+                        ex,
+                        "Could not remove temporary Codex model metadata directory {CatalogDirectory}",
+                        catalogDirectory);
+                }
+            }
+        }
+    }
+
+    private async Task<string?> TryBuildLocalModelCatalogAsync(
+        TargetMachine machine,
+        string model,
+        int contextWindow,
+        CancellationToken cancellationToken)
+    {
+        CommandResult result;
+        if (machine.Kind == MachineKind.Local)
+        {
+            result = machine.TargetsWindows()
+                ? await RunProcessAsync(
+                    "powershell",
+                    [
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        BuildPowerShellCodexCommandSetup() + "; & $codexCommand debug models --bundled",
+                    ],
+                    null,
+                    "codex debug models --bundled",
+                    static _ => Task.CompletedTask,
+                    cancellationToken,
+                    executionTimeout: ModelCatalogTimeout)
+                : await RunProcessAsync(
+                    "codex",
+                    ["debug", "models", "--bundled"],
+                    null,
+                    "codex debug models --bundled",
+                    static _ => Task.CompletedTask,
+                    cancellationToken,
+                    executionTimeout: ModelCatalogTimeout);
+        }
+        else
+        {
+            var command = machine.TargetsWindows()
+                ? BuildPowerShellRemoteCommand(
+                    BuildPowerShellCodexCommandSetup()
+                    + "; & $codexCommand debug models --bundled")
+                : UnixRemotePathSetup + " codex debug models --bundled";
+            result = await RunSshAsync(
+                machine,
+                command,
+                "ssh " + machine.Host + " codex debug models --bundled",
+                static _ => Task.CompletedTask,
+                cancellationToken,
+                executionTimeout: ModelCatalogTimeout);
         }
 
-        remoteCommandParts.AddRange([
-            "codex",
-            string.Join(" ", BuildCodexArguments(
-                projectPath,
-                model,
-                modelEffort,
-                modelSpeed,
-                codexSessionId,
-                imagePaths,
-                permissionMode,
-                internetSearchEnabled,
-                disableWindowsSandbox: false,
-                localProvider).Select(Quote))
-        ]);
-        if (localProvider is not null)
+        if (!result.Success)
         {
-            remoteCommandParts.Add("; }");
+            logger.LogWarning(
+                "Codex bundled model metadata could not be read on machine {MachineId}; local execution will use fallback metadata",
+                machine.Id);
+            return null;
         }
 
-        var remoteCommand = string.Join(" ", remoteCommandParts);
+        return TryCreateLocalModelCatalog(result.Output, model, contextWindow);
+    }
 
-        return RunSshAsync(
+    internal static string? TryCreateLocalModelCatalog(
+        string codexDebugOutput,
+        string model,
+        int contextWindow)
+    {
+        var jsonStart = codexDebugOutput.IndexOf('{');
+        var jsonEnd = codexDebugOutput.LastIndexOf('}');
+        if (jsonStart < 0 || jsonEnd <= jsonStart)
+        {
+            return null;
+        }
+
+        var root = JsonNode.Parse(codexDebugOutput[jsonStart..(jsonEnd + 1)]) as JsonObject;
+        var bundledModels = root?["models"] as JsonArray;
+        var template = bundledModels?
+            .OfType<JsonObject>()
+            .FirstOrDefault(candidate =>
+                string.Equals(
+                    candidate["visibility"]?.GetValue<string>(),
+                    "list",
+                    StringComparison.OrdinalIgnoreCase)
+                && candidate["tool_mode"] is null)
+            ?? bundledModels?
+                .OfType<JsonObject>()
+                .FirstOrDefault(candidate =>
+                    string.Equals(
+                        candidate["visibility"]?.GetValue<string>(),
+                        "list",
+                        StringComparison.OrdinalIgnoreCase))
+            ?? bundledModels?.OfType<JsonObject>().FirstOrDefault();
+        if (template is null)
+        {
+            return null;
+        }
+
+        var metadata = template.DeepClone().AsObject();
+        metadata["slug"] = model;
+        metadata["display_name"] = model;
+        metadata["description"] = "Local Codex model served by the configured Local AI server.";
+        metadata["context_window"] = contextWindow;
+        metadata["max_context_window"] = contextWindow;
+        metadata["effective_context_window_percent"] = 100;
+        // The hash belongs to the bundled source model and must not be attributed to
+        // a derived Ollama/LM Studio/llama.cpp alias.
+        metadata.Remove("comp_hash");
+
+        return new JsonObject
+        {
+            ["models"] = new JsonArray(metadata),
+        }.ToJsonString();
+    }
+
+    private async Task<string> CreateModelCatalogDirectoryAsync(
+        TargetMachine machine,
+        CancellationToken cancellationToken)
+    {
+        var directoryName = "codex-queue-model-catalog-" + Guid.NewGuid().ToString("N");
+        if (machine.Kind == MachineKind.Local)
+        {
+            var localPath = Path.Combine(Path.GetTempPath(), directoryName);
+            Directory.CreateDirectory(localPath);
+            return localPath;
+        }
+
+        if (!machine.TargetsWindows())
+        {
+            // /tmp is present on supported Linux and macOS targets. WriteAttachmentAsync
+            // creates this uniquely named directory before transferring the catalog.
+            return "/tmp/" + directoryName;
+        }
+
+        var command = "$catalogDirectory = [IO.Path]::Combine([IO.Path]::GetTempPath(), "
+            + QuotePowerShellValue(directoryName)
+            + "); [IO.Directory]::CreateDirectory($catalogDirectory) | Out-Null"
+            + "; [Console]::Out.WriteLine($catalogDirectory)";
+        var result = await RunSshAsync(
             machine,
-            remoteCommand,
-            "ssh " + machine.Host + " " + BuildCodexPreview(model, modelEffort, modelSpeed, codexSessionId, internetSearchEnabled, localProvider),
-            onOutput,
+            BuildPowerShellRemoteCommand(command),
+            "ssh " + machine.Host + " create temporary model catalog directory",
+            static _ => Task.CompletedTask,
             cancellationToken,
-            firstProcessOutputTimeout: CodexFirstOutputTimeout,
-            standardInput: prompt);
+            executionTimeout: ModelCatalogTimeout);
+        var remotePath = StripCommandPreview(result.Output).Trim();
+        if (!result.Success
+            || string.IsNullOrWhiteSpace(remotePath)
+            || remotePath.Contains('\r')
+            || remotePath.Contains('\n')
+            || !remotePath.EndsWith(directoryName, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new IOException("Could not create a temporary model catalog directory on the Windows target.");
+        }
+
+        return remotePath;
     }
 
     public async Task<LocalCodexMachineCheck> TestLocalCodexAsync(
@@ -1338,6 +1561,17 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
             arguments.Add("model_providers.codex_queue_local.requires_openai_auth=false");
             arguments.Add("-c");
             arguments.Add("model_context_window=" + localProvider.ContextWindow);
+            // Local providers do not implement OpenAI's priority/flex routing. Explicitly
+            // clear any cloud service tier inherited from the target user's Codex config.
+            arguments.Add("-c");
+            arguments.Add("service_tier=\"default\"");
+            if (!string.IsNullOrWhiteSpace(localProvider.ModelCatalogPath))
+            {
+                arguments.Add("-c");
+                arguments.Add(
+                    "model_catalog_json="
+                    + ToTomlString(localProvider.ModelCatalogPath));
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(modelEffort))
