@@ -10,7 +10,6 @@ import {
   ClipboardList,
   Code2,
   Cpu,
-  Ellipsis,
   FileText,
   Folder,
   FolderOpen,
@@ -62,6 +61,7 @@ import type {
   Machine,
   MachineKind,
   MachineRateLimits,
+  MachineGpuResource,
   MachineResources,
   MachinePlatform,
   LocalAiServerType,
@@ -269,7 +269,8 @@ function localAiServerTypeForProfile(profile: AiProviderProfile): LocalAiServerT
 }
 
 const themeStorageKey = 'codex-queue-theme'
-const minimumLocalCodexContextSize = 32_768
+const minimumLocalCodexContextSize = 4_096
+const recommendedLocalCodexContextSize = 32_768
 const maximumLocalCodexContextSize = 262_144
 const defaultLocalCodexContextSize = '65536'
 const localContextSizeOptions = [
@@ -3517,7 +3518,7 @@ function QueueComposer({
   const localModelDropdownOptions = useMemo(() => {
     const options = localModelOptions.map((model) => ({
       icon: <AiBrandImage brand={localModelBrandIcon(model.name || model.id)} />,
-      label: `${localModelDisplayName(model.name || model.id)}${model.toolSupportKnown && !model.supportsTools ? ' · No tools' : ''}`,
+      label: `${localModelDisplayName(model.name || model.id)}${selectedLocalProfile?.localAiServerType !== 'Ollama' && model.toolSupportKnown && !model.supportsTools ? ' · No tools' : ''}`,
       value: model.id,
     }))
     if (!localModel && options.length === 0) {
@@ -3535,7 +3536,7 @@ function QueueComposer({
       })
     }
     return options
-  }, [loadingLocalModels, localModel, localModelOptions])
+  }, [loadingLocalModels, localModel, localModelOptions, selectedLocalProfile?.localAiServerType])
   const commitLocalModelDropdownOptions = useMemo(() => {
     const options = localModelOptions.map((model) => ({
       icon: <AiBrandImage brand={localModelBrandIcon(model.name || model.id)} />,
@@ -3943,10 +3944,10 @@ function QueueComposer({
     return {
       ...option,
       disabled: contextSize < minimumLocalCodexContextSize || contextSize > localContextLimit,
-      title: contextSize < minimumLocalCodexContextSize
-        ? `Local Codex requires at least ${(minimumLocalCodexContextSize / 1024).toFixed(0)}K tokens for this queue setup.`
-        : contextSize > localContextLimit
+      title: contextSize > localContextLimit
           ? `This model or server supports up to ${localContextLimit.toLocaleString()} tokens.`
+        : contextSize < recommendedLocalCodexContextSize
+          ? 'Small contexts can work for short prompts, but may not fit project instructions or tool output.'
           : option.value === '32768'
             ? '32K tokens.'
             : undefined,
@@ -3956,20 +3957,20 @@ function QueueComposer({
   const localContextMaximumLabel = Number.isFinite(localContextLimit)
     ? formatContextSize(localContextLimit)
     : 'not discovered yet'
-  const localContextInfo = `${selectedLocalProfile?.localAiServerType === 'Ollama' ? 'Applied to Ollama as num_ctx and to Codex CLI model_context_window accounting.' : "Sets Codex CLI's model_context_window accounting; configure the backend with an equal or larger allocation."} This setup requires at least ${formatContextSize(minimumLocalCodexContextSize)} and conservatively caps Local requests at ${formatContextSize(maximumLocalCodexContextSize)} for current Codex fallback model metadata. Maximum available now: ${localContextMaximumLabel}${configuredContextWindow ? ` (server ${formatContextSize(configuredContextWindow)})` : ''}${selectedLocalModelMetadata?.maximumContextWindow ? `; model ${formatContextSize(selectedLocalModelMetadata.maximumContextWindow)}` : ''}.`
-  const localContextWarning = selectedLocalContextSize < minimumLocalCodexContextSize
-    ? `Select 32K or higher for Local Codex context accounting.`
+  const localContextInfo = `${selectedLocalProfile?.localAiServerType === 'Ollama' ? 'Applied to Ollama as num_ctx and to Codex CLI model_context_window accounting.' : "Sets Codex CLI's model_context_window accounting; configure the backend with an equal or larger allocation."} Contexts from ${formatContextSize(minimumLocalCodexContextSize)} to ${formatContextSize(maximumLocalCodexContextSize)} are available. ${formatContextSize(recommendedLocalCodexContextSize)} or higher is recommended for project work. Maximum available now: ${localContextMaximumLabel}${configuredContextWindow ? ` (server ${formatContextSize(configuredContextWindow)})` : ''}${selectedLocalModelMetadata?.maximumContextWindow ? `; model ${formatContextSize(selectedLocalModelMetadata.maximumContextWindow)}` : ''}.`
+  const localContextBlockingMessage = selectedLocalContextSize < minimumLocalCodexContextSize
+    ? `Select ${formatContextSize(minimumLocalCodexContextSize)} or higher for Local Codex.`
     : selectedLocalContextSize > localContextLimit
       ? `The selected context is larger than this model or Local AI server supports.`
-      : localModelStatus?.contextWarning
-    || ((selectedLocalModelMetadata?.maximumContextWindow
+      : ((selectedLocalModelMetadata?.maximumContextWindow
       && selectedLocalModelMetadata.maximumContextWindow < minimumLocalCodexContextSize)
       ? `${selectedLocalModelMetadata.name} supports at most ${selectedLocalModelMetadata.maximumContextWindow.toLocaleString()} tokens, below this Local Codex setup's ${minimumLocalCodexContextSize.toLocaleString()}-token requirement.`
       : '')
     || ((configuredContextWindow && configuredContextWindow < minimumLocalCodexContextSize)
       ? `Configured context is ${configuredContextWindow.toLocaleString()} tokens. Set it to at least ${minimumLocalCodexContextSize.toLocaleString()} before running Local Codex.`
       : '')
-  const localToolWarning = selectedLocalModelMetadata?.toolSupportKnown
+  const localToolWarning = selectedLocalProfile?.localAiServerType !== 'Ollama'
+    && selectedLocalModelMetadata?.toolSupportKnown
     && !selectedLocalModelMetadata.supportsTools
     ? `${selectedLocalModelMetadata.name} does not support tool calling. Choose a tool-capable model for Local Codex.`
     : ''
@@ -3984,10 +3985,10 @@ function QueueComposer({
     return {
       ...option,
       disabled: contextSize < minimumLocalCodexContextSize || contextSize > commitLocalContextLimit,
-      title: contextSize < minimumLocalCodexContextSize
-        ? `Local Codex requires at least ${(minimumLocalCodexContextSize / 1024).toFixed(0)}K tokens for this queue setup.`
-        : contextSize > commitLocalContextLimit
+      title: contextSize > commitLocalContextLimit
           ? `This model or server supports up to ${commitLocalContextLimit.toLocaleString()} tokens.`
+        : contextSize < recommendedLocalCodexContextSize
+          ? 'Small contexts can work for short prompts, but may not fit project instructions or tool output.'
           : option.value === '32768'
             ? '32K tokens.'
             : undefined,
@@ -3998,16 +3999,17 @@ function QueueComposer({
     ? formatContextSize(commitLocalContextLimit)
     : 'not discovered yet'
   const commitLocalContextInfo = `${selectedLocalProfile?.localAiServerType === 'Ollama' ? 'Applied to Ollama as num_ctx and to Codex CLI model_context_window accounting.' : "Sets Codex CLI's model_context_window accounting; configure the backend with an equal or larger allocation."} Maximum available now: ${commitLocalContextMaximumLabel}${configuredContextWindow ? ` (server ${formatContextSize(configuredContextWindow)})` : ''}${selectedCommitLocalModelMetadata?.maximumContextWindow ? `; model ${formatContextSize(selectedCommitLocalModelMetadata.maximumContextWindow)}` : ''}.`
-  const commitLocalContextWarning = selectedCommitLocalContextSize < minimumLocalCodexContextSize
-    ? 'Select 32K or higher for the separate Local Codex commit session.'
+  const commitLocalContextBlockingMessage = selectedCommitLocalContextSize < minimumLocalCodexContextSize
+    ? `Select ${formatContextSize(minimumLocalCodexContextSize)} or higher for the separate Local Codex commit session.`
     : selectedCommitLocalContextSize > commitLocalContextLimit
       ? 'The separate commit context is larger than this model or Local AI server supports.'
       : ''
-  const commitLocalToolWarning = selectedCommitLocalModelMetadata?.toolSupportKnown
+  const commitLocalToolWarning = selectedLocalProfile?.localAiServerType !== 'Ollama'
+    && selectedCommitLocalModelMetadata?.toolSupportKnown
     && !selectedCommitLocalModelMetadata.supportsTools
     ? `${selectedCommitLocalModelMetadata.name} does not support tool calling. Choose a tool-capable separate commit model.`
     : ''
-  const localModelWarning = localToolWarning || localContextWarning
+  const localModelWarning = localToolWarning || localContextBlockingMessage
   const selectedLocalServerUnavailable = Boolean(
     selectedLocalProfile
     && !loadingLocalModels
@@ -4059,7 +4061,7 @@ function QueueComposer({
             ? localModelStatus.error || 'Codex Queue cannot reach the separate commit Local AI server.'
             : localModelStatus?.healthy && !localModelOptions.some((model) => model.id === commitModel.model)
               ? 'The separate commit model is not installed on the selected Local AI server.'
-              : commitLocalToolWarning || commitLocalContextWarning
+              : commitLocalToolWarning || commitLocalContextBlockingMessage
   const selectedRequestModel = isLocalRunner ? localModel : requestModel.model
   const localApiPending = loadingLocalModels
   const localCodexPending = checkingLocalCodex
@@ -4620,7 +4622,7 @@ function QueueComposer({
           onChange={(speed) => setCommitModel((current) => ({ ...current, speed }))}
         />
       </div>
-      {commitLocalContextWarning && <span className="local-capability-note error-text">{commitLocalContextWarning}</span>}
+      {commitLocalContextBlockingMessage && <span className="local-capability-note error-text">{commitLocalContextBlockingMessage}</span>}
     </div>
   )
 
@@ -4942,7 +4944,7 @@ function QueueComposer({
                             icon={<GaugeIcon size={17} />}
                             label={machineResources.gpus.length === 1 ? 'GPU' : `GPU ${gpu.index}`}
                             name={gpu.name}
-                            percent={gpu.utilizationPercent}
+                            percent={gpuVramUsagePercent(gpu)}
                             detail={gpu.memoryUsedBytes != null && gpu.memoryTotalBytes != null
                               ? `VRAM ${formatResourceBytes(gpu.memoryUsedBytes)} / ${formatResourceBytes(gpu.memoryTotalBytes)}`
                               : undefined}
@@ -5062,7 +5064,7 @@ function QueueComposer({
                 onClick={saveDefaults}
                 disabled={!defaultsChanged
                   || savingDefaults
-                  || (isLocalRunner && (!selectedLocalProfile || !localModel || Boolean(localContextWarning)))
+                  || (isLocalRunner && (!selectedLocalProfile || !localModel || Boolean(localContextBlockingMessage)))
                   || Boolean(commitLocalBlockingMessage)}
               >
                 <Check size={13} /> {savingDefaults ? 'Saving' : 'Save defaults'}
@@ -5319,7 +5321,7 @@ function ResourceMonitorFace({
             icon={<GaugeIcon size={17} />}
             label={resources.gpus.length === 1 ? 'GPU' : `GPU ${gpu.index}`}
             name={gpu.name}
-            percent={gpu.utilizationPercent}
+            percent={gpuVramUsagePercent(gpu)}
             detail={gpu.memoryUsedBytes != null && gpu.memoryTotalBytes != null ? `VRAM ${formatResourceBytes(gpu.memoryUsedBytes)} / ${formatResourceBytes(gpu.memoryTotalBytes)}` : undefined}
             temperature={gpu.temperatureCelsius}
             power={gpu.powerWatts}
@@ -5350,6 +5352,12 @@ function ResourceTelemetryLoading() {
       ))}
     </div>
   )
+}
+
+function gpuVramUsagePercent(gpu: MachineGpuResource) {
+  if (gpu.memoryUsagePercent != null) return gpu.memoryUsagePercent
+  if (gpu.memoryUsedBytes == null || gpu.memoryTotalBytes == null || gpu.memoryTotalBytes <= 0) return null
+  return (gpu.memoryUsedBytes / gpu.memoryTotalBytes) * 100
 }
 
 function ResourceMeter({
@@ -5463,22 +5471,6 @@ function ContextSizePicker({
   options: Array<{ label: string; value: string; disabled?: boolean; title?: string }>
   onChange: (value: string) => void
 }) {
-  const [open, setOpen] = useState(false)
-  const rootRef = useRef<HTMLDivElement | null>(null)
-  const primaryValues = new Set(['32768', '65536', '131072'])
-  const primaryOptions = options.filter((option) => primaryValues.has(option.value))
-  const moreOptions = options.filter((option) => !primaryValues.has(option.value))
-  const selectedMoreOption = moreOptions.find((option) => option.value === value)
-
-  useEffect(() => {
-    if (!open) return
-    const close = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
-    }
-    document.addEventListener('pointerdown', close)
-    return () => document.removeEventListener('pointerdown', close)
-  }, [open])
-
   return (
     <div className="segmented-field" aria-label={label}>
       <span>
@@ -5487,59 +5479,24 @@ function ContextSizePicker({
           <Info size={13} aria-hidden="true" />
         </span>
       </span>
-      <div ref={rootRef} className="context-size-picker">
-        <div className="segmented-radio context-size-picker-primary">
-          {primaryOptions.map((option) => (
-            <label
-              key={option.value}
-              className={`segmented-radio-option--${option.value} ${option.value === value ? 'active' : ''}`}
-              title={option.title}
-            >
-              <input
-                type="radio"
-                name={name}
-                value={option.value}
-                checked={option.value === value}
-                disabled={option.disabled}
-                onChange={() => onChange(option.value)}
-              />
-              {option.label}
-            </label>
-          ))}
-        </div>
-        <button
-          type="button"
-          className={`context-size-more-button ${selectedMoreOption ? `active segmented-radio-option--${selectedMoreOption.value}` : ''}`}
-          aria-label={selectedMoreOption ? `More context sizes; ${selectedMoreOption.label} selected` : 'More context sizes'}
-          aria-haspopup="menu"
-          aria-expanded={open}
-          title="More context sizes"
-          onClick={() => setOpen((current) => !current)}
-        >
-          <Ellipsis size={17} aria-hidden="true" />
-        </button>
-        {open && (
-          <div className="context-size-menu" role="menu" aria-label="More context sizes">
-            {moreOptions.map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                role="menuitemradio"
-                aria-checked={option.value === value}
-                disabled={option.disabled}
-                title={option.title}
-                className={option.value === value ? `active segmented-radio-option--${option.value}` : ''}
-                onClick={() => {
-                  onChange(option.value)
-                  setOpen(false)
-                }}
-              >
-                <span>{option.label}</span>
-                {option.value === value && <Check size={14} aria-hidden="true" />}
-              </button>
-            ))}
-          </div>
-        )}
+      <div className="segmented-radio context-size-picker">
+        {options.map((option) => (
+          <label
+            key={option.value}
+            className={`segmented-radio-option--${option.value} ${option.value === value ? 'active' : ''}`}
+            title={option.title}
+          >
+            <input
+              type="radio"
+              name={name}
+              value={option.value}
+              checked={option.value === value}
+              disabled={option.disabled}
+              onChange={() => onChange(option.value)}
+            />
+            {option.label}
+          </label>
+        ))}
       </div>
     </div>
   )
@@ -7611,7 +7568,7 @@ function GitPanel({
   const localModelOptions = localModelStatus?.models ?? []
   const localModelDropdownOptions = localModelOptions.map((model) => ({
     icon: <AiBrandImage brand={localModelBrandIcon(model.name || model.id)} />,
-    label: `${localModelDisplayName(model.name || model.id)}${model.toolSupportKnown && !model.supportsTools ? ' · No tools' : ''}`,
+    label: `${localModelDisplayName(model.name || model.id)}${selectedLocalProfile?.localAiServerType !== 'Ollama' && model.toolSupportKnown && !model.supportsTools ? ' · No tools' : ''}`,
     value: model.id,
   }))
   const selectedLocalModelMetadata = localModelOptions.find((model) => model.id === suggestionModel.model)
@@ -7624,18 +7581,19 @@ function GitPanel({
   const localContextOptions = localContextSizeOptions.map((option) => ({
     ...option,
     disabled: Number(option.value) < minimumLocalCodexContextSize || Number(option.value) > localContextLimit,
-    title: Number(option.value) < minimumLocalCodexContextSize
-      ? 'Local Codex requires at least 32K tokens.'
-      : Number(option.value) > localContextLimit
-        ? `This server or model supports up to ${localContextLimit.toLocaleString()} tokens.`
+    title: Number(option.value) > localContextLimit
+      ? `This server or model supports up to ${localContextLimit.toLocaleString()} tokens.`
+      : Number(option.value) < recommendedLocalCodexContextSize
+        ? 'Small contexts can work for short prompts, but may not fit project instructions or tool output.'
         : undefined,
   }))
-  const localContextWarning = Number(suggestionModel.speed) < minimumLocalCodexContextSize
-    ? 'Select 32K or higher for Local Codex.'
+  const localContextBlockingMessage = Number(suggestionModel.speed) < minimumLocalCodexContextSize
+    ? `Select ${formatContextSize(minimumLocalCodexContextSize)} or higher for Local Codex.`
     : Number(suggestionModel.speed) > localContextLimit
       ? 'The selected context exceeds the Local AI server or model limit.'
       : ''
-  const localToolWarning = selectedLocalModelMetadata?.toolSupportKnown
+  const localToolWarning = selectedLocalProfile?.localAiServerType !== 'Ollama'
+    && selectedLocalModelMetadata?.toolSupportKnown
     && !selectedLocalModelMetadata.supportsTools
     ? `${selectedLocalModelMetadata.name} does not support tool calling. Local Codex cannot inspect, stage, or commit files with this model.`
     : ''
@@ -7747,7 +7705,7 @@ function GitPanel({
     || !suggestionModel.model
     || loadingLocalModels
     || Boolean(localModelError)
-    || Boolean(localContextWarning)
+    || Boolean(localContextBlockingMessage)
     || Boolean(localToolWarning)
     || !localModelOptions.some((model) => model.id === suggestionModel.model)
   )
@@ -7851,8 +7809,10 @@ function GitPanel({
                 onChange={(speed) => setSuggestionModel((current) => ({ ...current, speed }))}
               />
             </div>
-            {(localModelError || localToolWarning || localContextWarning) && (
-              <span className="error-text">{localModelError || localToolWarning || localContextWarning}</span>
+            {(localModelError || localToolWarning || localContextBlockingMessage) && (
+              <span className="error-text">
+                {localModelError || localToolWarning || localContextBlockingMessage}
+              </span>
             )}
           </>
         ) : (
@@ -8615,6 +8575,7 @@ function RequestExecutionChips({
   const isLocalRunner = runner === 'OpenHandsCli' && providerSource === 'Local'
   const sourceLabel = isLocalRunner ? 'Local' : providerSourceLabel(providerSource)
   const profileName = localProfileChipLabel(providerSource, providerProfileName)
+  const localContextSize = runner === 'OpenHandsCli' ? localContextSizeChipLabel(speed) : null
 
   return (
     <div className="request-execution-chip-row" aria-label="Selected execution and model">
@@ -8632,8 +8593,14 @@ function RequestExecutionChips({
         showTuning={showTuning}
         showEffort={showTuning || isLocalRunner}
       />
+      {localContextSize && <span className="model-chip model-chip--context">ctx {localContextSize}</span>}
     </div>
   )
+}
+
+function localContextSizeChipLabel(value?: string | null) {
+  const contextSize = Number(value)
+  return supportedLocalContextSizes.includes(contextSize) ? formatContextSize(contextSize) : null
 }
 
 function localProfileChipLabel(source?: AiProviderSource | null, profileName?: string | null) {

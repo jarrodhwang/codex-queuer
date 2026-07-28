@@ -2134,7 +2134,9 @@ public static class ApiEndpoints
         }
         normalizedModel = selectedModel.Model;
 
-        if (selectedModel.ToolSupportKnown && !selectedModel.SupportsTools)
+        if (profile.LocalAiServerType != LocalAiServerType.Ollama
+            && selectedModel.ToolSupportKnown
+            && !selectedModel.SupportsTools)
         {
             return new RunnerSelectionValidation(
                 profile,
@@ -2144,7 +2146,7 @@ public static class ApiEndpoints
         }
 
         if (selectedModel.MaximumContextWindow is { } modelContextWindow
-            && modelContextWindow < AiProviderService.ContextWarningThreshold)
+            && modelContextWindow < AiProviderService.MinimumContextWindow)
         {
             return new RunnerSelectionValidation(
                 profile,
@@ -2153,7 +2155,7 @@ public static class ApiEndpoints
                 + " supports at most "
                 + modelContextWindow.ToString("N0")
                 + " tokens; Local Codex requires at least "
-                + AiProviderService.ContextWarningThreshold.ToString("N0")
+                + AiProviderService.MinimumContextWindow.ToString("N0")
                 + ".");
         }
 
@@ -2168,13 +2170,13 @@ public static class ApiEndpoints
 
         requestedContextWindow ??= profile.ConfiguredContextWindow;
         if (requestedContextWindow is null
-            || requestedContextWindow < AiProviderService.ContextWarningThreshold)
+            || requestedContextWindow < AiProviderService.MinimumContextWindow)
         {
             return new RunnerSelectionValidation(
                 profile,
                 normalizedModel,
                 "Local Codex requires a context size of at least "
-                + AiProviderService.ContextWarningThreshold.ToString("N0")
+                + AiProviderService.MinimumContextWindow.ToString("N0")
                 + " tokens.");
         }
 
@@ -2411,10 +2413,10 @@ public static class ApiEndpoints
         }
 
         contextWindow ??= profile.ConfiguredContextWindow;
-        if (contextWindow is null || contextWindow < AiProviderService.ContextWarningThreshold)
+        if (contextWindow is null || contextWindow < AiProviderService.MinimumContextWindow)
         {
             return new(null, null, null, null, "Local context size must be at least "
-                + AiProviderService.ContextWarningThreshold.ToString("N0") + " tokens for Local Codex.");
+                + AiProviderService.MinimumContextWindow.ToString("N0") + " tokens for Local Codex.");
         }
 
         if (profile.ConfiguredContextWindow is { } configuredContextWindow
@@ -2454,11 +2456,11 @@ public static class ApiEndpoints
         }
 
         if (profile.ConfiguredContextWindow is not { } configuredContextWindow
-            || configuredContextWindow < AiProviderService.ContextWarningThreshold)
+            || configuredContextWindow < AiProviderService.MinimumContextWindow)
         {
             return "Local Codex requires a configured Local AI context window of at least "
-                + AiProviderService.ContextWarningThreshold.ToString("N0")
-                + " tokens for reliable project prompts.";
+                + AiProviderService.MinimumContextWindow.ToString("N0")
+                + " tokens.";
         }
 
         return null;

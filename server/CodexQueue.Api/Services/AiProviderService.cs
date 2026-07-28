@@ -70,8 +70,10 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
 {
     public const string LocalPlaceholderApiKey = "local-llm";
     public const string LocalApiKeyPlaceholder = LocalPlaceholderApiKey;
-    // Local Codex runs need a large project prompt window. 32K is the supported
-    // minimum; 64K remains the preferred default for multi-step work.
+    // 4K is the smallest selectable context. 32K remains the recommended
+    // threshold for multi-step project work, where the initial instructions,
+    // tool results, and file contents otherwise compete for a small window.
+    public const int MinimumContextWindow = 4_096;
     public const int ContextWarningThreshold = 32_768;
     public const int RecommendedContextWindow = 65_536;
     private const int MaximumModelCatalogBytes = 2 * 1024 * 1024;
@@ -281,7 +283,7 @@ public sealed class AiProviderService(IHttpClientFactory httpClientFactory)
             configuredContextWindow,
             ContextWarningThreshold,
             RecommendedContextWindow,
-            "The configured context window is below the "
+            "The configured context window is below the recommended "
             + ContextWarningThreshold.ToString("N0", CultureInfo.InvariantCulture)
             + "-token minimum required for reliable Local Codex project prompts.");
     }

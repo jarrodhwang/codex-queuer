@@ -137,7 +137,13 @@ public sealed class LocalCodexQueueAgentRunner(
             throw new InvalidOperationException("Selected model is not installed on the Local AI server.");
         }
 
-        if (selectedModel.ToolSupportKnown && !selectedModel.SupportsTools)
+        // Ollama's model metadata frequently omits tool capability information
+        // even when its OpenAI-compatible endpoint can serve tool calls. Do not
+        // reject those models solely from that incomplete metadata; other Local
+        // server types retain the explicit capability guard.
+        if (profile.LocalAiServerType != LocalAiServerType.Ollama
+            && selectedModel.ToolSupportKnown
+            && !selectedModel.SupportsTools)
         {
             throw new InvalidOperationException(
                 selectedModel.Name
@@ -148,7 +154,7 @@ public sealed class LocalCodexQueueAgentRunner(
         if (!string.IsNullOrWhiteSpace(context.Run.ModelSpeed))
         {
             if (!int.TryParse(context.Run.ModelSpeed, out var requestedContextWindow)
-                || requestedContextWindow < AiProviderService.ContextWarningThreshold
+                || requestedContextWindow < AiProviderService.MinimumContextWindow
                 || requestedContextWindow > contextWindow)
             {
                 throw new InvalidOperationException(
@@ -164,6 +170,12 @@ public sealed class LocalCodexQueueAgentRunner(
             throw new InvalidOperationException(
                 "The saved Local context size exceeds the selected model's advertised limit.");
         }
+
+        await onOutput(
+            "Using Local context size: "
+            + contextWindow.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)
+            + " tokens."
+            + Environment.NewLine);
 
         var runtimeModel = await providerService.PrepareModelForContextAsync(
             profile,

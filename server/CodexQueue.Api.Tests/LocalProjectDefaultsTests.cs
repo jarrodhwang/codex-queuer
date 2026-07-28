@@ -65,7 +65,7 @@ public sealed class LocalProjectDefaultsTests
     }
 
     [Fact]
-    public async Task NormalizeLocalProjectDefaults_RejectsContextSmallerThanLocalCodexMinimum()
+    public async Task NormalizeLocalProjectDefaults_AllowsSmallSupportedContext()
     {
         await using var fixture = await LocalDefaultsFixture.CreateAsync();
         var profile = new AiProviderProfile
@@ -84,8 +84,8 @@ public sealed class LocalProjectDefaultsTests
             fixture.Providers,
             CancellationToken.None);
 
-        Assert.Contains("at least", result.Error, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains(AiProviderService.ContextWarningThreshold.ToString("N0"), result.Error, StringComparison.Ordinal);
+        Assert.Null(result.Error);
+        Assert.Equal("16384", result.ContextWindow);
     }
 
     [Fact]
@@ -162,7 +162,7 @@ public sealed class LocalProjectDefaultsTests
             Name = "Small-context Ollama",
             Source = AiProviderSource.Local,
             BaseUrl = "http://localhost:11435",
-            ConfiguredContextWindow = AiProviderService.ContextWarningThreshold - 1,
+            ConfiguredContextWindow = AiProviderService.MinimumContextWindow - 1,
         };
         fixture.Db.AiProviderProfiles.AddRange(disabled, undersized);
         await fixture.Db.SaveChangesAsync();
@@ -180,7 +180,7 @@ public sealed class LocalProjectDefaultsTests
 
         Assert.Equal("Selected Local AI Server profile is disabled.", disabledResult.Error);
         Assert.Contains(
-            AiProviderService.ContextWarningThreshold.ToString("N0"),
+            AiProviderService.MinimumContextWindow.ToString("N0"),
             undersizedResult.Error,
             StringComparison.Ordinal);
     }

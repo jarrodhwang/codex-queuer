@@ -99,7 +99,7 @@ public sealed class LocalCodexQueueAgentRunnerTests
             profile,
             selectedModel,
             modelEffort: "high",
-            contextWindow: "32768",
+            contextWindow: "4096",
             priorSessionId,
             PermissionMode.FullAccess);
         var streamed = new List<string>();
@@ -119,7 +119,7 @@ public sealed class LocalCodexQueueAgentRunnerTests
         Assert.Equal(serverType, invocation.ServerType);
         Assert.Equal(normalizedBaseUrl, invocation.BaseUrl);
         Assert.Equal(selectedModel, invocation.Model);
-        Assert.Equal(32_768, invocation.ContextWindow);
+        Assert.Equal(4_096, invocation.ContextWindow);
         Assert.Equal("high", invocation.ModelEffort);
         Assert.Equal(priorSessionId, invocation.CodexSessionId);
         Assert.Equal(context.Prompt, invocation.Prompt);
@@ -133,7 +133,9 @@ public sealed class LocalCodexQueueAgentRunnerTests
                 selectedModel),
             result.LocalCodexSessionRouteKey);
         Assert.Null(result.CodexSessionId);
-        Assert.Equal(["target-stream"], streamed);
+        Assert.Equal(
+            ["Using Local context size: 4,096 tokens." + Environment.NewLine, "target-stream"],
+            streamed);
     }
 
     [Fact]
@@ -170,7 +172,7 @@ public sealed class LocalCodexQueueAgentRunnerTests
     }
 
     [Fact]
-    public async Task RunAsync_RejectsModelThatAdvertisesNoToolCalling()
+    public async Task RunAsync_AllowsOllamaModelThatAdvertisesNoToolCalling()
     {
         var profile = LocalProfile(LocalAiServerType.Ollama);
         var targetRunner = new RecordingTargetCommandRunner();
@@ -194,20 +196,19 @@ public sealed class LocalCodexQueueAgentRunnerTests
             targetRunner,
             providerService);
 
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            runner.RunAsync(
-                CreateContext(
-                    profile,
-                    model: "gemma3:4b",
-                    modelEffort: null,
-                    contextWindow: "65536",
-                    sessionId: null,
-                    PermissionMode.FullAccess),
-                _ => Task.CompletedTask,
-                CancellationToken.None));
+        await runner.RunAsync(
+            CreateContext(
+                profile,
+                model: "gemma3:4b",
+                modelEffort: null,
+                contextWindow: "65536",
+                sessionId: null,
+                PermissionMode.FullAccess),
+            _ => Task.CompletedTask,
+            CancellationToken.None);
 
-        Assert.Contains("does not advertise tool calling support", error.Message);
-        Assert.Null(targetRunner.Invocation);
+        var invocation = Assert.IsType<LocalInvocation>(targetRunner.Invocation);
+        Assert.Equal("gemma3:4b", invocation.Model);
     }
 
     [Fact]
