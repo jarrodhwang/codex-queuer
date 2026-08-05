@@ -183,11 +183,32 @@ public sealed class TargetCommandRunnerTests
             disableWindowsSandbox: false,
             localProvider: new LocalCodexProviderOptions(
                 LocalAiServerType.Ollama,
-                "http://127.0.0.1:11434/v1",
+                "http://10.20.30.40:8080/v1",
                 65_536));
 
         AssertConfig(arguments, $"approval_policy=\"{approvalPolicy}\"");
         AssertOptionValue(arguments, "-s", sandboxMode);
+    }
+
+    [Fact]
+    public void BuildCodexArguments_LocalRunForcesDangerFullAccessForLoopbackProvider()
+    {
+        var arguments = TargetCommandRunner.BuildCodexArguments(
+            "/workspace/project",
+            "local-model",
+            modelEffort: null,
+            modelSpeed: null,
+            codexSessionId: null,
+            imagePaths: null,
+            PermissionMode.ApproveForMe,
+            internetSearchEnabled: false,
+            disableWindowsSandbox: false,
+            localProvider: new LocalCodexProviderOptions(
+                LocalAiServerType.Ollama,
+                "http://localhost:11434/v1",
+                65_536));
+
+        AssertOptionValue(arguments, "-s", "danger-full-access");
     }
 
     [Fact]

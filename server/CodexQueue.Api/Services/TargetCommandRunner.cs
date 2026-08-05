@@ -1463,6 +1463,33 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
         return false;
     }
 
+    private static string ResolveSandboxMode(
+        PermissionMode permissionMode,
+        bool disableWindowsSandbox,
+        LocalCodexProviderOptions? localProvider)
+    {
+        if (permissionMode == PermissionMode.ReadOnly)
+        {
+            return "read-only";
+        }
+
+        if (permissionMode == PermissionMode.FullAccess
+            || disableWindowsSandbox
+            || IsLocalLoopbackProvider(localProvider))
+        {
+            return "danger-full-access";
+        }
+
+        return "workspace-write";
+    }
+
+    private static bool IsLocalLoopbackProvider(LocalCodexProviderOptions? localProvider)
+    {
+        return localProvider is not null
+               && Uri.TryCreate(localProvider.BaseUrl, UriKind.Absolute, out var uri)
+               && uri.IsLoopback;
+    }
+
     private static string StripCommandPreview(string output)
     {
         var newline = output.IndexOf(Environment.NewLine, StringComparison.Ordinal);
@@ -1640,15 +1667,17 @@ public sealed class TargetCommandRunner(ILogger<TargetCommandRunner> logger) : I
 
         if (string.IsNullOrWhiteSpace(codexSessionId))
         {
+            var sandboxMode = ResolveSandboxMode(permissionMode, disableWindowsSandbox, localProvider);
             arguments.Add("-C");
             arguments.Add(projectPath);
             arguments.Add("-s");
-            arguments.Add(permissionMode == PermissionMode.ReadOnly ? "read-only" : permissionMode == PermissionMode.FullAccess || disableWindowsSandbox ? "danger-full-access" : "workspace-write");
+            arguments.Add(sandboxMode);
         }
         else
         {
+            var sandboxMode = ResolveSandboxMode(permissionMode, disableWindowsSandbox, localProvider);
             arguments.Add("-c");
-            arguments.Add("sandbox_mode=\"" + (permissionMode == PermissionMode.ReadOnly ? "read-only" : permissionMode == PermissionMode.FullAccess || disableWindowsSandbox ? "danger-full-access" : "workspace-write") + "\"");
+            arguments.Add("sandbox_mode=\"" + sandboxMode + "\"");
             arguments.Add(codexSessionId);
         }
 

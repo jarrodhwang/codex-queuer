@@ -137,13 +137,9 @@ public sealed class LocalCodexQueueAgentRunner(
             throw new InvalidOperationException("Selected model is not installed on the Local AI server.");
         }
 
-        // Ollama's model metadata frequently omits tool capability information
-        // even when its OpenAI-compatible endpoint can serve tool calls. Do not
-        // reject those models solely from that incomplete metadata; other Local
-        // server types retain the explicit capability guard.
-        if (profile.LocalAiServerType != LocalAiServerType.Ollama
-            && selectedModel.ToolSupportKnown
-            && !selectedModel.SupportsTools)
+        // Some older local endpoints omit tooling metadata, so unknown tool support
+        // remains routable. Reject only models that explicitly do not support tools.
+        if (selectedModel.ToolSupportKnown && !selectedModel.SupportsTools)
         {
             throw new InvalidOperationException(
                 selectedModel.Name

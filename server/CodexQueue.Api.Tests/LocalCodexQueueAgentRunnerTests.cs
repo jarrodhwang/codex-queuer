@@ -173,7 +173,7 @@ public sealed class LocalCodexQueueAgentRunnerTests
     }
 
     [Fact]
-    public async Task RunAsync_AllowsOllamaModelThatAdvertisesNoToolCalling()
+    public async Task RunAsync_RejectsModelThatAdvertisesNoToolCalling()
     {
         var profile = LocalProfile(LocalAiServerType.Ollama);
         var targetRunner = new RecordingTargetCommandRunner();
@@ -197,7 +197,7 @@ public sealed class LocalCodexQueueAgentRunnerTests
             targetRunner,
             providerService);
 
-        await runner.RunAsync(
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => runner.RunAsync(
             CreateContext(
                 profile,
                 model: "gemma3:4b",
@@ -206,10 +206,13 @@ public sealed class LocalCodexQueueAgentRunnerTests
                 sessionId: null,
                 PermissionMode.FullAccess),
             _ => Task.CompletedTask,
-            CancellationToken.None);
+            CancellationToken.None));
 
-        var invocation = Assert.IsType<LocalInvocation>(targetRunner.Invocation);
-        Assert.Equal("gemma3:4b", invocation.Model);
+        Assert.Contains(
+            "does not advertise tool calling support",
+            exception.Message,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Null(targetRunner.Invocation);
     }
 
     [Fact]

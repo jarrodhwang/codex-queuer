@@ -2134,9 +2134,7 @@ public static class ApiEndpoints
         }
         normalizedModel = selectedModel.Model;
 
-        if (profile.LocalAiServerType != LocalAiServerType.Ollama
-            && selectedModel.ToolSupportKnown
-            && !selectedModel.SupportsTools)
+        if (selectedModel.ToolSupportKnown && !selectedModel.SupportsTools)
         {
             return new RunnerSelectionValidation(
                 profile,
