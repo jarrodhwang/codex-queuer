@@ -6597,6 +6597,10 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
   const [reportOpen, setReportOpen] = useState(false)
   const separateCommitRun = request ? latestRunOfKind(request.runs, 'Commit') : undefined
   const completionMessage = request?.status === 'Succeeded' ? completionMessageForRequest(request) : null
+  const completionAt = request ? latestRequestCompletionAt(request) : null
+  const totalElapsed = request?.status === 'Succeeded'
+    ? requestDurationLabel(request, activeRunFor(request), now)
+    : null
   const showRunDetails = !completionMessage
   const reportAvailable = request?.status === 'Running' || request?.status === 'Succeeded'
 
@@ -6662,7 +6666,10 @@ function QueueRequestDetails({ request, now }: { request?: CodexRequest; now: nu
               <div className="completion-summary-head">
                 <div>
                   <div className="completion-title">Completed</div>
-                  <div className="meta">{request.finishedAt ? formatDate(request.finishedAt) : 'Succeeded'}</div>
+                  <div className="meta">
+                    {completionAt ? formatDate(completionAt) : 'Succeeded'}
+                    {totalElapsed ? ` · Total elapsed ${totalElapsed}` : ''}
+                  </div>
                 </div>
                 <StatusBadge status="Succeeded" />
               </div>
@@ -6827,7 +6834,7 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
       cancelled = true
     }
   }, [request.projectId])
-  const finishedAt = request.finishedAt ?? (request.status === 'Succeeded' ? request.runs.map((run) => run.finishedAt).filter(Boolean).sort().at(-1) : null)
+  const finishedAt = request.status === 'Succeeded' ? latestRequestCompletionAt(request) : request.finishedAt
   const elapsed = formatDurationBetween(
     request.startedAt ?? request.createdAt,
     finishedAt ?? (request.status === 'Running' ? new Date(now).toISOString() : null),
@@ -6885,7 +6892,10 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
                   <div className="section-kicker">Detailed procedure</div>
                   <h4>How {agentName} completed the work</h4>
                 </div>
-                <span className="work-report-count">{request.runs.length}</span>
+                <div className="work-report-procedure-meta">
+                  {elapsed && <span className="meta">Total elapsed {elapsed}</span>}
+                  <span className="work-report-count">{request.runs.length}</span>
+                </div>
               </div>
               <div className="work-report-procedure-scroll" tabIndex={0} aria-label="Scrollable Codex procedure details">
                 {request.runs.length > 0 ? request.runs.map((run) => (
@@ -6936,7 +6946,7 @@ function WorkReportDialog({ request, now, onClose }: { request: CodexRequest; no
               <dl className="work-report-facts">
                 <div><dt>Project</dt><dd>{request.projectName}</dd></div>
                 <div><dt>Stage</dt><dd>{stageLabel(request)}</dd></div>
-                <div><dt>Elapsed</dt><dd>{elapsed ?? 'Not started'}</dd></div>
+                <div><dt>Total elapsed</dt><dd>{elapsed ?? 'Not started'}</dd></div>
                 <div><dt>{finishedAt ? 'Finished' : 'Started'}</dt><dd>{formatDate(finishedAt ?? request.startedAt ?? request.createdAt)}</dd></div>
               </dl>
               <RequestExecutionChips
@@ -7205,17 +7215,19 @@ function runDurationLabel(run: CodexRun, now: number) {
 function requestDurationLabel(request: CodexRequest, activeRun: CodexRun | undefined, now: number) {
   if (request.status === 'Succeeded') {
     const startAt = request.startedAt ?? request.createdAt
-    const endAt = request.finishedAt
-      ?? request.runs
-        .map((run) => run.finishedAt)
-        .filter((value): value is string => Boolean(value))
-        .sort()
-        .at(-1)
+    const endAt = latestRequestCompletionAt(request)
 
     return formatDurationBetween(startAt, endAt)
   }
 
   return activeRun ? runDurationLabel(activeRun, now) : null
+}
+
+function latestRequestCompletionAt(request: CodexRequest) {
+  return [request.finishedAt, ...request.runs.map((run) => run.finishedAt)]
+    .filter((value): value is string => Boolean(value))
+    .sort((left, right) => Date.parse(left) - Date.parse(right))
+    .at(-1) ?? null
 }
 
 function runEmptyText(run: CodexRun, now: number) {
@@ -7337,8 +7349,12 @@ function RequestHistory({
         <div className="history-list" aria-label="History requests">
           {visibleRequests.slice(0, 50).map((request) => {
             const commitRun = latestRunWithCommitMetadata(request.runs)
-            const completedAt = request.deletedAt ?? request.finishedAt ?? request.createdAt
-            const duration = formatDurationBetween(request.startedAt ?? request.createdAt, request.finishedAt ?? request.deletedAt ?? request.createdAt)
+            const completionAt = latestRequestCompletionAt(request)
+            const completedAt = request.deletedAt ?? completionAt ?? request.createdAt
+            const duration = formatDurationBetween(
+              request.startedAt ?? request.createdAt,
+              completionAt ?? request.deletedAt ?? request.createdAt,
+            )
             return (
               <article
                 key={request.id}

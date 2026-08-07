@@ -5735,6 +5735,14 @@
   font-weight: 800;
 }
 
+.work-report-procedure-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
 .work-report-note {
   display: grid;
   gap: 0.65rem;
