@@ -782,6 +782,17 @@ public sealed class QueueWorker(
             : request.ExecutionRunner == ExecutionRunner.OpenHandsCli
                 ? ValidateLocalCodexExecutionTarget(request, project, machine)
                 : project.Path;
+        if (executionRunner == ExecutionRunner.OpenHandsCli)
+        {
+            var localPermissionError = LocalCodexPermissionPolicy.Validate(
+                request.PermissionMode,
+                (kind == RunKind.Commit && request.ExecutionRunner == ExecutionRunner.CodexCli)
+                    || request.OpenHandsAlwaysApproveConfirmed);
+            if (localPermissionError is not null)
+            {
+                throw new InvalidOperationException(localPermissionError);
+            }
+        }
         var attachmentsCleaned = false;
         var attachmentMaterializationAttempted = false;
 

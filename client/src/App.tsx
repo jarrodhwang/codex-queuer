@@ -3430,6 +3430,7 @@ function QueueComposer({
   const [machineResourceError, setMachineResourceError] = useState('')
   const [machineResourceRefreshVersion, setMachineResourceRefreshVersion] = useState(0)
   const [approvalDialogOpen, setApprovalDialogOpen] = useState(false)
+  const [localCodexApprovalDialogOpen, setLocalCodexApprovalDialogOpen] = useState(false)
   const [composerValidationError, setComposerValidationError] = useState('')
   const [prompt, setPrompt] = useState('')
   const [attachments, setAttachments] = useState<LocalQueueAttachment[]>([])
@@ -3945,6 +3946,9 @@ function QueueComposer({
     && !selectedLocalModelMetadata.supportsTools
     ? `${selectedLocalModelMetadata.name} does not support tool calling. Choose a tool-capable model for Local Codex.`
     : ''
+  const localPermissionBlockingMessage = permissionMode !== 'FullAccess'
+    ? 'Local Codex requires Full access before queueing a coding task.'
+    : ''
   const selectedCommitLocalModelMetadata = localModelOptions.find((model) => model.id === commitModel.model)
   const commitLocalContextLimit = Math.min(
     maximumLocalCodexContextSize,
@@ -4019,7 +4023,7 @@ function QueueComposer({
                   ? 'The selected model is not installed on the Local AI server.'
                   : localModelWarning
                     ? localModelWarning
-                    : localCodexBlockingMessage
+                    : localCodexBlockingMessage || localPermissionBlockingMessage
   const commitLocalBlockingMessage = !generateCommit || !separateCommitSession || commitRunnerChoice !== 'Local'
     ? ''
     : !selectedLocalProfile
@@ -4278,7 +4282,7 @@ function QueueComposer({
     setComposerValidationError('')
   }
 
-  const queueRequest = async () => {
+  const queueRequest = async (localCodexFullAccessConfirmed = false) => {
     if (!editingRequest) {
       requestCompletionNotificationPermission()
     }
@@ -4309,7 +4313,7 @@ function QueueComposer({
         internetSearchEnabled,
         executionRunner: isLocalRunner ? 'OpenHandsCli' : 'CodexCli',
         providerProfileId: isLocalRunner ? selectedLocalProfile?.id ?? null : null,
-        openHandsAlwaysApproveConfirmed: false,
+        openHandsAlwaysApproveConfirmed: isLocalRunner && localCodexFullAccessConfirmed,
         commitModel: separateCommitSession ? commitModel.model : null,
         commitModelEffort: separateCommitSession ? commitModel.effort : null,
         commitModelSpeed: separateCommitSession ? commitModel.speed : null,
@@ -4414,6 +4418,12 @@ function QueueComposer({
         setComposerValidationError(localBlockingMessage)
         return
       }
+      if (permissionMode !== 'FullAccess') {
+        setComposerValidationError('Local Codex requires Full access before queueing a coding task.')
+        return
+      }
+      setLocalCodexApprovalDialogOpen(true)
+      return
     }
     if (commitLocalBlockingMessage) {
       setComposerValidationError(commitLocalBlockingMessage)
@@ -5036,6 +5046,7 @@ function QueueComposer({
                 disabled={!defaultsChanged
                   || savingDefaults
                   || (isLocalRunner && (!selectedLocalProfile || !localModel || Boolean(localContextBlockingMessage)))
+                  || (isLocalRunner && Boolean(localPermissionBlockingMessage))
                   || Boolean(commitLocalBlockingMessage)}
               >
                 <Check size={13} /> {savingDefaults ? 'Saving' : 'Save defaults'}
@@ -5070,6 +5081,24 @@ function QueueComposer({
           onConfirm={async () => {
             setApprovalDialogOpen(false)
             await queueRequest()
+          }}
+        />
+      )}
+      {localCodexApprovalDialogOpen && (
+        <ConfirmDialog
+          title="Allow Local Codex full access?"
+          description={(
+            <>
+              Codex CLI will run with <strong>Full access</strong> on <strong>{selectedProject.machineName}</strong>.
+              It can read, create, modify, and delete files in the selected project using that machine account's permissions.
+              Queueing this Local request still requires explicit confirmation.
+            </>
+          )}
+          confirmLabel="Allow and queue"
+          onCancel={() => setLocalCodexApprovalDialogOpen(false)}
+          onConfirm={async () => {
+            setLocalCodexApprovalDialogOpen(false)
+            await queueRequest(true)
           }}
         />
       )}

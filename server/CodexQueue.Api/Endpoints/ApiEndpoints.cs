@@ -1449,7 +1449,9 @@ public static class ApiEndpoints
                 project.Path,
                 db,
                 providers,
-                cancellationToken);
+                cancellationToken,
+                alwaysApproveConfirmed: input.ExecutionRunner != ExecutionRunner.OpenHandsCli
+                    || input.OpenHandsAlwaysApproveConfirmed);
             if (runnerValidation.Profile is not null)
             {
                 await db.SaveChangesAsync(cancellationToken);
@@ -1472,7 +1474,9 @@ public static class ApiEndpoints
                     project.Path,
                     db,
                     providers,
-                    cancellationToken);
+                    cancellationToken,
+                    alwaysApproveConfirmed: input.ExecutionRunner != ExecutionRunner.OpenHandsCli
+                        || input.OpenHandsAlwaysApproveConfirmed);
                 if (commitValidation.Error is not null)
                 {
                     return Results.BadRequest(new { error = "Separate commit session: " + commitValidation.Error });
@@ -1632,7 +1636,9 @@ public static class ApiEndpoints
                 request.Project?.Path,
                 db,
                 providers,
-                cancellationToken);
+                cancellationToken,
+                alwaysApproveConfirmed: executionRunner != ExecutionRunner.OpenHandsCli
+                    || input.OpenHandsAlwaysApproveConfirmed);
             if (runnerValidation.Profile is not null)
             {
                 await db.SaveChangesAsync(cancellationToken);
@@ -1655,7 +1661,9 @@ public static class ApiEndpoints
                     request.Project?.Path,
                     db,
                     providers,
-                    cancellationToken);
+                    cancellationToken,
+                    alwaysApproveConfirmed: executionRunner != ExecutionRunner.OpenHandsCli
+                        || input.OpenHandsAlwaysApproveConfirmed);
                 if (commitValidation.Error is not null)
                 {
                     return Results.BadRequest(new { error = "Separate commit session: " + commitValidation.Error });
@@ -2044,7 +2052,8 @@ public static class ApiEndpoints
         string? projectPath,
         AppDbContext db,
         IAiProviderService providers,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool alwaysApproveConfirmed = true)
     {
         var normalizedModel = model?.Trim() ?? "";
         if (!Enum.IsDefined(typeof(ExecutionRunner), executionRunner))
@@ -2060,6 +2069,14 @@ public static class ApiEndpoints
         if (executionRunner == ExecutionRunner.CodexCli)
         {
             return new RunnerSelectionValidation(null, normalizedModel, null);
+        }
+
+        var localPermissionError = LocalCodexPermissionPolicy.Validate(
+            permissionMode,
+            alwaysApproveConfirmed);
+        if (localPermissionError is not null)
+        {
+            return new RunnerSelectionValidation(null, normalizedModel, localPermissionError);
         }
 
         if (normalizedModel.Length > 256 || normalizedModel.Any(char.IsControl))
