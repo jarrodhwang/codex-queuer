@@ -5737,7 +5737,7 @@ function RequestCard({
   const requestUsageDelay = request.retryAfter ? formatRemainingTime(request.retryAfter, now) : null
   const isCanceling = request.status === 'CancelRequested'
   const activeRun = activeRunFor(request)
-  const duration = activeRun ? runDurationLabel(activeRun, now) : null
+  const duration = requestDurationLabel(request, activeRun, now)
 
   return (
     <article
@@ -7200,6 +7200,22 @@ function runDurationLabel(run: CodexRun, now: number) {
   }
 
   return null
+}
+
+function requestDurationLabel(request: CodexRequest, activeRun: CodexRun | undefined, now: number) {
+  if (request.status === 'Succeeded') {
+    const startAt = request.startedAt ?? request.createdAt
+    const endAt = request.finishedAt
+      ?? request.runs
+        .map((run) => run.finishedAt)
+        .filter((value): value is string => Boolean(value))
+        .sort()
+        .at(-1)
+
+    return formatDurationBetween(startAt, endAt)
+  }
+
+  return activeRun ? runDurationLabel(activeRun, now) : null
 }
 
 function runEmptyText(run: CodexRun, now: number) {
